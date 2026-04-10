@@ -1,0 +1,126 @@
+set_slot_range:
+  name: Set slot range
+  description: Override a time range with a specific charge/discharge action.
+  fields:
+    start_time:
+      name: Start time
+      description: Start time in HH:MM format (e.g., "01:00").
+      required: true
+      example: "01:00"
+      selector:
+        time:
+    end_time:
+      name: End time
+      description: End time in HH:MM format (e.g., "05:00").
+      required: true
+      example: "05:00"
+      selector:
+        time:
+    action:
+      name: Action
+      description: The override action for the time range.
+      required: true
+      example: charge-low
+      selector:
+        select:
+          options:
+            - charge-low
+            - charge-high
+            - charge-100
+            - idle
+            - discharge-low
+            - discharge-high
+            - clear
+    high_marker:
+      name: High marker
+      description: High battery threshold percentage (default 72).
+      default: 72
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    low_marker:
+      name: Low marker
+      description: Low battery threshold percentage (default 20).
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+
+apply_bulk_schedule:
+  name: Apply bulk schedule
+  description: Push a full 96-slot override array to the battery. Useful for EMHASS/AIO integration.
+  fields:
+    slots:
+      name: Slots
+      description: "Array of 96 integer values (0-255). 128 = no override, 0 = idle, 1-100 = charge at N%, >128 = discharge."
+      required: true
+      example: "[128, 128, 128, 128, 20, 20, 20, 20, 72, 72, 72, 72, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 184, 184, 184, 184, 184, 184, 184, 184, 128, 128, 128, 128, 0, 0, 0, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]"
+      selector:
+        object:
+    high_marker:
+      name: High marker
+      description: High battery threshold percentage (default 72).
+      default: 72
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    low_marker:
+      name: Low marker
+      description: Low battery threshold percentage (default 20).
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+
+reset_to_internal:
+  name: Reset to internal
+  description: Clear overrides, returning to the AI schedule.
+  fields:
+    start_time:
+      name: Start time
+      description: "Start time in HH:MM format. Required unless 'all' is true."
+      example: "01:00"
+      selector:
+        time:
+    end_time:
+      name: End time
+      description: "End time in HH:MM format. Required unless 'all' is true."
+      example: "05:00"
+      selector:
+        time:
+    all:
+      name: Reset all
+      description: If true, reset all 96 slots. Ignores start_time/end_time.
+      default: false
+      selector:
+        boolean:
+    high_marker:
+      name: High marker
+      description: High battery threshold percentage (default 72).
+      default: 72
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    low_marker:
+      name: Low marker
+      description: Low battery threshold percentage (default 20).
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+
+refresh_schedule:
+  name: Refresh schedule
+  description: Manually trigger a schedule and override data refresh.

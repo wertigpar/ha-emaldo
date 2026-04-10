@@ -1,0 +1,11 @@
+{
+  "domain": "emaldo",
+  "name": "Emaldo Battery",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/emaldo/ha-emaldo",
+  "iot_class": "cloud_polling",
+  "requirements": ["requests>=2.28.0", "pycryptodome>=3.15.0", "cramjam>=2.6.0"],
+  "version": "0.1.0"
+}

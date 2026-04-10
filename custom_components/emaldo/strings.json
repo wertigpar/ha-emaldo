@@ -1,0 +1,53 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Emaldo Battery",
+        "description": "Connect your Emaldo battery system.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "home_id": "Home ID (leave empty to auto-detect)",
+          "app_id": "App ID",
+          "app_secret": "App Secret",
+          "app_version": "App Version"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Unable to connect to Emaldo API.",
+      "no_devices": "No battery devices found in the specified home."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schedule Polling",
+        "description": "Configure when the integration checks for schedule updates.",
+        "data": {
+          "schedule_start_hour": "Start hour (0-23)",
+          "schedule_start_minute": "Start minute (0-59)",
+          "schedule_interval": "Repeat interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_soc": { "name": "Battery SoC" },
+      "battery_capacity": { "name": "Battery capacity" },
+      "battery_charged_today": { "name": "Battery charged today" },
+      "battery_discharged_today": { "name": "Battery discharged today" },
+      "battery_power": { "name": "Battery power" },
+      "grid_power": { "name": "Grid power" },
+      "load_power": { "name": "Load power" },
+      "plan_source": { "name": "Plan source" },
+      "active_mode": { "name": "Active mode" },
+      "schedule_chart": { "name": "Schedule chart" }
+    }
+  }
+}
