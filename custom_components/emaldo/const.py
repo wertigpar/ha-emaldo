@@ -7,7 +7,9 @@ CONF_APP_ID = "app_id"
 CONF_APP_SECRET = "app_secret"
 CONF_APP_VERSION = "app_version"
 
-DEFAULT_SCAN_INTERVAL = 60  # seconds
+DEFAULT_SCAN_INTERVAL = 60  # seconds (REST battery + power)
+REALTIME_SCAN_INTERVAL = 10  # seconds (E2E power flow, persistent session)
+KEEPALIVE_INTERVAL = 15  # seconds (E2E relay session keepalive)
 
 # Schedule polling configuration
 CONF_SCHEDULE_START_HOUR = "schedule_start_hour"
