@@ -1606,31 +1606,50 @@ class PersistentE2ESession:
                     continue
                 return None
 
-            decrypted = decrypt_response(
-                resp, self._creds["chat_secret"],
-                payload_validator=_is_power_flow_payload,
-            )
-            result = parse_power_flow(decrypted)
+            result = self._try_parse_power_flow(resp)
             if result is not None:
                 return result
 
-            # Drain a few more in case we got an echo/ACK first
-            for _ in range(5):
+            # Drain up to 10 more packets in case of interleaved responses
+            # from the keepalive / subscription channel.
+            drained = 0
+            while drained < 10:
                 try:
                     more_resp, _ = self._sock.recvfrom(4096)
-                    decrypted = decrypt_response(
-                        more_resp, self._creds["chat_secret"],
-                        payload_validator=_is_power_flow_payload,
-                    )
-                    result = parse_power_flow(decrypted)
-                    if result is not None:
-                        return result
+                    drained += 1
                 except socket.timeout:
                     break
+                if self._is_session_expired(more_resp):
+                    if self._log:
+                        self._log("Session expired mid-drain, reconnecting")
+                    break
+                result = self._try_parse_power_flow(more_resp)
+                if result is not None:
+                    return result
+
+            # If we still have nothing on the first attempt, force a reconnect
+            # and try once more. This covers the case where the relay has
+            # silently lost our subscription binding.
+            if attempt == 0:
+                if self._log:
+                    self._log("No power flow response after drain, reconnecting")
+                self._reconnect()
+                continue
 
             return None
 
         return None
+
+    def _try_parse_power_flow(self, resp: bytes) -> dict | None:
+        """Decrypt+parse a response as a power flow payload. Returns None on mismatch."""
+        try:
+            decrypted = decrypt_response(
+                resp, self._creds["chat_secret"],
+                payload_validator=_is_power_flow_payload,
+            )
+        except Exception:  # noqa: BLE001 - best-effort parse
+            return None
+        return parse_power_flow(decrypted)
 
     def close(self) -> None:
         """Close the socket and mark the session closed."""

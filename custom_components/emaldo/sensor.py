@@ -16,6 +16,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -141,23 +142,38 @@ def _load_energy_today(data: dict[str, Any]) -> float | None:
 
 
 def _battery_power(data: dict[str, Any]) -> float | None:
-    """Battery power in W (positive = charging, negative = discharging)."""
+    """Battery power in W — HA Energy Dashboard "Standard" convention.
+
+    HA is house-centric: positive = flowing *into* the house, so positive
+    means the battery is *discharging* (feeding home) and negative means
+    *charging*. The Emaldo wire value already matches this, so we pass it
+    through unchanged. Users can select "Standard" in the Energy Dashboard
+    battery setup without needing the "Inverted" option.
+    """
     if isinstance(data, dict):
         return data.get("battery_w")
     return None
 
 
 def _grid_power(data: dict[str, Any]) -> float | None:
-    """Grid power in W (positive = importing, negative = exporting)."""
+    """Grid power in W — HA convention: positive = importing, negative = exporting.
+
+    The Emaldo wire value already matches this convention.
+    """
     if isinstance(data, dict):
         return data.get("grid_w")
     return None
 
 
 def _dual_power(data: dict[str, Any]) -> float | None:
-    """Building consumption in W (negative = consuming)."""
+    """Home consumption in W — HA convention: positive = consuming.
+
+    The Emaldo wire value reports consumption as negative (a sink from the
+    home node's POV). We flip it so the sensor reads as a positive load.
+    """
     if isinstance(data, dict):
-        return data.get("dual_power_w")
+        w = data.get("dual_power_w")
+        return -w if w is not None else None
     return None
 
 
@@ -332,6 +348,9 @@ async def async_setup_entry(
             EmaldoSensor(realtime_coordinator, desc)
             for desc in POWER_CORE_REALTIME_DESCRIPTIONS
         )
+
+    # Diagnostic: realtime connection status
+    entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
 
     entities.append(EmaldoPlanSourceSensor(schedule_coordinator))
     entities.append(EmaldoActiveModeSensor(schedule_coordinator))
@@ -656,4 +675,77 @@ class EmaldoScheduleChartSensor(
             "schedule": sched_data,
             "slot_count": len(slots),
             "gap_minutes": gap,
+        }
+
+
+class EmaldoRealtimeStatusSensor(SensorEntity):
+    """Diagnostic sensor showing E2E realtime connection health."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Realtime connection"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:lan-connect"
+
+    def __init__(self, coordinator) -> None:
+        """Initialize the diagnostic sensor."""
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{coordinator.home_id}_realtime_status"
+
+    async def async_added_to_hass(self) -> None:
+        """Register for coordinator updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self._handle_coordinator_update)
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Update state when coordinator refreshes."""
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._coordinator.home_id)}
+            if not self._coordinator.device_id
+            else {(DOMAIN, self._coordinator.device_id)},
+            name=self._coordinator.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=self._coordinator.device_model,
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return current connection state."""
+        if self._coordinator.last_update_success:
+            return "connected"
+        return "reconnecting"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return statistics about the realtime connection."""
+        import datetime
+        c = self._coordinator
+
+        def _to_iso(ts: float | None) -> str | None:
+            if ts is None:
+                return None
+            return datetime.datetime.fromtimestamp(ts).isoformat()
+
+        success_rate = None
+        if c.stats_total_polls > 0:
+            success_rate = round(
+                100.0 * c.stats_successful_polls / c.stats_total_polls, 1
+            )
+
+        return {
+            "total_polls": c.stats_total_polls,
+            "successful_polls": c.stats_successful_polls,
+            "success_rate_pct": success_rate,
+            "empty_reads": c.stats_empty_reads,
+            "reconnects": c.stats_reconnects,
+            "keepalive_failures": c.stats_keepalive_failures,
+            "last_success": _to_iso(c.stats_last_success),
+            "last_failure": _to_iso(c.stats_last_failure),
+            "last_reconnect": _to_iso(c.stats_last_reconnect),
         }
