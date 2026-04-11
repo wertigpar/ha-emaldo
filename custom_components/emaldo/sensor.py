@@ -87,6 +87,59 @@ def _battery_discharged_today(data: dict[str, Any]) -> float | None:
     return round(total * 5 / 60 / 1000, 2)
 
 
+def _sum_series(series: dict | None, column: int, interval_min: int = 5) -> float | None:
+    """Sum a column from a 5-minute-interval power series and return kWh."""
+    if not isinstance(series, dict):
+        return None
+    entries = series.get("data", [])
+    if not entries:
+        return None
+    total = sum(e[column] for e in entries if len(e) > column)
+    return round(total * interval_min / 60 / 1000, 3)
+
+
+def _solar_energy_today(data: dict[str, Any]) -> float | None:
+    """Total solar energy produced today (sum of all MPPT strings)."""
+    solar_resp = data.get("solar")
+    if not isinstance(solar_resp, dict):
+        return None
+    series = solar_resp.get("mppt") if "mppt" in solar_resp else solar_resp
+    if not isinstance(series, dict):
+        return None
+    entries = series.get("data", [])
+    if not entries:
+        return None
+    # Sum all columns except the first (time offset)
+    ncols = len(entries[0]) - 1 if entries else 0
+    total = sum(
+        sum(e[i + 1] for i in range(ncols) if len(e) > i + 1)
+        for e in entries
+    )
+    return round(total * 5 / 60 / 1000, 3)
+
+
+def _grid_import_today(data: dict[str, Any]) -> float | None:
+    """Total grid import energy today.
+
+    The grid stats endpoint with ``get_real=True`` returns 13 columns per row:
+    ``[time_offset, import_W, ?, export_W, ?, phantom_W, 0, ...]``.
+    """
+    grid_resp = data.get("power", {}).get("grid")
+    return _sum_series(grid_resp, column=1)
+
+
+def _grid_export_today(data: dict[str, Any]) -> float | None:
+    """Total grid export energy today (col[3] of grid stats with get_real)."""
+    grid_resp = data.get("power", {}).get("grid")
+    return _sum_series(grid_resp, column=3)
+
+
+def _load_energy_today(data: dict[str, Any]) -> float | None:
+    """Total property load energy today (col[2] of usage stats)."""
+    usage_resp = data.get("power", {}).get("usage")
+    return _sum_series(usage_resp, column=2)
+
+
 def _battery_power(data: dict[str, Any]) -> float | None:
     """Battery power in W (positive = charging, negative = discharging)."""
     if isinstance(data, dict):
@@ -158,6 +211,42 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         value_fn=_battery_discharged_today,
     ),
+    EmaldoSensorEntityDescription(
+        key="solar_energy_today",
+        name="Solar energy today",
+        icon="mdi:solar-power",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_solar_energy_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="grid_import_today",
+        name="Grid import today",
+        icon="mdi:transmission-tower-import",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_grid_import_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="grid_export_today",
+        name="Grid export today",
+        icon="mdi:transmission-tower-export",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_grid_export_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="load_energy_today",
+        name="Load energy today",
+        icon="mdi:home-lightning-bolt",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_load_energy_today,
+    ),
 )
 
 # Sensors that read from the fast E2E realtime coordinator (power flow)
@@ -165,6 +254,7 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="battery_power",
         name="Battery power",
+        icon="mdi:battery-charging",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -173,6 +263,7 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="grid_power",
         name="Grid power",
+        icon="mdi:transmission-tower",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -181,6 +272,7 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="dual_power",
         name="Consumption",
+        icon="mdi:home-lightning-bolt",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -193,6 +285,7 @@ POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="solar_power",
         name="Solar power",
+        icon="mdi:solar-power",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -201,6 +294,7 @@ POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="car_charge_power",
         name="Car charge power",
+        icon="mdi:car-electric",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,

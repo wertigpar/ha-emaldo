@@ -121,9 +121,19 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 raise UpdateFailed(f"Error fetching Emaldo data: {err}") from err
 
+        # Solar MPPT stats — best-effort, not all devices have solar
+        solar = None
+        try:
+            solar = await self.hass.async_add_executor_job(
+                client.get_solar, self.home_id, self._device_id, self._model
+            )
+        except Exception as err:
+            _LOGGER.debug("Solar stats fetch failed: %s", err)
+
         return {
             "battery": battery,
             "power": power,
+            "solar": solar,
         }
 
 
