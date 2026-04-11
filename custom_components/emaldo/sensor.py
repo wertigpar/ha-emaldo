@@ -67,13 +67,19 @@ def _battery_soc(data: dict[str, Any]) -> float | None:
 
 
 def _battery_charged_today(data: dict[str, Any]) -> float | None:
+    """Total battery charge energy today in kWh.
+
+    The ``/bmt/stats/battery-v2/day/`` response has 6 columns per entry:
+    [minute_offset, discharge_W, charge_main_W, charge_aux_W, unused, state].
+    Charge is the sum of columns 2 (main, solar) and 3 (auxiliary/grid).
+    """
     bat_data = data.get("battery", {}).get("battery", {})
     if not isinstance(bat_data, dict):
         return None
     entries = bat_data.get("data", [])
     if not entries:
         return None
-    total = sum(e[3] + e[4] for e in entries if len(e) >= 5)
+    total = sum(e[2] + e[3] for e in entries if len(e) >= 4)
     return round(total * 5 / 60 / 1000, 2)
 
 
