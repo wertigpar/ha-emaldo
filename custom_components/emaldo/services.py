@@ -16,6 +16,10 @@ from .emaldo_lib.const import (
     DEFAULT_MARKER_LOW,
     encode_override_action,
 )
+from .emaldo_lib.e2e import (
+    EV_MODE_SCHEDULED,
+    set_ev_charging_mode_smart,
+)
 from .emaldo_lib.exceptions import EmaldoAuthError
 
 from .const import DOMAIN
@@ -37,6 +41,7 @@ SERVICE_SET_SLOT_RANGE = "set_slot_range"
 SERVICE_APPLY_BULK_SCHEDULE = "apply_bulk_schedule"
 SERVICE_RESET_TO_INTERNAL = "reset_to_internal"
 SERVICE_REFRESH_SCHEDULE = "refresh_schedule"
+SERVICE_SET_EV_SCHEDULE = "set_ev_schedule"
 
 SCHEMA_SET_SLOT_RANGE = vol.Schema(
     {
@@ -64,6 +69,20 @@ SCHEMA_APPLY_BULK_SCHEDULE = vol.Schema(
         vol.Optional("low_marker", default=DEFAULT_MARKER_LOW): vol.All(
             int, vol.Range(min=1, max=100)
         ),
+    }
+)
+
+SCHEMA_SET_EV_SCHEDULE = vol.Schema(
+    {
+        # Lists of hour integers 0-23 when EV charging is allowed.
+        # Empty list or omitted key means "no hours selected".
+        vol.Optional("weekdays", default=list): vol.All(
+            [vol.All(int, vol.Range(min=0, max=23))],
+        ),
+        vol.Optional("weekend", default=list): vol.All(
+            [vol.All(int, vol.Range(min=0, max=23))],
+        ),
+        vol.Optional("sync", default=False): cv.boolean,
     }
 )
 
@@ -282,6 +301,73 @@ async def async_handle_refresh_schedule(
         await coord.async_request_refresh()
 
 
+async def async_handle_set_ev_schedule(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Handle the set_ev_schedule service call.
+
+    Sets the EV charger's weekday and weekend hour schedule (when
+    charging is allowed). This switches the device into
+    ``EV_MODE_SCHEDULED`` and writes the 24h×2 hour bitmaps via the
+    ``SET_EV_CHARGING_MODE`` command (wire 0x22, 9-byte payload).
+
+    Input lists are hours 0-23 — e.g. ``[6, 7, 22, 23]`` enables
+    charging 06:00-08:00 and 22:00-00:00. Empty lists disable all hours
+    for that day type (which effectively means "never charge on that
+    day"; prefer picking a different mode instead).
+    """
+    weekday_hours = call.data.get("weekdays", [])
+    weekend_hours = call.data.get("weekend", [])
+    sync = call.data.get("sync", False)
+
+    weekdays = [0] * 24
+    for h in weekday_hours:
+        weekdays[h] = 1
+    weekend = [0] * 24
+    for h in weekend_hours:
+        weekend[h] = 1
+
+    def _do_set():
+        entries = hass.data.get(DOMAIN, {})
+        if not entries:
+            raise ValueError("No Emaldo integration configured")
+        entry_data = next(iter(entries.values()))
+        power_coord = entry_data["power"]
+        for attempt in range(2):
+            try:
+                client = power_coord._ensure_client()  # noqa: SLF001
+                creds = client.e2e_login(
+                    power_coord.home_id,
+                    power_coord._device_id,  # noqa: SLF001
+                    power_coord._model,      # noqa: SLF001
+                )
+                return set_ev_charging_mode_smart(
+                    creds, EV_MODE_SCHEDULED,
+                    weekdays=weekdays, weekend=weekend, sync=sync,
+                )
+            except EmaldoAuthError:
+                if attempt == 0:
+                    _LOGGER.debug("Session expired, re-authenticating")
+                    power_coord._client = None  # noqa: SLF001
+                else:
+                    raise
+
+    ok = await hass.async_add_executor_job(_do_set)
+    if ok:
+        _LOGGER.info(
+            "EV schedule applied: weekdays=%s, weekend=%s, sync=%s",
+            weekday_hours, weekend_hours, sync,
+        )
+    else:
+        _LOGGER.warning("EV schedule write was not acknowledged")
+
+    # Refresh the slow coordinator so the new schedule is reflected in
+    # the select / number / sensor entities.
+    entries = hass.data.get(DOMAIN, {})
+    for entry_data in entries.values():
+        await entry_data["power"].async_request_refresh()
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Register Emaldo services."""
     if hass.services.has_service(DOMAIN, SERVICE_SET_SLOT_RANGE):
@@ -298,6 +384,9 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def handle_refresh_schedule(call: ServiceCall) -> None:
         await async_handle_refresh_schedule(hass, call)
+
+    async def handle_set_ev_schedule(call: ServiceCall) -> None:
+        await async_handle_set_ev_schedule(hass, call)
 
     hass.services.async_register(
         DOMAIN,
@@ -322,6 +411,12 @@ def async_register_services(hass: HomeAssistant) -> None:
         SERVICE_REFRESH_SCHEDULE,
         handle_refresh_schedule,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_EV_SCHEDULE,
+        handle_set_ev_schedule,
+        schema=SCHEMA_SET_EV_SCHEDULE,
+    )
 
 
 def async_unregister_services(hass: HomeAssistant) -> None:
@@ -331,3 +426,4 @@ def async_unregister_services(hass: HomeAssistant) -> None:
         hass.services.async_remove(DOMAIN, SERVICE_APPLY_BULK_SCHEDULE)
         hass.services.async_remove(DOMAIN, SERVICE_RESET_TO_INTERNAL)
         hass.services.async_remove(DOMAIN, SERVICE_REFRESH_SCHEDULE)
+        hass.services.async_remove(DOMAIN, SERVICE_SET_EV_SCHEDULE)

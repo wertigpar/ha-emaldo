@@ -25,6 +25,14 @@ from .emaldo_lib import (
     PersistentE2ESession,
 )
 from .emaldo_lib.const import set_params
+from .emaldo_lib.e2e import (
+    build_subscription_packet,
+    decrypt_response,
+    generate_nonce,
+    _run_session,
+    parse_ev_charging_info,
+    _EV_TYPE_GET_STATE,
+)
 
 from .const import (
     DOMAIN,
@@ -130,10 +138,87 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.debug("Solar stats fetch failed: %s", err)
 
+        # EV charging mode + schedule — best-effort, only Power Core
+        # hardware (with EV charger) exposes these commands. Errors are
+        # swallowed so a device without EV support doesn't break the
+        # whole coordinator refresh.
+        ev = None
+        try:
+            ev = await self.hass.async_add_executor_job(
+                self._read_ev_state
+            )
+        except Exception as err:
+            _LOGGER.debug("EV state fetch failed: %s", err)
+
         return {
             "battery": battery,
             "power": power,
             "solar": solar,
+            "ev": ev,
+        }
+
+    def _read_ev_state(self) -> dict | None:
+        """Read EV charging mode (wire 0x20) and schedule (wire 0x21).
+
+        Runs synchronously in the executor. Returns a dict with keys
+        ``mode``, ``fixed_kwh``, ``fixed_full_kwh``, ``price_percent``,
+        ``weekdays`` (list of 24 ints), ``weekend`` (list of 24 ints),
+        and ``sync`` (int), or *None* if the device doesn't support EV
+        commands / both reads failed.
+        """
+        client = self._ensure_client()
+        creds = client.e2e_login(self.home_id, self._device_id, self._model)
+
+        # 1) Current mode + fixed values (0x20 → 6 bytes)
+        session_nonce = generate_nonce()
+        mode_pkt = build_subscription_packet(
+            creds, _EV_TYPE_GET_STATE, session_nonce, payload=b"",
+        )
+        mode_results = _run_session(
+            creds, [("Read EV mode", mode_pkt)], timeout=3.0,
+        )
+        _, mode_resp = mode_results[0]
+        mode_info = None
+        if mode_resp is not None:
+            mode_dec = decrypt_response(
+                mode_resp, creds["chat_secret"],
+                payload_validator=lambda p: len(p) == 6,
+            )
+            mode_info = parse_ev_charging_info(mode_dec)
+
+        if mode_info is None:
+            return None
+
+        # 2) Schedule bitmaps (0x21 → 7 bytes)
+        sched_nonce = generate_nonce()
+        sched_pkt = build_subscription_packet(
+            creds, 0x21, sched_nonce, payload=b"",
+        )
+        sched_results = _run_session(
+            creds, [("Read EV schedule", sched_pkt)], timeout=3.0,
+        )
+        _, sched_resp = sched_results[0]
+        weekdays = [0] * 24
+        weekend = [0] * 24
+        sync_flag = 0
+        if sched_resp is not None:
+            sched_dec = decrypt_response(
+                sched_resp, creds["chat_secret"],
+                payload_validator=lambda p: len(p) >= 7,
+            )
+            if sched_dec is not None and len(sched_dec) >= 7:
+                # Bytes 0..2 = weekdays bitmap, 3..5 = weekend, 6 = sync
+                def _unpack(bs: bytes) -> list[int]:
+                    return [(b >> i) & 1 for b in bs for i in range(8)]
+                weekdays = _unpack(sched_dec[0:3])
+                weekend = _unpack(sched_dec[3:6])
+                sync_flag = sched_dec[6]
+
+        return {
+            **mode_info,
+            "weekdays": weekdays,
+            "weekend": weekend,
+            "sync": sync_flag,
         }
 
 
