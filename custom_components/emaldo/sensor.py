@@ -191,9 +191,16 @@ def _solar_power(data: dict[str, Any]) -> float | None:
 
 
 def _car_charge_power(data: dict[str, Any]) -> float | None:
-    """EV charger power in W (Power Core only)."""
+    """EV charger power in W — positive = charging the car (Power Core only).
+
+    The Emaldo wire value reports EV load as negative (a sink from the home
+    node's POV). We flip it so the sensor reads as a positive load, matching
+    the Consumption sensor convention and user expectations for "car charge
+    power" (0 = idle, positive = drawing power).
+    """
     if isinstance(data, dict):
-        return data.get("ev_w")
+        w = data.get("ev_w")
+        return -w if w is not None else None
     return None
 
 
