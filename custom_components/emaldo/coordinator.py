@@ -172,6 +172,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._parent = parent
         self._session: PersistentE2ESession | None = None
         self._keepalive_task: asyncio.Task | None = None
+        self._empty_reads: int = 0
+        # -- Stats for diagnostic sensor --
+        self.stats_total_polls: int = 0
+        self.stats_successful_polls: int = 0
+        self.stats_empty_reads: int = 0
+        self.stats_reconnects: int = 0
+        self.stats_keepalive_failures: int = 0
+        self.stats_last_success: float | None = None
+        self.stats_last_failure: float | None = None
+        self.stats_last_reconnect: float | None = None
 
     # -- Proxy properties so sensors can share one class across coordinators --
 
@@ -230,22 +240,36 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._session = None
         return data
 
+    #: Tolerate this many consecutive empty reads before surfacing unavailable.
+    _MAX_EMPTY_READS = 3
+
     async def _async_update_data(self) -> dict[str, Any] | None:
-        """Fetch realtime power flow via the persistent E2E session."""
+        """Fetch realtime power flow via the persistent E2E session.
+
+        Single empty reads are tolerated (the previous value is kept in
+        ``self.data``). After ``_MAX_EMPTY_READS`` consecutive failures the
+        session is torn down and the coordinator raises UpdateFailed so HA
+        surfaces the issue.
+        """
+        import time as _time
+        self.stats_total_polls += 1
+
         try:
             data = await self.hass.async_add_executor_job(self._read_power_flow)
         except EmaldoAuthError as err:
             # Token expired — force REST re-login and E2E reconnect
             self._parent._client = None  # noqa: SLF001
             await self._close_session()
+            self._empty_reads = 0
+            self.stats_last_failure = _time.time()
+            _LOGGER.warning("E2E auth failed, will re-login on next poll: %s", err)
             raise UpdateFailed(f"E2E auth failed: {err}") from err
         except Exception as err:
             await self._close_session()
+            self._empty_reads = 0
+            self.stats_last_failure = _time.time()
+            _LOGGER.warning("E2E power flow read failed: %s", err)
             raise UpdateFailed(f"E2E power flow read failed: {err}") from err
-
-        if data is None:
-            await self._close_session()
-            raise UpdateFailed("No power flow data returned")
 
         # Ensure keepalive task is running
         if self._keepalive_task is None or self._keepalive_task.done():
@@ -253,6 +277,33 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._keepalive_loop(), name=f"{DOMAIN}_keepalive"
             )
 
+        if data is None:
+            self._empty_reads += 1
+            self.stats_empty_reads += 1
+            self.stats_last_failure = _time.time()
+            if self._empty_reads >= self._MAX_EMPTY_READS:
+                self.stats_reconnects += 1
+                self.stats_last_reconnect = _time.time()
+                _LOGGER.warning(
+                    "E2E power flow: %d consecutive empty reads, reconnecting "
+                    "(total drops: %d, reconnects: %d since start)",
+                    self._empty_reads,
+                    self.stats_empty_reads,
+                    self.stats_reconnects,
+                )
+                await self._close_session()
+                self._empty_reads = 0
+                raise UpdateFailed("No power flow data returned")
+            # Keep previous data visible to sensors
+            _LOGGER.info(
+                "E2E power flow empty read %d/%d, keeping previous values",
+                self._empty_reads, self._MAX_EMPTY_READS,
+            )
+            return self.data
+
+        self._empty_reads = 0
+        self.stats_successful_polls += 1
+        self.stats_last_success = _time.time()
         return data
 
     async def _close_session(self) -> None:
@@ -266,6 +317,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     async def _keepalive_loop(self) -> None:
         """Periodically send alive+heartbeat to keep the relay session alive."""
+        import time as _time
         fail_count = 0
         try:
             while True:
@@ -281,9 +333,15 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     fail_count = 0
                 else:
                     fail_count += 1
-                    _LOGGER.debug("Keepalive fail #%d", fail_count)
+                    self.stats_keepalive_failures += 1
+                    _LOGGER.info(
+                        "Keepalive fail #%d (total keepalive failures: %d)",
+                        fail_count, self.stats_keepalive_failures,
+                    )
                     if fail_count >= 2:
-                        _LOGGER.info("Keepalive failed twice, closing session for reconnect")
+                        _LOGGER.warning(
+                            "Keepalive failed twice, closing session for reconnect"
+                        )
                         await self._close_session()
                         return
         except asyncio.CancelledError:
