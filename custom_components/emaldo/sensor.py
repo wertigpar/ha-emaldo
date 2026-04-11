@@ -89,41 +89,36 @@ def _battery_discharged_today(data: dict[str, Any]) -> float | None:
 
 def _battery_power(data: dict[str, Any]) -> float | None:
     """Battery power in W (positive = charging, negative = discharging)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("battery_w")
+    if isinstance(data, dict):
+        return data.get("battery_w")
     return None
 
 
 def _grid_power(data: dict[str, Any]) -> float | None:
     """Grid power in W (positive = importing, negative = exporting)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("grid_w")
+    if isinstance(data, dict):
+        return data.get("grid_w")
     return None
 
 
 def _dual_power(data: dict[str, Any]) -> float | None:
     """Building consumption in W (negative = consuming)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("dual_power_w")
+    if isinstance(data, dict):
+        return data.get("dual_power_w")
     return None
 
 
 def _solar_power(data: dict[str, Any]) -> float | None:
     """Solar PV power in W (Power Core only)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("solar_w")
+    if isinstance(data, dict):
+        return data.get("solar_w")
     return None
 
 
 def _car_charge_power(data: dict[str, Any]) -> float | None:
     """EV charger power in W (Power Core only)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("ev_w")
+    if isinstance(data, dict):
+        return data.get("ev_w")
     return None
 
 
@@ -137,7 +132,8 @@ class EmaldoSensorEntityDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], float | None]
 
 
-SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
+# Sensors that read from the slow REST coordinator (battery + energy totals)
+REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="battery_soc",
         name="Battery SoC",
@@ -162,6 +158,10 @@ SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         value_fn=_battery_discharged_today,
     ),
+)
+
+# Sensors that read from the fast E2E realtime coordinator (power flow)
+REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="battery_power",
         name="Battery power",
@@ -188,8 +188,8 @@ SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
 )
 
-# Sensors only available on Power Core models (PC1-BAK15-HS10, PC3)
-POWER_CORE_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
+# Power Core only (PC1-BAK15-HS10, PC3) — also from realtime coordinator
+POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="solar_power",
         name="Solar power",
@@ -217,19 +217,26 @@ async def async_setup_entry(
     """Set up Emaldo sensors from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator: EmaldoCoordinator = data["power"]
+    realtime_coordinator = data["realtime"]
     schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
 
     entities: list[SensorEntity] = [
         EmaldoSensor(coordinator, description)
-        for description in SENSOR_DESCRIPTIONS
+        for description in REST_SENSOR_DESCRIPTIONS
     ]
 
-    # Power Core models have built-in solar PV and EV charger
+    # Real-time power sensors come from the E2E coordinator
+    entities.extend(
+        EmaldoSensor(realtime_coordinator, description)
+        for description in REALTIME_SENSOR_DESCRIPTIONS
+    )
+
+    # Power Core models have built-in solar PV and EV charger — also realtime
     model = coordinator.device_model or ""
     if model.startswith("PC"):
         entities.extend(
-            EmaldoSensor(coordinator, desc)
-            for desc in POWER_CORE_SENSOR_DESCRIPTIONS
+            EmaldoSensor(realtime_coordinator, desc)
+            for desc in POWER_CORE_REALTIME_DESCRIPTIONS
         )
 
     entities.append(EmaldoPlanSourceSensor(schedule_coordinator))

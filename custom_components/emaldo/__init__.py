@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
-from .coordinator import EmaldoCoordinator
+from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 from .services import async_register_services, async_unregister_services
 
@@ -19,12 +19,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     power_coordinator = EmaldoCoordinator(hass, entry)
     await power_coordinator.async_config_entry_first_refresh()
 
+    realtime_coordinator = EmaldoRealtimeCoordinator(hass, entry, power_coordinator)
+    # Best-effort first refresh — if E2E fails, keep the integration working
+    # with the slower REST power data.
+    try:
+        await realtime_coordinator.async_config_entry_first_refresh()
+    except Exception:  # noqa: BLE001
+        pass
+
     schedule_coordinator = EmaldoScheduleCoordinator(hass, entry)
     await schedule_coordinator.async_config_entry_first_refresh()
     schedule_coordinator.async_setup_listeners()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "power": power_coordinator,
+        "realtime": realtime_coordinator,
         "schedule": schedule_coordinator,
     }
 
@@ -52,6 +61,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         data = hass.data[DOMAIN].pop(entry.entry_id)
         data["schedule"].async_shutdown()
+        await data["realtime"].async_shutdown()
         if not hass.data[DOMAIN]:
             async_unregister_services(hass)
     return unload_ok
