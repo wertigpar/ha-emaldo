@@ -124,3 +124,30 @@ reset_to_internal:
 refresh_schedule:
   name: Refresh schedule
   description: Manually trigger a schedule and override data refresh.
+
+set_ev_schedule:
+  name: Set EV charging schedule
+  description: >
+    Switches the EV charger to Smart → Scheduled mode and writes weekday
+    and weekend hour bitmaps. Each list contains hour integers 0-23
+    when charging is allowed; empty list = no hours selected for that
+    day type.
+  fields:
+    weekdays:
+      name: Weekday hours
+      description: "List of hour integers 0-23 when EV charging is allowed on weekdays."
+      example: "[6, 7, 22, 23]"
+      selector:
+        object:
+    weekend:
+      name: Weekend hours
+      description: "List of hour integers 0-23 when EV charging is allowed on weekends."
+      example: "[10, 11, 12]"
+      selector:
+        object:
+    sync:
+      name: Sync to other devices
+      description: Mirror the app's "Sync" toggle (propagates schedule to other devices in the home).
+      default: false
+      selector:
+        boolean:
