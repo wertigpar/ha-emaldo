@@ -16,6 +16,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -66,13 +67,19 @@ def _battery_soc(data: dict[str, Any]) -> float | None:
 
 
 def _battery_charged_today(data: dict[str, Any]) -> float | None:
+    """Total battery charge energy today in kWh.
+
+    The ``/bmt/stats/battery-v2/day/`` response has 6 columns per entry:
+    [minute_offset, discharge_W, charge_main_W, charge_aux_W, unused, state].
+    Charge is the sum of columns 2 (main, solar) and 3 (auxiliary/grid).
+    """
     bat_data = data.get("battery", {}).get("battery", {})
     if not isinstance(bat_data, dict):
         return None
     entries = bat_data.get("data", [])
     if not entries:
         return None
-    total = sum(e[3] + e[4] for e in entries if len(e) >= 5)
+    total = sum(e[2] + e[3] for e in entries if len(e) >= 4)
     return round(total * 5 / 60 / 1000, 2)
 
 
@@ -87,43 +94,113 @@ def _battery_discharged_today(data: dict[str, Any]) -> float | None:
     return round(total * 5 / 60 / 1000, 2)
 
 
+def _sum_series(series: dict | None, column: int, interval_min: int = 5) -> float | None:
+    """Sum a column from a 5-minute-interval power series and return kWh."""
+    if not isinstance(series, dict):
+        return None
+    entries = series.get("data", [])
+    if not entries:
+        return None
+    total = sum(e[column] for e in entries if len(e) > column)
+    return round(total * interval_min / 60 / 1000, 3)
+
+
+def _solar_energy_today(data: dict[str, Any]) -> float | None:
+    """Total solar energy produced today (sum of all MPPT strings)."""
+    solar_resp = data.get("solar")
+    if not isinstance(solar_resp, dict):
+        return None
+    series = solar_resp.get("mppt") if "mppt" in solar_resp else solar_resp
+    if not isinstance(series, dict):
+        return None
+    entries = series.get("data", [])
+    if not entries:
+        return None
+    # Sum all columns except the first (time offset)
+    ncols = len(entries[0]) - 1 if entries else 0
+    total = sum(
+        sum(e[i + 1] for i in range(ncols) if len(e) > i + 1)
+        for e in entries
+    )
+    return round(total * 5 / 60 / 1000, 3)
+
+
+def _grid_import_today(data: dict[str, Any]) -> float | None:
+    """Total grid import energy today.
+
+    The grid stats endpoint with ``get_real=True`` returns 13 columns per row:
+    ``[time_offset, import_W, ?, export_W, ?, phantom_W, 0, ...]``.
+    """
+    grid_resp = data.get("power", {}).get("grid")
+    return _sum_series(grid_resp, column=1)
+
+
+def _grid_export_today(data: dict[str, Any]) -> float | None:
+    """Total grid export energy today (col[3] of grid stats with get_real)."""
+    grid_resp = data.get("power", {}).get("grid")
+    return _sum_series(grid_resp, column=3)
+
+
+def _load_energy_today(data: dict[str, Any]) -> float | None:
+    """Total property load energy today (col[2] of usage stats)."""
+    usage_resp = data.get("power", {}).get("usage")
+    return _sum_series(usage_resp, column=2)
+
+
 def _battery_power(data: dict[str, Any]) -> float | None:
-    """Battery power in W (positive = charging, negative = discharging)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("battery_w")
+    """Battery power in W — HA Energy Dashboard "Standard" convention.
+
+    HA is house-centric: positive = flowing *into* the house, so positive
+    means the battery is *discharging* (feeding home) and negative means
+    *charging*. The Emaldo wire value already matches this, so we pass it
+    through unchanged. Users can select "Standard" in the Energy Dashboard
+    battery setup without needing the "Inverted" option.
+    """
+    if isinstance(data, dict):
+        return data.get("battery_w")
     return None
 
 
 def _grid_power(data: dict[str, Any]) -> float | None:
-    """Grid power in W (positive = importing, negative = exporting)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("grid_w")
+    """Grid power in W — HA convention: positive = importing, negative = exporting.
+
+    The Emaldo wire value already matches this convention.
+    """
+    if isinstance(data, dict):
+        return data.get("grid_w")
     return None
 
 
 def _dual_power(data: dict[str, Any]) -> float | None:
-    """Building consumption in W (negative = consuming)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("dual_power_w")
+    """Home consumption in W — HA convention: positive = consuming.
+
+    The Emaldo wire value reports consumption as negative (a sink from the
+    home node's POV). We flip it so the sensor reads as a positive load.
+    """
+    if isinstance(data, dict):
+        w = data.get("dual_power_w")
+        return -w if w is not None else None
     return None
 
 
 def _solar_power(data: dict[str, Any]) -> float | None:
     """Solar PV power in W (Power Core only)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("solar_w")
+    if isinstance(data, dict):
+        return data.get("solar_w")
     return None
 
 
 def _car_charge_power(data: dict[str, Any]) -> float | None:
-    """EV charger power in W (Power Core only)."""
-    pf = data.get("power_flow")
-    if isinstance(pf, dict):
-        return pf.get("ev_w")
+    """EV charger power in W — positive = charging the car (Power Core only).
+
+    The Emaldo wire value reports EV load as negative (a sink from the home
+    node's POV). We flip it so the sensor reads as a positive load, matching
+    the Consumption sensor convention and user expectations for "car charge
+    power" (0 = idle, positive = drawing power).
+    """
+    if isinstance(data, dict):
+        w = data.get("ev_w")
+        return -w if w is not None else None
     return None
 
 
@@ -137,7 +214,8 @@ class EmaldoSensorEntityDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], float | None]
 
 
-SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
+# Sensors that read from the slow REST coordinator (battery + energy totals)
+REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="battery_soc",
         name="Battery SoC",
@@ -151,7 +229,7 @@ SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         name="Battery charged today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_battery_charged_today,
     ),
     EmaldoSensorEntityDescription(
@@ -159,12 +237,53 @@ SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         name="Battery discharged today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_battery_discharged_today,
     ),
     EmaldoSensorEntityDescription(
+        key="solar_energy_today",
+        name="Solar energy today",
+        icon="mdi:solar-power",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=_solar_energy_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="grid_import_today",
+        name="Grid import today",
+        icon="mdi:transmission-tower-import",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=_grid_import_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="grid_export_today",
+        name="Grid export today",
+        icon="mdi:transmission-tower-export",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=_grid_export_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="load_energy_today",
+        name="Load energy today",
+        icon="mdi:home-lightning-bolt",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=_load_energy_today,
+    ),
+)
+
+# Sensors that read from the fast E2E realtime coordinator (power flow)
+REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
+    EmaldoSensorEntityDescription(
         key="battery_power",
         name="Battery power",
+        icon="mdi:battery-charging",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -173,6 +292,7 @@ SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="grid_power",
         name="Grid power",
+        icon="mdi:transmission-tower",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -181,6 +301,7 @@ SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="dual_power",
         name="Consumption",
+        icon="mdi:home-lightning-bolt",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -188,11 +309,12 @@ SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
 )
 
-# Sensors only available on Power Core models (PC1-BAK15-HS10, PC3)
-POWER_CORE_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
+# Power Core only (PC1-BAK15-HS10, PC3) — also from realtime coordinator
+POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="solar_power",
         name="Solar power",
+        icon="mdi:solar-power",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -201,6 +323,7 @@ POWER_CORE_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="car_charge_power",
         name="Car charge power",
+        icon="mdi:car-electric",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -217,20 +340,30 @@ async def async_setup_entry(
     """Set up Emaldo sensors from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator: EmaldoCoordinator = data["power"]
+    realtime_coordinator = data["realtime"]
     schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
 
     entities: list[SensorEntity] = [
         EmaldoSensor(coordinator, description)
-        for description in SENSOR_DESCRIPTIONS
+        for description in REST_SENSOR_DESCRIPTIONS
     ]
 
-    # Power Core models have built-in solar PV and EV charger
+    # Real-time power sensors come from the E2E coordinator
+    entities.extend(
+        EmaldoSensor(realtime_coordinator, description)
+        for description in REALTIME_SENSOR_DESCRIPTIONS
+    )
+
+    # Power Core models have built-in solar PV and EV charger — also realtime
     model = coordinator.device_model or ""
     if model.startswith("PC"):
         entities.extend(
-            EmaldoSensor(coordinator, desc)
-            for desc in POWER_CORE_SENSOR_DESCRIPTIONS
+            EmaldoSensor(realtime_coordinator, desc)
+            for desc in POWER_CORE_REALTIME_DESCRIPTIONS
         )
+
+    # Diagnostic: realtime connection status
+    entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
 
     entities.append(EmaldoPlanSourceSensor(schedule_coordinator))
     entities.append(EmaldoActiveModeSensor(schedule_coordinator))
@@ -555,4 +688,77 @@ class EmaldoScheduleChartSensor(
             "schedule": sched_data,
             "slot_count": len(slots),
             "gap_minutes": gap,
+        }
+
+
+class EmaldoRealtimeStatusSensor(SensorEntity):
+    """Diagnostic sensor showing E2E realtime connection health."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Realtime connection"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:lan-connect"
+
+    def __init__(self, coordinator) -> None:
+        """Initialize the diagnostic sensor."""
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{coordinator.home_id}_realtime_status"
+
+    async def async_added_to_hass(self) -> None:
+        """Register for coordinator updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self._handle_coordinator_update)
+        )
+
+    def _handle_coordinator_update(self) -> None:
+        """Update state when coordinator refreshes."""
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._coordinator.home_id)}
+            if not self._coordinator.device_id
+            else {(DOMAIN, self._coordinator.device_id)},
+            name=self._coordinator.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=self._coordinator.device_model,
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return current connection state."""
+        if self._coordinator.last_update_success:
+            return "connected"
+        return "reconnecting"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return statistics about the realtime connection."""
+        import datetime
+        c = self._coordinator
+
+        def _to_iso(ts: float | None) -> str | None:
+            if ts is None:
+                return None
+            return datetime.datetime.fromtimestamp(ts).isoformat()
+
+        success_rate = None
+        if c.stats_total_polls > 0:
+            success_rate = round(
+                100.0 * c.stats_successful_polls / c.stats_total_polls, 1
+            )
+
+        return {
+            "total_polls": c.stats_total_polls,
+            "successful_polls": c.stats_successful_polls,
+            "success_rate_pct": success_rate,
+            "empty_reads": c.stats_empty_reads,
+            "reconnects": c.stats_reconnects,
+            "keepalive_failures": c.stats_keepalive_failures,
+            "last_success": _to_iso(c.stats_last_success),
+            "last_failure": _to_iso(c.stats_last_failure),
+            "last_reconnect": _to_iso(c.stats_last_reconnect),
         }
