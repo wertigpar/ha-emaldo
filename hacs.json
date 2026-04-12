@@ -1,5 +1,7 @@
 {
   "name": "Emaldo Battery",
+  "content_in_root": false,
   "homeassistant": "2024.1.0",
-  "render_readme": true
+  "render_readme": true,
+  "hide_default_branch": true
 }
