@@ -348,13 +348,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._empty_reads = 0
             self.stats_last_failure = _time.time()
             _LOGGER.warning("E2E auth failed, will re-login on next poll: %s", err)
-            raise UpdateFailed(f"E2E auth failed: {err}") from err
+            return self.data  # keep last known values visible
         except Exception as err:
             await self._close_session()
             self._empty_reads = 0
             self.stats_last_failure = _time.time()
             _LOGGER.warning("E2E power flow read failed: %s", err)
-            raise UpdateFailed(f"E2E power flow read failed: {err}") from err
+            return self.data  # keep last known values visible
 
         # Ensure keepalive task is running
         if self._keepalive_task is None or self._keepalive_task.done():
@@ -378,7 +378,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 await self._close_session()
                 self._empty_reads = 0
-                raise UpdateFailed("No power flow data returned")
+                return self.data  # keep last known values visible
             # Keep previous data visible to sensors
             _LOGGER.info(
                 "E2E power flow empty read %d/%d, keeping previous values",
