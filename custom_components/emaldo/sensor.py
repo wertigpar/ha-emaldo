@@ -69,9 +69,21 @@ def _battery_soc(data: dict[str, Any]) -> float | None:
 def _battery_charged_today(data: dict[str, Any]) -> float | None:
     """Total battery charge energy today in kWh.
 
-    The ``/bmt/stats/battery-v2/day/`` response has 6 columns per entry:
-    [minute_offset, discharge_W, charge_main_W, charge_aux_W, unused, state].
-    Charge is the sum of columns 2 (main, solar) and 3 (auxiliary/grid).
+    The ``/bmt/stats/battery-v2/day/`` response has at least 6 columns:
+    [minute_offset, discharge_W, charge_main_W, charge_aux_W, charge_ac_W, state].
+
+    For **Power Core** (internal MPPT solar):
+      col 2 = solar MPPT → battery DC charge
+      col 3 = grid → battery AC charge
+      col 4 = 0 (unused, no separate AC-bus channel)
+
+    For **Power Store** (external/third-party solar inverter on the AC bus):
+      col 2 = 0 (no internal MPPT)
+      col 3 = grid-direct battery charge only
+      col 4 = solar-sourced AC-bus battery charge (this is the missing energy)
+
+    Summing cols 2 + 3 + 4 is safe for both models: Power Core sees col 4 = 0,
+    while Power Store gets the full AC-bus charge included.
     """
     bat_data = data.get("battery", {}).get("battery", {})
     if not isinstance(bat_data, dict):
@@ -79,7 +91,11 @@ def _battery_charged_today(data: dict[str, Any]) -> float | None:
     entries = bat_data.get("data", [])
     if not entries:
         return None
-    total = sum(e[2] + e[3] for e in entries if len(e) >= 4)
+    total = sum(
+        e[2] + e[3] + (e[4] if len(e) > 4 else 0)
+        for e in entries
+        if len(e) >= 4
+    )
     return round(total * 5 / 60 / 1000, 2)
 
 
