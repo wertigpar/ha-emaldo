@@ -422,26 +422,6 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
             return None
         return self.entity_description.value_fn(self.coordinator.data)
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Return per-column charge breakdown for battery_charged_today (diagnostic)."""
-        if self.entity_description.key != "battery_charged_today":
-            return None
-        if self.coordinator.data is None:
-            return None
-        bat_data = self.coordinator.data.get("battery", {}).get("battery", {})
-        if not isinstance(bat_data, dict):
-            return None
-        entries = bat_data.get("data", [])
-        if not entries:
-            return None
-        factor = 5 / 60 / 1000
-        return {
-            "col2_charge_main_kwh": round(sum(e[2] for e in entries if len(e) > 2) * factor, 3),
-            "col3_charge_aux_kwh": round(sum(e[3] for e in entries if len(e) > 3) * factor, 3),
-            "col4_charge_ac_kwh": round(sum(e[4] for e in entries if len(e) > 4) * factor, 3),
-        }
-
 
 # -- Helper to compute current slot index --
 

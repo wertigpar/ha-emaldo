@@ -138,10 +138,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.debug("Solar stats fetch failed: %s", err)
 
-        # Debug: log battery-v2 column breakdown once per update (debug level only)
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            self._log_battery_v2_sample(battery)
-
         # EV charging mode + schedule — best-effort, only Power Core
         # hardware (with EV charger) exposes these commands. Errors are
         # swallowed so a device without EV support doesn't break the
@@ -160,29 +156,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "solar": solar,
             "ev": ev,
         }
-
-    @staticmethod
-    def _log_battery_v2_sample(battery: dict) -> None:
-        """Log a sample of raw battery-v2 data for diagnosing column layout."""
-        entries = battery.get("battery", {}).get("data", [])
-        if not entries:
-            return
-        # Find a non-zero entry for meaningful output
-        sample = next((e for e in entries if len(e) >= 4 and any(v != 0 for v in e[1:])), entries[0])
-        ncols = len(sample)
-        _LOGGER.debug(
-            "battery-v2 sample entry (%d cols): %s | "
-            "col1=discharge col2=charge_main col3=charge_aux col4=%s",
-            ncols,
-            sample,
-            sample[4] if ncols > 4 else "n/a",
-        )
-        # Log per-column sums (useful for identifying which column carries PS solar charge)
-        col_sums = [sum(e[i] for e in entries if len(e) > i) for i in range(1, 6)]
-        _LOGGER.debug(
-            "battery-v2 column sums (raw W·intervals) col1..5: %s",
-            col_sums,
-        )
 
     def _read_ev_state(self) -> dict | None:
         """Read EV charging mode (wire 0x20) and schedule (wire 0x21).
