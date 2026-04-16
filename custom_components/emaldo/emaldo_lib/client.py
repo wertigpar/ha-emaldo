@@ -427,6 +427,10 @@ class EmaldoClient:
     ) -> dict:
         """Get comprehensive daily usage data.
 
+        Args:
+            offset: Day offset. 0 = today, negative = past days
+                (-1 = yesterday, -2 = day before, etc.).
+
         Returns a dict with keys: ``usage``, ``battery``, ``solar``, ``grid``, ``power_level``.
         """
         base = {"home_id": home_id, "id": device_id, "model": model, "offset": offset}
@@ -453,7 +457,12 @@ class EmaldoClient:
     def get_revenue(
         self, home_id: str, device_id: str, model: str, offset: int = 0
     ) -> dict:
-        """Get daily revenue data."""
+        """Get daily revenue data.
+
+        Args:
+            offset: Day offset. 0 = today, negative = past days
+                (-1 = yesterday, -2 = day before, etc.).
+        """
         json_data = {
             "home_id": home_id,
             "id": device_id,
@@ -521,7 +530,13 @@ class EmaldoClient:
     def get_solar(
         self, home_id: str, device_id: str, model: str, offset: int = 0
     ) -> dict:
-        """Get solar/MPPT generation data."""
+        """Get solar/MPPT generation data (5-min intervals, 288 points/day).
+
+        Args:
+            offset: Day offset. 0 = today, negative = past days
+                (-1 = yesterday, -2 = day before, etc.).
+                At least 30 days of history available.
+        """
         json_data = {
             "home_id": home_id,
             "id": device_id,
@@ -534,7 +549,12 @@ class EmaldoClient:
     def get_grid(
         self, home_id: str, device_id: str, model: str, offset: int = 0
     ) -> dict:
-        """Get grid import/export data."""
+        """Get grid import/export data (5-min intervals).
+
+        Args:
+            offset: Day offset. 0 = today, negative = past days
+                (-1 = yesterday, -2 = day before, etc.).
+        """
         json_data = {
             "home_id": home_id,
             "id": device_id,
