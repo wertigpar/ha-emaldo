@@ -346,6 +346,50 @@ class EmaldoClient:
             return data.get("bmts", [])
         return []
 
+    def get_manual_selling_history(
+        self,
+        home_id: str,
+        device_id: str,
+        *,
+        page_size: int = 20,
+        before_unix: int | None = None,
+    ) -> dict:
+        """List past manual-selling (grid-export) sessions.
+
+        REST endpoint, not MSCT. Response::
+
+            {
+              "total": 4, "page": 0, "page_size": N, "total_pages": 1,
+              "records": [
+                {"power": 0.3, "end_time": 1776504071},   # kWh sold, unix seconds
+                ...
+              ]
+            }
+
+        ``power`` is energy in kWh despite the misleading field name
+        (inherited from the APK).
+
+        Args:
+            home_id: Home identifier.
+            device_id: BMT device id.
+            page_size: How many records to fetch (1..100).
+            before_unix: Cursor — fetch sessions that ended strictly before
+                this unix timestamp. None ⇒ now.
+        """
+        import time as _time
+        end = before_unix if before_unix is not None else int(_time.time())
+        result = self.api_request(
+            "/bmt/get-manual-selling-history/",
+            json_data={
+                "home_id": home_id,
+                "bmt_id": device_id,
+                "end_time": end,
+                "page_size": page_size,
+            },
+        )
+        data = result.get("Result", {})
+        return data if isinstance(data, dict) else {}
+
     def search_device(self, home_id: str, device_id: str, model: str) -> dict:
         """Search for a specific device and return detailed info."""
         json_data = {
