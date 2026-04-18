@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import voluptuous as vol
@@ -42,6 +43,7 @@ SERVICE_APPLY_BULK_SCHEDULE = "apply_bulk_schedule"
 SERVICE_RESET_TO_INTERNAL = "reset_to_internal"
 SERVICE_REFRESH_SCHEDULE = "refresh_schedule"
 SERVICE_SET_EV_SCHEDULE = "set_ev_schedule"
+SERVICE_BACKFILL_SOLAR = "backfill_solar"
 
 SCHEMA_SET_SLOT_RANGE = vol.Schema(
     {
@@ -83,6 +85,14 @@ SCHEMA_SET_EV_SCHEDULE = vol.Schema(
             [vol.All(int, vol.Range(min=0, max=23))],
         ),
         vol.Optional("sync", default=False): cv.boolean,
+    }
+)
+
+SCHEMA_BACKFILL_SOLAR = vol.Schema(
+    {
+        vol.Optional("days", default=30): vol.All(
+            int, vol.Range(min=1, max=90)
+        ),
     }
 )
 
@@ -368,6 +378,193 @@ async def async_handle_set_ev_schedule(
         await entry_data["power"].async_request_refresh()
 
 
+async def async_handle_backfill_solar(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Backfill solar energy statistics from Emaldo API history.
+
+    Fetches up to 90 days of 5-min MPPT data using negative offsets,
+    aggregates to hourly statistics, and imports them via
+    async_add_external_statistics so they appear in the Energy Dashboard.
+
+    To avoid double-counting, the backfill finds the earliest date the
+    live solar_energy_today sensor has statistics for and only imports
+    days before that. Any previous backfill data is cleared first.
+    """
+    from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+    from homeassistant.components.recorder.statistics import (
+        async_add_external_statistics,
+    )
+    from homeassistant.components.recorder import get_instance
+
+    days = call.data.get("days", 30)
+    statistic_id = f"{DOMAIN}:solar_energy_backfill"
+
+    # Find cutoff: earliest date the live solar_energy_today sensor
+    # has state history, so we don't overlap with real data.
+    cutoff_date = None
+    try:
+        for state in hass.states.async_all("sensor"):
+            if "solar_energy_today" in state.entity_id:
+                # Check entity registry for when it was added,
+                # or use the entity's first recorded state.
+                from homeassistant.components.recorder.history import (
+                    get_significant_states,
+                )
+                now = datetime.now(timezone.utc)
+                start = now - timedelta(days=days + 1)
+                history = await get_instance(hass).async_add_executor_job(
+                    get_significant_states,
+                    hass, start, now, [state.entity_id],
+                )
+                if history.get(state.entity_id):
+                    first_ts = history[state.entity_id][0].last_changed
+                    cutoff_date = first_ts.date()
+                    _LOGGER.info(
+                        "Backfill solar: live sensor %s first seen %s, "
+                        "will only backfill before that date",
+                        state.entity_id, cutoff_date,
+                    )
+                break
+    except Exception:
+        _LOGGER.debug("Backfill: could not determine live sensor cutoff", exc_info=True)
+
+    # Clear previous backfill data
+    try:
+        recorder_instance = get_instance(hass)
+        # Try the available clear API
+        try:
+            from homeassistant.components.recorder.statistics import (
+                clear_statistics,
+            )
+            await recorder_instance.async_add_executor_job(
+                clear_statistics, recorder_instance, [statistic_id]
+            )
+        except ImportError:
+            from homeassistant.components.recorder.statistics import (
+                async_clear_statistics,
+            )
+            async_clear_statistics(recorder_instance, [statistic_id])
+        _LOGGER.info("Backfill solar: cleared previous backfill data")
+    except Exception:
+        _LOGGER.debug(
+            "Backfill: no previous data to clear or clear not available",
+            exc_info=True,
+        )
+
+    # Get client
+    entries = hass.data.get(DOMAIN, {})
+    if not entries:
+        raise ValueError("No Emaldo integration configured")
+    entry_data = next(iter(entries.values()))
+    power_coord = entry_data["power"]
+
+    today = datetime.now().date()
+
+    def _fetch_history():
+        client = power_coord._ensure_client()  # noqa: SLF001
+        hid = power_coord.home_id
+        did = power_coord._device_id  # noqa: SLF001
+        model = power_coord._model  # noqa: SLF001
+
+        all_days = {}
+        for day_offset in range(-1, -days, -1):  # skip today (offset=0)
+            day_date = today + timedelta(days=day_offset)
+            # Stop if we'd overlap with live sensor data
+            if cutoff_date and day_date >= cutoff_date:
+                _LOGGER.debug(
+                    "Backfill: skipping %s (live sensor has data)", day_date
+                )
+                continue
+            try:
+                result = client.get_solar(hid, did, model, offset=day_offset)
+                data = result.get("data", [])
+                start_time = result.get("start_time", 0)
+                tz_name = result.get("timezone", "Europe/Helsinki")
+                if data:
+                    all_days[day_offset] = {
+                        "data": data,
+                        "start_time": start_time,
+                        "timezone": tz_name,
+                    }
+                    total_w = sum(sum(e[1:]) for e in data)
+                    kwh = total_w * 5 / 60 / 1000
+                    _LOGGER.info(
+                        "Backfill solar: %s (offset=%d), %d pts, %.1f kWh",
+                        day_date, day_offset, len(data), kwh,
+                    )
+            except Exception:
+                _LOGGER.exception("Backfill: failed to fetch offset=%d", day_offset)
+        return all_days
+
+    _LOGGER.info("Backfill solar: fetching up to %d days of history...", days)
+    all_days = await hass.async_add_executor_job(_fetch_history)
+
+    if not all_days:
+        _LOGGER.warning("Backfill solar: no data to import (all days overlap with live sensor)")
+        return
+
+    # Aggregate to hourly statistics
+    import zoneinfo
+
+    hourly_stats: list[StatisticData] = []
+    cumulative_kwh = 0.0
+
+    for day_offset in sorted(all_days.keys()):
+        day_data = all_days[day_offset]
+        day_entries = day_data["data"]
+        start_time = day_data["start_time"]
+        tz_name = day_data["timezone"]
+
+        # Group by hour
+        hourly_wh: dict[int, float] = {}
+        for entry in day_entries:
+            minute_offset = entry[0]
+            total_w = sum(entry[1:])
+            wh = total_w * 5 / 60  # 5-min interval → Wh
+            hour = minute_offset // 60
+            hourly_wh[hour] = hourly_wh.get(hour, 0) + wh
+
+        day_start = datetime.fromtimestamp(start_time, tz=timezone.utc)
+        for hour in sorted(hourly_wh.keys()):
+            if hour > 23:
+                continue
+            kwh = hourly_wh[hour] / 1000
+            cumulative_kwh += kwh
+            hour_start = day_start.replace(
+                hour=hour, minute=0, second=0, microsecond=0
+            )
+            hourly_stats.append(
+                StatisticData(
+                    start=hour_start,
+                    state=cumulative_kwh,
+                    sum=cumulative_kwh,
+                )
+            )
+
+    if not hourly_stats:
+        _LOGGER.warning("Backfill solar: no hourly stats to import")
+        return
+
+    metadata = StatisticMetaData(
+        has_mean=False,
+        has_sum=True,
+        name="Solar energy (backfill)",
+        source=DOMAIN,
+        statistic_id=statistic_id,
+        unit_of_measurement="kWh",
+    )
+
+    first_date = (today + timedelta(days=min(all_days.keys()))).isoformat()
+    last_date = (today + timedelta(days=max(all_days.keys()))).isoformat()
+    _LOGGER.info(
+        "Backfill solar: importing %d hourly stats, %s to %s (%.1f kWh)",
+        len(hourly_stats), first_date, last_date, cumulative_kwh,
+    )
+    async_add_external_statistics(hass, metadata, hourly_stats)
+    _LOGGER.info("Backfill solar: done")
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Register Emaldo services."""
     if hass.services.has_service(DOMAIN, SERVICE_SET_SLOT_RANGE):
@@ -387,6 +584,9 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def handle_set_ev_schedule(call: ServiceCall) -> None:
         await async_handle_set_ev_schedule(hass, call)
+
+    async def handle_backfill_solar(call: ServiceCall) -> None:
+        await async_handle_backfill_solar(hass, call)
 
     hass.services.async_register(
         DOMAIN,
@@ -417,6 +617,12 @@ def async_register_services(hass: HomeAssistant) -> None:
         handle_set_ev_schedule,
         schema=SCHEMA_SET_EV_SCHEDULE,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_BACKFILL_SOLAR,
+        handle_backfill_solar,
+        schema=SCHEMA_BACKFILL_SOLAR,
+    )
 
 
 def async_unregister_services(hass: HomeAssistant) -> None:
@@ -427,3 +633,4 @@ def async_unregister_services(hass: HomeAssistant) -> None:
         hass.services.async_remove(DOMAIN, SERVICE_RESET_TO_INTERNAL)
         hass.services.async_remove(DOMAIN, SERVICE_REFRESH_SCHEDULE)
         hass.services.async_remove(DOMAIN, SERVICE_SET_EV_SCHEDULE)
+        hass.services.async_remove(DOMAIN, SERVICE_BACKFILL_SOLAR)
