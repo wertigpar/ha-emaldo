@@ -151,3 +151,21 @@ set_ev_schedule:
       default: false
       selector:
         boolean:
+
+backfill_solar:
+  name: Backfill solar energy history
+  description: >
+    Fetches up to 30 days of historical solar production data from the
+    Emaldo API and imports it as long-term statistics in Home Assistant.
+    The backfilled data appears in the Energy Dashboard under
+    "emaldo:solar_energy_backfill". Run once after initial setup.
+  fields:
+    days:
+      name: Days
+      description: "Number of days to backfill (1-90, default 30)."
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 90
+          step: 1

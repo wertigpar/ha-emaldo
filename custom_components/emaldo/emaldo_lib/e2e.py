@@ -138,21 +138,23 @@ def build_subscription_packet(
 
     mode_byte = 0x10 if request_mode else 0xA0
 
-    pkt = bytes([0xD9, 0xA0, 0xA0])
+    # Option order matches module_bmt/yd/e.java:93:
+    # END_ID, GROUP_ID, RECEIVER_ID, AES, PROXY(1B), APP_ID, METHOD(2B), MSGID, CT
+    pkt = bytes([0xD9, 0xA0, 0xA0])                 # header + END_ID (cont)
     pkt += e2e_creds["sender_end_id"].encode()
-    pkt += bytes([0xA0, 0xA1])
+    pkt += bytes([0xA0, 0xA1])                      # GROUP_ID (cont)
     pkt += e2e_creds["sender_group_id"].encode()
-    pkt += bytes([0x84, 0xF1, 0x00, 0x00, 0x00, 0x01])
-    pkt += bytes([0xA0, 0xA2])
+    pkt += bytes([0xA0, 0xA2])                      # RECEIVER_ID (cont)
     pkt += e2e_creds["recipient_end_id"].encode()
-    pkt += bytes([0x90, 0xA3])
+    pkt += bytes([0x90, 0xA3])                      # AES nonce (cont)
     pkt += nonce.encode()
-    pkt += bytes([0xA0, 0xB5])
+    pkt += bytes([0x81, 0xF1, 0x01])                # PROXY (1B, cont) — was 4B
+    pkt += bytes([0xA0, 0xB5])                      # APP_ID (cont)
     pkt += get_app_id().encode()
-    pkt += bytes([0x82, 0xF5, msg_type])
-    pkt += bytes([mode_byte, 0x9B, 0xF6])
+    pkt += bytes([0x82, 0xF5, msg_type, mode_byte]) # METHOD (2B, cont)
+    pkt += bytes([0x9B, 0xF6])                      # MSGID (cont)
     pkt += msg_id.encode()
-    pkt += bytes([0x10, 0xB7])
+    pkt += bytes([0x10, 0xB7])                      # CT (LAST)
     pkt += b"application/byte"
     pkt += encrypted
     return pkt
@@ -200,7 +202,54 @@ def build_heartbeat_packet(
     session_nonce: str,
     msg_id: str | None = None,
 ) -> bytes:
-    """Build a heartbeat packet (251 bytes)."""
+    """Build a heartbeat packet.
+
+    Option order mirrors module_bmt/yd/e.java:231 exactly:
+        END_ID, GROUP_ID, RECEIVER_ID, AES, PROXY(1B), METHOD, APP_ID, MSGID, CT
+    The previous 4-byte PROXY (0x84 0xF1 00 00 00 01) and RECEIVER_ID-before-AES
+    layout caused the relay to reject commands with status 0x52D4.
+    """
+    if msg_id is None:
+        msg_id = generate_msg_id()
+
+    assert len(session_nonce) == 16
+    assert len(msg_id) == 27
+
+    payload_json = json.dumps(
+        {"__time": int(time.time())}, separators=(",", ":")
+    ).encode()
+    encrypted = encrypt_payload(payload_json, e2e_creds["chat_secret"], session_nonce)
+
+    pkt = bytes([0xD9, 0xA0, 0xA0])                 # header + END_ID (len 32, cont)
+    pkt += e2e_creds["sender_end_id"].encode()
+    pkt += bytes([0xA0, 0xA1])                      # GROUP_ID (len 32, cont)
+    pkt += e2e_creds["sender_group_id"].encode()
+    pkt += bytes([0xA0, 0xA2])                      # RECEIVER_ID (len 32, cont)
+    pkt += e2e_creds["recipient_end_id"].encode()
+    pkt += bytes([0x90, 0xA3])                      # AES nonce (len 16, cont)
+    pkt += session_nonce.encode()
+    pkt += bytes([0x81, 0xF1, 0x01])                # PROXY (len 1, cont) — was 4B
+    pkt += bytes([0x89, 0xF5])                      # METHOD "heartbeat" (len 9, cont)
+    pkt += b"heartbeat"
+    pkt += bytes([0xA0, 0xB5])                      # APP_ID (len 32, cont)
+    pkt += get_app_id().encode()
+    pkt += bytes([0x9B, 0xF6])                      # MSGID (len 27, cont)
+    pkt += msg_id.encode()
+    pkt += bytes([0x10, 0xB7])                      # CT (len 16, LAST)
+    pkt += b"application/json"
+    pkt += encrypted
+    return pkt
+
+
+def build_wake_packet(
+    e2e_creds: dict,
+    session_nonce: str,
+    msg_id: str | None = None,
+) -> bytes:
+    """Build a wake packet — nudges the relay's per-session routing table for
+    the device. Mirrors module_bmt/x/n.java:223 (setIsNeedResult=false in APK,
+    so a status=1 reply is tolerated — it's fire-and-forget).
+    """
     if msg_id is None:
         msg_id = generate_msg_id()
 
@@ -216,19 +265,17 @@ def build_heartbeat_packet(
     pkt += e2e_creds["sender_end_id"].encode()
     pkt += bytes([0xA0, 0xA1])
     pkt += e2e_creds["sender_group_id"].encode()
-    pkt += bytes([0x84, 0xF1, 0x00, 0x00, 0x00, 0x01])
     pkt += bytes([0xA0, 0xA2])
     pkt += e2e_creds["recipient_end_id"].encode()
     pkt += bytes([0x90, 0xA3])
     pkt += session_nonce.encode()
-    pkt += bytes([0x89, 0xF5])
-    pkt += b"heartbeat"
+    pkt += bytes([0x81, 0xF1, 0x01])
+    pkt += bytes([0x84, 0xF5])                      # METHOD "wake" (len 4, cont)
+    pkt += b"wake"
     pkt += bytes([0xA0, 0xB5])
     pkt += get_app_id().encode()
-    pkt += bytes([0x9B, 0xF6])
+    pkt += bytes([0x1B, 0xF6])                      # MSGID (len 27, LAST)
     pkt += msg_id.encode()
-    pkt += bytes([0x10, 0xB7])
-    pkt += b"application/json"
     pkt += encrypted
     return pkt
 
@@ -608,6 +655,7 @@ def _run_session(
         nonce=dev_alive_nonce,
     )
     heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
 
     host, port = _resolve_host(e2e_creds["host"])
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -630,6 +678,7 @@ def _run_session(
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
@@ -671,6 +720,7 @@ def read_overrides(
         end_secret=e2e_creds["sender_end_secret"],
     )
     heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
     sub_pkt = build_subscription_packet(e2e_creds, 0x1B, session_nonce)
 
     host, port = _resolve_host(e2e_creds["host"])
@@ -693,6 +743,7 @@ def read_overrides(
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
@@ -756,6 +807,7 @@ def read_battery_info(
         end_secret=e2e_creds["sender_end_secret"],
     )
     heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
 
     host, port = _resolve_host(e2e_creds["host"])
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -788,6 +840,7 @@ def read_battery_info(
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
@@ -900,6 +953,7 @@ def read_power_flow(
         end_secret=e2e_creds["sender_end_secret"],
     )
     heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
     power_pkt = build_subscription_packet(
         e2e_creds, 0x30, session_nonce, payload=bytes([0x01]),
     )
@@ -924,6 +978,7 @@ def read_power_flow(
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
@@ -989,6 +1044,7 @@ def send_override(
         end_secret=e2e_creds["sender_end_secret"],
     )
     heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
     override_pkt = build_override_packet(
         e2e_creds, slot_values, nonce=session_nonce,
         high_marker=high_marker, low_marker=low_marker,
@@ -1014,6 +1070,7 @@ def send_override(
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
@@ -1064,6 +1121,7 @@ def send_sell(
         end_secret=e2e_creds["sender_end_secret"],
     )
     heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
     sell_pkt = build_subscription_packet(
         e2e_creds, 0x01, session_nonce,
         payload=payload,
@@ -1089,6 +1147,7 @@ def send_sell(
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
@@ -1126,6 +1185,7 @@ def cancel_sell(
         end_secret=e2e_creds["sender_end_secret"],
     )
     heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
     cancel_pkt = build_subscription_packet(
         e2e_creds, 0x01, session_nonce,
         payload=payload,
@@ -1151,6 +1211,7 @@ def cancel_sell(
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
@@ -1158,6 +1219,241 @@ def cancel_sell(
         if resp and len(resp) == 161:
             return True
         return resp is not None
+    finally:
+        sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Emergency charge (pull energy FROM grid) and Manual selling (push TO grid)
+# ---------------------------------------------------------------------------
+#
+# NOTE on the legacy `send_sell` / `cancel_sell` above: those send opcode 0x01A0,
+# which the APK calls SET_EMERGENCY_CHARGE — i.e. charge the battery from the
+# grid, NOT sell to the grid. The functions below use the correct semantics.
+# Opcodes:
+#   0x01A0  set_emergency_charge   write [on u8, start u32le, end u32le]  9B
+#   0x80A0  set_manual_selling     write [on u8, target_kwh u32le, expand u8] 6B
+#   0x81A0  get_manual_selling     read  [firstUse u8, enabled u8,
+#                                         target_0.1kWh u32le, sold_0.1kWh u32le] 10B
+
+
+def set_emergency_charge(
+    e2e_creds: dict,
+    on: bool,
+    *,
+    start_unix: int | None = None,
+    end_unix: int | None = None,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> bool:
+    """Enable/disable emergency charging over a time window.
+
+    When enabling, the default window is now → top-of-current-hour + 48 h,
+    matching the APK default in ``module_bmt/m7/f.java:846``.
+    """
+    if on:
+        if start_unix is None:
+            start_unix = int(time.time())
+        if end_unix is None:
+            now = time.time()
+            end_unix = int(now - (int(now) % 3600)) + 172800
+        payload = struct.pack("<BII", 1, start_unix, end_unix)
+    else:
+        payload = bytes(9)  # 9 zeros
+
+    session_nonce = generate_nonce()
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+    cmd_pkt = build_subscription_packet(
+        e2e_creds, 0x01, session_nonce, payload=payload,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B \u2192 got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            if log:
+                log(f"{label}: sent {len(pkt)}B \u2192 no response")
+            return None
+
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+        resp = _send(cmd_pkt, "EmergencyCharge")
+        return resp is not None
+    finally:
+        sock.close()
+
+
+def set_manual_selling(
+    e2e_creds: dict,
+    on: bool,
+    target_energy_kwh: int | float = 0,
+    *,
+    expand: bool = False,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> bool:
+    """Start/stop grid-export (manual selling) with a cumulative kWh target.
+
+    The inverter exports until ``target_energy_kwh`` total have been sold,
+    then stops automatically. Use :func:`get_manual_selling` to poll
+    progress. Opcode 0x80A0 (APK case 18 via ``g(map)``).
+
+    Wire:
+        [on u8, target_kwh u32 LE, isExpandSelling u8] — 6 bytes total.
+    """
+    if on and target_energy_kwh <= 0:
+        raise ValueError("target_energy_kwh must be > 0 when enabling")
+    target = round(target_energy_kwh) if on else 0
+    payload = struct.pack("<BIB", 1 if on else 0, target & 0xFFFFFFFF, 1 if expand else 0)
+
+    session_nonce = generate_nonce()
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+    cmd_pkt = build_subscription_packet(
+        e2e_creds, 0x80, session_nonce, payload=payload,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B \u2192 got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            return None
+
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+        resp = _send(cmd_pkt, "ManualSelling")
+        return resp is not None
+    finally:
+        sock.close()
+
+
+def parse_manual_selling_response(payload: bytes | None) -> dict | None:
+    """Decode the 10-byte GET_MANUAL_SELLING response payload.
+
+    Returns dict with ``enabled``, ``first_use``, ``target_energy_kwh``,
+    ``sold_so_far_kwh``, ``remaining_kwh``.
+    """
+    if payload is None or len(payload) < 10:
+        return None
+    first_use = payload[0] == 1
+    enabled = payload[1] == 1
+    target_deci = int.from_bytes(payload[2:6], "little", signed=False)
+    sold_deci = int.from_bytes(payload[6:10], "little", signed=False)
+    return {
+        "first_use": first_use,
+        "enabled": enabled,
+        "target_energy_kwh": round(target_deci / 10.0, 2),
+        "sold_so_far_kwh": round(sold_deci / 10.0, 2),
+        "remaining_kwh": round(max(0, target_deci - sold_deci) / 10.0, 2),
+    }
+
+
+def get_manual_selling(
+    e2e_creds: dict,
+    *,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> dict | None:
+    """Read current manual-selling state + energy counters (opcode 0x81A0).
+
+    See :func:`parse_manual_selling_response` for field semantics. Returns
+    *None* if the session handshake or decryption fails.
+    """
+    session_nonce = generate_nonce()
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+    cmd_pkt = build_subscription_packet(
+        e2e_creds, 0x81, session_nonce, payload=b"",
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B \u2192 got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            return None
+
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+        resp = _send(cmd_pkt, "GetManualSelling")
+        if not resp:
+            return None
+        # Match the pattern used by other readers: decrypt with chat_secret,
+        # accept any payload >= 10 bytes.
+        decrypted = decrypt_response(
+            resp, e2e_creds["chat_secret"],
+            payload_validator=lambda b: len(b) >= 10,
+        )
+        return parse_manual_selling_response(decrypted)
     finally:
         sock.close()
 
@@ -1912,9 +2208,11 @@ class PersistentE2ESession:
             end_secret=self._creds["sender_end_secret"],
         )
         heartbeat = build_heartbeat_packet(self._creds, self._session_nonce)
+        wake = build_wake_packet(self._creds, self._session_nonce)
 
         self._send_raw(home_alive, "Alive(home)")
         self._send_raw(dev_alive, "Alive(device)")
+        self._send_raw(wake, "Wake")
         self._send_raw(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
