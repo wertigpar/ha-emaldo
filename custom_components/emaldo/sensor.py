@@ -29,7 +29,7 @@ from .emaldo_lib.const import (
 )
 
 from .const import DOMAIN
-from .coordinator import EmaldoCoordinator
+from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 
 
@@ -220,6 +220,18 @@ def _car_charge_power(data: dict[str, Any]) -> float | None:
     return None
 
 
+def _balancing_display(data: dict[str, Any]) -> str | None:
+    """Return the display string for the balancing state sensor.
+
+    Returns None when the E2E call failed so the sensor shows as unknown
+    rather than silently reporting "idle" on a transient network failure.
+    """
+    rf = data.get("regulate_frequency")
+    if not isinstance(rf, dict):
+        return None
+    return rf.get("display", None)
+
+
 # -- Sensor descriptions --
 
 
@@ -380,6 +392,7 @@ async def async_setup_entry(
 
     # Diagnostic: realtime connection status
     entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
+    entities.append(EmaldoBalancingStateSensor(realtime_coordinator))
 
     entities.append(EmaldoPlanSourceSensor(schedule_coordinator))
     entities.append(EmaldoActiveModeSensor(schedule_coordinator))
@@ -705,6 +718,46 @@ class EmaldoScheduleChartSensor(
             "slot_count": len(slots),
             "gap_minutes": gap,
         }
+
+
+class EmaldoBalancingStateSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity):
+    """Reports the real-time grid frequency regulation (balancing) state."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Balancing state"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [
+        "idle",
+        "pre_balancing",
+        "fcr_n",
+        "fcr_d_up",
+        "fcr_d_down",
+        "fcr_d_up_down",
+        "mfrr_up",
+        "mfrr_down",
+        "balancing_failed",
+    ]
+    _attr_icon = "mdi:sine-wave"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.home_id}_balancing_state"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.coordinator.device_id or self.coordinator.home_id)},
+            name=self.coordinator.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=self.coordinator.device_model,
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        rf = self.coordinator.regulate_frequency
+        if not isinstance(rf, dict):
+            return None
+        return rf.get("display")
 
 
 class EmaldoRealtimeStatusSensor(SensorEntity):
