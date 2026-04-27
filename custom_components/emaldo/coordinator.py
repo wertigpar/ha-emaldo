@@ -258,6 +258,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._session: PersistentE2ESession | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
+        self._regulate_frequency: dict | None = None
+        self._balancing_poll_counter: int = 0
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
@@ -389,7 +391,33 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._empty_reads = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
+
+        # Poll balancing state every 6th successful read (~60s) using the same session.
+        # This avoids opening a competing UDP socket from the slow coordinator.
+        self._balancing_poll_counter += 1
+        if self._balancing_poll_counter >= 6:
+            self._balancing_poll_counter = 0
+            try:
+                rf = await self.hass.async_add_executor_job(
+                    self._session.read_regulate_frequency_state
+                )
+                # APK analysis (zd/j.java class y): device always responds
+                # with the actual state (0=Idle, 1=OnHold, 2+=active).
+                # None means the query itself failed (session/timeout), so
+                # keep the last known value rather than falsely reporting idle.
+                if rf is not None:
+                    self._regulate_frequency = rf
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Regulate frequency state read failed: %s", err)
+                # Keep the last known value so the sensor doesn't flicker to unknown
+                # on a transient failure.
+
         return data
+
+    @property
+    def regulate_frequency(self) -> dict | None:
+        """Return the last known grid frequency regulation state, or None."""
+        return self._regulate_frequency
 
     async def _close_session(self) -> None:
         """Close the current session (if any)."""

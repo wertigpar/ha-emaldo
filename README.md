@@ -99,6 +99,25 @@ Updated on the configured polling schedule.
 | **Active mode** | The effective action of the current slot (e.g. `Charge`, `Discharge`, `Idle`, `charge-high (72%)`) |
 | **Schedule chart** | Numeric mode of current slot (1/0/−1) with full schedule data in attributes |
 
+### Real-time Balancing Sensor
+
+Read via E2E on every coordinator poll (best-effort — unavailable when E2E is unreachable).
+
+| Sensor | Description |
+|---|---|
+| **Balancing state** | Current grid frequency regulation state (`idle`, `pre_balancing`, `balancing`, `balancing_failed`) |
+
+#### Balancing State Values
+
+| Value | Meaning |
+|---|---|
+| `idle` | Battery is not participating in any grid balancing service |
+| `pre_balancing` | Battery is reserved / on hold for a balancing service (waiting to activate) |
+| `balancing` | Battery is actively providing an FCR-N, FCR-D, or mFRR grid balancing service |
+| `balancing_failed` | The balancing session ended with an error reported by the Emaldo server |
+
+The sensor uses `device_class: enum` with four fixed options. It is best-effort — if the E2E connection fails it returns `unknown` until the next successful poll.
+
 ### Schedule Chart Attributes
 
 The **Schedule chart** sensor exposes the full schedule as extra state attributes for dashboard visualization:
@@ -394,7 +413,7 @@ Solar forecast and electricity price on a single chart:
 ```yaml
 type: custom:apexcharts-card
 header:
-  title: Solar + Price
+  title: Emaldo Solar & Price Tables
   show: true
   show_states: false
 graph_span: 48h
@@ -432,7 +451,7 @@ series:
       legend_value: false
     data_generator: |
       const schedule = entity.attributes.schedule || [];
-      return schedule.map(s => [new Date(s.t).getTime(), s.solar]);
+      return schedule.map(s => [new Date(s.t).getTime(), s.solar * 10]);
   - entity: sensor.power_store_schedule_chart
     name: Price
     type: line
@@ -503,7 +522,7 @@ emaldo/
 ├── const.py                 # Integration constants and defaults
 ├── coordinator.py           # Power/battery data coordinator (60s polling)
 ├── schedule_coordinator.py  # Schedule + override coordinator (custom time triggers, E2E retry)
-├── sensor.py                # 7 power sensors + 3 schedule sensors
+├── sensor.py                # 7 power sensors + 3 schedule sensors + 1 balancing state sensor
 ├── services.py              # set_slot_range, apply_bulk_schedule, reset_to_internal, refresh_schedule
 ├── services.yaml            # Service UI descriptions
 ├── strings.json             # Translation strings
