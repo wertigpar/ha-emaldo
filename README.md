@@ -24,29 +24,9 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 
 ## Installation
 
-1. Copy the `emaldo` folder into your Home Assistant `custom_components/` directory:
+1. Copy the `emaldo` folder into your Home Assistant `custom_components/` directory.
 
-   ```
-   custom_components/
-   └── emaldo/
-       ├── __init__.py
-       ├── config_flow.py
-       ├── const.py
-       ├── coordinator.py
-       ├── manifest.json
-       ├── schedule_coordinator.py
-       ├── sensor.py
-       ├── services.py
-       ├── services.yaml
-       ├── strings.json
-       └── emaldo_lib/
-           ├── __init__.py
-           ├── client.py
-           ├── const.py
-           ├── crypto.py
-           ├── e2e.py
-           └── exceptions.py
-   ```
+   See the [Architecture](#architecture) section for the full file list.
 
 2. Restart Home Assistant.
 
@@ -143,11 +123,16 @@ The **EV fixed charge amount** number is only effective when mode is `instant_fi
 | Value | Meaning |
 |---|---|
 | `idle` | Battery is not participating in any grid balancing service |
-| `pre_balancing` | Battery is reserved / on hold for a balancing service (waiting to activate) |
-| `balancing` | Battery is actively providing an FCR-N, FCR-D, or mFRR grid balancing service |
+| `pre_balancing` | Battery is on hold, balancing is imminent |
+| `fcr_n` | Actively providing FCR-N (Normal Frequency Containment Reserve) |
+| `fcr_d_up` | Actively providing FCR-D Up (Disturbance reserve, upward regulation) |
+| `fcr_d_down` | Actively providing FCR-D Down (Disturbance reserve, downward regulation) |
+| `fcr_d_up_down` | Actively providing FCR-D Up+Down (bidirectional disturbance reserve) |
+| `mfrr_up` | Providing mFRR Up (manual Frequency Restoration Reserve, upward) |
+| `mfrr_down` | Providing mFRR Down (manual Frequency Restoration Reserve, downward) |
 | `balancing_failed` | The balancing session ended with an error reported by the Emaldo server |
 
-The sensor uses `device_class: enum` with four fixed options. It is best-effort — if the E2E connection fails it returns `unknown` until the next successful poll.
+The sensor uses `device_class: enum`. It is best-effort — if the E2E connection fails it returns `unknown` until the next successful poll.
 
 ### Schedule Chart Attributes
 
@@ -549,10 +534,13 @@ cards:
 ```
 emaldo/
 ├── __init__.py              # Entry setup, platform forwarding, options listener
-├── config_flow.py           # Config + options flow (credentials, schedule polling)
+├── calendar.py              # Battery schedule calendar entity
+├── config_flow.py           # Config + options + reconfigure flow
 ├── const.py                 # Integration constants and defaults
 ├── coordinator.py           # Power/battery data coordinator (60s polling)
+├── number.py                # EV fixed charge amount number entity
 ├── schedule_coordinator.py  # Schedule + override coordinator (custom time triggers, E2E retry)
+├── select.py                # Control priority + EV charge mode select entities
 ├── sensor.py                # 7 power sensors + 3 schedule sensors + 1 balancing state sensor
 ├── services.py              # set_slot_range, apply_bulk_schedule, reset_to_internal, refresh_schedule
 ├── services.yaml            # Service UI descriptions

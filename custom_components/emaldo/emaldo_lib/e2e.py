@@ -1032,7 +1032,12 @@ def read_regulate_frequency_state(
     ``display`` is one of:
       - ``"idle"``             — no balancing activity
       - ``"pre_balancing"``    — device is on hold, balancing imminent
-      - ``"balancing"``        — actively participating in FCR/mFRR
+      - ``"fcr_n"``            — actively providing FCR-N
+      - ``"fcr_d_up"``         — actively providing FCR-D Up
+      - ``"fcr_d_down"``       — actively providing FCR-D Down
+      - ``"fcr_d_up_down"``    — actively providing FCR-D Up+Down
+      - ``"mfrr_up"``          — providing mFRR Up
+      - ``"mfrr_down"``        — providing mFRR Down
       - ``"balancing_failed"`` — device reported an error
 
     Returns *None* if the device did not respond or payload was unreadable.
