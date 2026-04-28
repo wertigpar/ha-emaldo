@@ -119,6 +119,66 @@ class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Allow the user to update credentials and app parameters."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            set_params(
+                user_input[CONF_APP_ID],
+                user_input[CONF_APP_SECRET],
+                user_input[CONF_APP_VERSION],
+            )
+
+            try:
+                client = EmaldoClient(app_version=user_input[CONF_APP_VERSION])
+                await self.hass.async_add_executor_job(
+                    client.login, user_input[CONF_EMAIL], user_input[CONF_PASSWORD]
+                )
+
+                home_id = user_input.get(CONF_HOME_ID, "").strip()
+                if not home_id:
+                    hid, _ = await self.hass.async_add_executor_job(client.find_home)
+                    home_id = hid
+
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data={
+                        CONF_EMAIL: user_input[CONF_EMAIL],
+                        CONF_PASSWORD: user_input[CONF_PASSWORD],
+                        CONF_HOME_ID: home_id,
+                        CONF_APP_ID: user_input[CONF_APP_ID],
+                        CONF_APP_SECRET: user_input[CONF_APP_SECRET],
+                        CONF_APP_VERSION: user_input[CONF_APP_VERSION],
+                    },
+                )
+            except EmaldoAuthError:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                _LOGGER.exception("Unexpected error during Emaldo reconfigure")
+                errors["base"] = "cannot_connect"
+
+        current = entry.data
+        reconfigure_schema = vol.Schema(
+            {
+                vol.Required(CONF_EMAIL, default=current.get(CONF_EMAIL, "")): str,
+                vol.Required(CONF_PASSWORD, default=current.get(CONF_PASSWORD, "")): str,
+                vol.Required(CONF_APP_ID, default=current.get(CONF_APP_ID, "")): str,
+                vol.Required(CONF_APP_SECRET, default=current.get(CONF_APP_SECRET, "")): str,
+                vol.Required(CONF_APP_VERSION, default=current.get(CONF_APP_VERSION, "")): str,
+                vol.Optional(CONF_HOME_ID, default=current.get(CONF_HOME_ID, "")): str,
+            }
+        )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=reconfigure_schema,
+            errors=errors,
+        )
+
 
 class EmaldoOptionsFlow(OptionsFlowWithConfigEntry):
     """Handle Emaldo options."""

@@ -31,6 +31,10 @@ from .emaldo_lib.e2e import (
     generate_nonce,
     _run_session,
     parse_ev_charging_info,
+    set_ev_charging_mode_smart,
+    set_ev_charging_mode_instant,
+    EV_MODE_INSTANT_FULL,
+    EV_MODE_INSTANT_FIXED,
     _EV_TYPE_GET_STATE,
 )
 
@@ -220,6 +224,20 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "weekend": weekend,
             "sync": sync_flag,
         }
+
+    def _write_ev_mode(self, mode: int, fixed_kwh: int = 0) -> bool:
+        """Write EV charging mode via E2E (synchronous, call via executor).
+
+        Modes 1-3 are Smart sub-modes; 4-5 are Instant sub-modes.
+        Returns True if the device acknowledged the write.
+        """
+        client = self._ensure_client()
+        creds = client.e2e_login(self.home_id, self._device_id, self._model)
+        if mode in (1, 2, 3):
+            return set_ev_charging_mode_smart(creds, mode)
+        if mode in (EV_MODE_INSTANT_FULL, EV_MODE_INSTANT_FIXED):
+            return set_ev_charging_mode_instant(creds, mode, fixed_kwh=fixed_kwh)
+        raise ValueError(f"Unknown EV mode: {mode}")
 
 
 class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):

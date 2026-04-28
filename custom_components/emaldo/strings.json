@@ -12,6 +12,18 @@
           "app_secret": "App Secret",
           "app_version": "App Version"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Emaldo",
+        "description": "Update credentials or app parameters without removing the integration.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "home_id": "Home ID (leave empty to re-detect)",
+          "app_id": "App ID",
+          "app_secret": "App Secret",
+          "app_version": "App Version"
+        }
       }
     },
     "error": {
@@ -20,7 +32,8 @@
       "no_devices": "No battery devices found in the specified home."
     },
     "abort": {
-      "already_configured": "This account is already configured."
+      "already_configured": "This account is already configured.",
+      "reconfigure_successful": "Credentials updated and integration reloaded."
     }
   },
   "options": {
