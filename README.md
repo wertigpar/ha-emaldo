@@ -8,8 +8,10 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 - **Schedule visualization** — Exposes the Emaldo AI schedule and override data as chart-ready attributes
 - **Override services** — Set time-range overrides, push full 96-slot schedules, or reset to the internal AI plan
 - **E2E communication** — Reads and writes override slots via Emaldo's end-to-end encrypted channel
+- **EV charge control** — Select EV charging mode and set fixed charge amount (Power Core models only)
 - **Resilient polling** — On API failures, sensors keep their last-known values while exponential-backoff retries recover automatically (60 s → 120 s → 4 min → … capped at 30 min)
 - **Next-day schedule event** — Fires `emaldo_next_day_schedule_ready` when tomorrow's schedule appears
+- **Reconfigure without removing** — Update credentials or app version via the Reconfigure menu
 
 ## Prerequisites
 
@@ -63,6 +65,14 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 | **App Version** | Application version string (e.g. `2.8.3`) |
 | **Home ID** | *(optional)* Leave empty to auto-detect |
 
+### Reconfiguring credentials
+
+To update your email, password, app version, or encryption keys without removing the integration:
+
+**Settings → Devices & Services → Emaldo → ⋮ (three-dot menu) → Reconfigure**
+
+All current values are pre-filled. After saving, the integration reloads automatically with the new credentials.
+
 ### Options (Schedule Polling)
 
 After setup, configure schedule polling via **Configure**:
@@ -106,6 +116,27 @@ Read via E2E on every coordinator poll (best-effort — unavailable when E2E is 
 | Sensor | Description |
 |---|---|
 | **Balancing state** | Current grid frequency regulation state (`idle`, `pre_balancing`, `balancing`, `balancing_failed`) |
+
+### EV Charge Controls (Power Core models only)
+
+These entities are created only for **Power Core** models (e.g. `PC1-BAK15-HS10`, `PC3-*`). They are hidden for models without an integrated EV charger such as `PS1-BAK10-HS10`.
+
+| Entity | Type | Description |
+|---|---|---|
+| **EV charge mode** | Select | Sets the EV charging strategy (see modes below) |
+| **EV fixed charge amount** | Number | Target kWh for *Instant Fixed* mode (1–100 kWh) |
+
+**EV charge mode options:**
+
+| Option | Description |
+|---|---|
+| `lowest_price` | Smart — charge during the cheapest grid hours |
+| `solar_only` | Smart — charge only from surplus solar PV |
+| `scheduled` | Smart — charge on a configured weekday/weekend hour schedule |
+| `instant_full` | Instant — charge at full power until the car is full |
+| `instant_fixed` | Instant — charge exactly the configured kWh amount then stop |
+
+The **EV fixed charge amount** number is only effective when mode is `instant_fixed`.
 
 #### Balancing State Values
 
