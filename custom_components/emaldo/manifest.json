@@ -4,6 +4,7 @@
   "codeowners": ["@wertigpar"],
   "config_flow": true,
   "dependencies": [],
+  "after_dependencies": ["recorder"],
   "documentation": "https://github.com/wertigpar/ha-emaldo",
   "issue_tracker": "https://github.com/wertigpar/ha-emaldo/issues",
   "iot_class": "cloud_polling",
