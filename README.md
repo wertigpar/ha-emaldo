@@ -31,13 +31,21 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 
 ## Installation
 
-1. Copy the `emaldo` folder into your Home Assistant `custom_components/` directory.
+### Option 1: HACS (Recommended)
 
-   See the [Architecture](#architecture) section for the full file list.
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wertigpar&repository=ha-emaldo&category=integration)
 
-2. Restart Home Assistant.
+1. Click the button above, or open HACS in Home Assistant, go to **Custom repositories**, add `https://github.com/wertigpar/ha-emaldo` with category **Integration**.
+2. Search for **Emaldo Battery** in HACS and click **Install**.
+3. Restart Home Assistant.
+4. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
 
-3. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
+### Option 2: Manual Installation
+
+1. Download the [latest release](https://github.com/wertigpar/ha-emaldo/releases) from GitHub.
+2. Copy the `custom_components/emaldo` folder into your Home Assistant `config/custom_components/` directory.
+3. Restart Home Assistant.
+4. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
 
 ## Configuration
 
