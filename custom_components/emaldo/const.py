@@ -7,6 +7,10 @@ CONF_APP_ID = "app_id"
 CONF_APP_SECRET = "app_secret"
 CONF_APP_VERSION = "app_version"
 
+DEFAULT_APP_ID = "CXRqKjx2MzSAkdyucR9NDyPiiQR2vQcQ"
+DEFAULT_APP_SECRET = "FpF4Uqiio9k8p9VUSX36UZxy9wLs7ybT"
+DEFAULT_APP_VERSION = "2.8.4"
+
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 REALTIME_SCAN_INTERVAL = 10  # seconds — fast E2E power flow polling
 KEEPALIVE_INTERVAL = 15  # seconds — UDP session keepalive

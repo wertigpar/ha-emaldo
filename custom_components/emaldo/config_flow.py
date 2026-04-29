@@ -26,6 +26,9 @@ from .const import (
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_APP_VERSION,
+    DEFAULT_APP_ID,
+    DEFAULT_APP_SECRET,
+    DEFAULT_APP_VERSION,
     CONF_SCHEDULE_START_HOUR,
     CONF_SCHEDULE_START_MINUTE,
     CONF_SCHEDULE_INTERVAL,
@@ -40,9 +43,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_EMAIL): str,
         vol.Required(CONF_PASSWORD): str,
-        vol.Required(CONF_APP_ID): str,
-        vol.Required(CONF_APP_SECRET): str,
-        vol.Required(CONF_APP_VERSION): str,
+        vol.Required(CONF_APP_ID, default=DEFAULT_APP_ID): str,
+        vol.Required(CONF_APP_SECRET, default=DEFAULT_APP_SECRET): str,
+        vol.Required(CONF_APP_VERSION, default=DEFAULT_APP_VERSION): str,
         vol.Optional(CONF_HOME_ID): str,
     }
 )
