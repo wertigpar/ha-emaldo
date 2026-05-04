@@ -24,6 +24,7 @@ from .emaldo_lib import (
     EmaldoConnectionError,
     PersistentE2ESession,
 )
+from .emaldo_lib.exceptions import EmaldoE2EError
 from .emaldo_lib.const import set_params
 from .emaldo_lib.e2e import (
     build_subscription_packet,
@@ -344,6 +345,34 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # Session died mid-read — force recreation on next call
             self._session = None
         return data
+
+    def _write_thirdparty_pv(self, enabled: bool) -> None:
+        """Send SET_THIRDPARTYPV_ON (0x41) via the existing persistent session.
+
+        Routing the command through the active session socket avoids the
+        conflict that would arise from opening a second socket with
+        ``_run_session`` while the keepalive loop is running.
+
+        On auth or session expiry the client and session are reset and the
+        command is retried once with fresh credentials.
+        """
+        payload = bytes([0x01 if enabled else 0x00])
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                session.send_command(0x41, payload)
+                return
+            except EmaldoAuthError:
+                # REST token expired — force full re-login on next _ensure_session
+                self._parent._client = None  # noqa: SLF001
+                self._session = None
+                if attempt == 1:
+                    raise
+            except EmaldoE2EError:
+                # UDP session closed/expired — drop it so _ensure_session reconnects
+                self._session = None
+                if attempt == 1:
+                    raise
 
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3

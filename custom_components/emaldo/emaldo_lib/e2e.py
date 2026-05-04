@@ -2284,6 +2284,50 @@ def load_ev_page_data(
 
 
 # ---------------------------------------------------------------------------
+# Third-party PV
+# ---------------------------------------------------------------------------
+#
+# The official app exposes a boolean "Third-Party PV" switch under Energy
+# Settings. The state is returned in the 0x30 power-flow response (byte 19)
+# and can be changed with opcode 0x41 (SET_THIRDPARTYPV_ON).
+#
+# Wire: 0x41 A0 (subscribe mode), payload = 1 byte: 0x01=on, 0x00=off.
+# APK: dispatch-table case 56 (=0x38) in Lcom/dinsafer/module_bmt/hd/j;.b(Map);
+#      addOptionHeader short=-24511 (0xA041); wire byte-swapped → 0x41A0.
+# setIsNeedResult=false → fire-and-forget (no response payload to parse).
+
+_THIRDPARTY_PV_SET_TYPE = 0x41  # SET_THIRDPARTYPV_ON (APK Short 0xA041, wire byte-swapped)
+
+
+def set_thirdparty_pv(
+    e2e_creds: dict,
+    enabled: bool,
+    *,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> bool:
+    """Enable or disable third-party PV input (type 0x41).
+
+    Sends ``SET_THIRDPARTYPV_ON`` with a 1-byte boolean payload.
+    This is a fire-and-forget command; the updated state is visible
+    in the next :func:`read_power_flow` response (byte 19).
+
+    Returns *True* if the server acknowledged the command.
+    """
+    session_nonce = generate_nonce()
+    payload = bytes([0x01 if enabled else 0x00])
+    pkt = build_subscription_packet(
+        e2e_creds, _THIRDPARTY_PV_SET_TYPE, session_nonce, payload=payload,
+    )
+    results = _run_session(
+        e2e_creds, [("SetThirdpartyPV(0x41)", pkt)],
+        timeout=timeout, log=log,
+    )
+    _, resp = results[0]
+    return resp is not None
+
+
+# ---------------------------------------------------------------------------
 # Persistent E2E Session (for real-time polling)
 # ---------------------------------------------------------------------------
 
@@ -2582,6 +2626,28 @@ class PersistentE2ESession:
         except Exception:  # noqa: BLE001 - best-effort parse
             return None
         return parse_power_flow(decrypted)
+
+    def send_command(self, msg_type: int, payload: bytes) -> bytes | None:
+        """Send a single write command over the existing session socket.
+
+        Uses the session's established nonce and socket so the relay sees the
+        command on the same connection it already knows about.  This avoids the
+        session-conflict that arises when ``_run_session`` opens a competing
+        second socket while the persistent session is active.
+
+        Args:
+            msg_type: E2E message type byte (e.g. 0x38 for SET_THIRDPARTYPV_ON).
+            payload:  Raw command payload bytes.
+
+        Returns:
+            The relay's response bytes, or *None* on timeout / closed session.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+        pkt = build_subscription_packet(
+            self._creds, msg_type, self._session_nonce, payload=payload,
+        )
+        return self._send_raw(pkt, f"Command(0x{msg_type:02x})")
 
     def close(self) -> None:
         """Close the socket and mark the session closed."""
