@@ -24,10 +24,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import EmaldoCoordinator
+from .schedule_coordinator import EmaldoScheduleCoordinator
 from .emaldo_lib.e2e import (
     EV_MODE_INSTANT_FIXED,
     set_ev_charging_mode_instant,
 )
+from .emaldo_lib.exceptions import EmaldoAuthError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,15 +40,26 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Emaldo number entities from a config entry."""
-    power_coordinator: EmaldoCoordinator = hass.data[DOMAIN][entry.entry_id]["power"]
+    data = hass.data[DOMAIN][entry.entry_id]
+    power_coordinator: EmaldoCoordinator = data["power"]
+    schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
 
-    # Only add the EV slider if the device actually reports EV state.
+    entities: list[NumberEntity] = []
+
+    # EV "Fixed charge amount" slider — only if device reports EV state.
     ev = (power_coordinator.data or {}).get("ev")
     if ev is None:
         _LOGGER.debug("No EV state reported; skipping EV fixed charge number")
-        return
+    else:
+        entities.append(EmaldoEvFixedChargeNumber(power_coordinator))
 
-    async_add_entities([EmaldoEvFixedChargeNumber(power_coordinator)])
+    # AI Battery Range markers — always present; override write is destructive
+    # (clears all per-15-min slot overrides), so the slider always sets the
+    # battery_range_override flag to whatever the switch entity reads.
+    entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "smart"))
+    entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "emergency"))
+
+    async_add_entities(entities)
 
 
 class EmaldoEvFixedChargeNumber(CoordinatorEntity[EmaldoCoordinator], NumberEntity):
@@ -117,4 +130,100 @@ class EmaldoEvFixedChargeNumber(CoordinatorEntity[EmaldoCoordinator], NumberEnti
         if not ok:
             _LOGGER.warning("EV fixed charge write (%d kWh) was not acknowledged", kwh)
         # Refresh so the stored state is re-read from the device
+        await self.coordinator.async_request_refresh()
+
+
+class EmaldoBatteryRangeMarker(
+    CoordinatorEntity[EmaldoScheduleCoordinator], NumberEntity
+):
+    """Slider for one of the AI Battery Range markers (smart or emergency).
+
+    Reads from the schedule coordinator's last `get_overrides` snapshot.
+    Writes via :meth:`EmaldoClient.set_battery_range`, which sends opcode
+    0x1AA0 with all 96 per-slot overrides cleared to 0x80. The override-active
+    flag (byte 2) is preserved from the last read state — only the
+    `EmaldoBatteryRangeOverrideSwitch` entity changes that flag.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:battery-charging-medium"
+    _attr_mode = NumberMode.SLIDER
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "%"
+
+    def __init__(
+        self,
+        coordinator: EmaldoScheduleCoordinator,
+        kind: str,
+    ) -> None:
+        """Initialize. ``kind`` is 'smart' or 'emergency'."""
+        super().__init__(coordinator)
+        if kind not in ("smart", "emergency"):
+            raise ValueError(f"kind must be 'smart' or 'emergency' (got {kind!r})")
+        self._kind = kind
+        nice = "Smart reserve" if kind == "smart" else "Emergency reserve"
+        self._attr_name = f"AI {nice}"
+        self._attr_unique_id = f"{coordinator.home_id}_battery_range_{kind}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link to the main Emaldo device."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current marker % from the last override read."""
+        ov = (self.coordinator.data or {}).get("overrides") or {}
+        key = "high_marker" if self._kind == "smart" else "low_marker"
+        val = ov.get(key)
+        return float(val) if val is not None else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Write a new marker. Preserves the other marker + override flag."""
+        new_pct = int(round(value))
+        ov = (self.coordinator.data or {}).get("overrides") or {}
+        smart = ov.get("high_marker", 50)
+        emergency = ov.get("low_marker", 10)
+        enable = bool(ov.get("battery_range_override", False))
+        if self._kind == "smart":
+            smart = new_pct
+        else:
+            emergency = new_pct
+        if smart < emergency:
+            _LOGGER.warning(
+                "Refusing battery-range write: smart (%d) < emergency (%d)",
+                smart, emergency,
+            )
+            return
+
+        def _write() -> bool:
+            for attempt in range(2):
+                try:
+                    client = self.coordinator._ensure_client()  # noqa: SLF001
+                    return client.set_battery_range(
+                        self.coordinator.home_id,
+                        self.coordinator._device_id,  # noqa: SLF001
+                        self.coordinator._model,      # noqa: SLF001
+                        smart_pct=smart,
+                        emergency_pct=emergency,
+                        enable=enable,
+                    )
+                except EmaldoAuthError:
+                    if attempt == 0:
+                        self.coordinator._client = None  # noqa: SLF001
+                    else:
+                        raise
+            return False
+
+        ok = await self.hass.async_add_executor_job(_write)
+        if not ok:
+            _LOGGER.warning("Battery Range write was not acknowledged")
         await self.coordinator.async_request_refresh()
