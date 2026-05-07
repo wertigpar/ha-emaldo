@@ -768,6 +768,7 @@ class EmaldoClient:
         *,
         high_marker: int = DEFAULT_MARKER_HIGH,
         low_marker: int = DEFAULT_MARKER_LOW,
+        battery_range_override: bool = False,
         log: Callable[..., None] | None = None,
     ) -> bool:
         """Send override values to the device.
@@ -783,6 +784,9 @@ class EmaldoClient:
             slot_values: 96 bytes of override values.
             high_marker: High battery marker percentage.
             low_marker: Low battery marker percentage.
+            battery_range_override: When ``True`` activates the app's
+                "Battery Range = override" mode (byte 2 of payload). Default
+                ``False`` leaves the AI Battery Range setting unchanged.
             log: Optional log callback ``log(message: str)``.
 
         Returns:
@@ -793,7 +797,8 @@ class EmaldoClient:
         creds = self.e2e_login(home_id, device_id, model)
         return _e2e.send_override(
             creds, slot_values,
-            high_marker=high_marker, low_marker=low_marker, log=log,
+            high_marker=high_marker, low_marker=low_marker,
+            battery_range_override=battery_range_override, log=log,
         )
 
     def reset_overrides(
@@ -804,13 +809,45 @@ class EmaldoClient:
         *,
         high_marker: int = DEFAULT_MARKER_HIGH,
         low_marker: int = DEFAULT_MARKER_LOW,
+        battery_range_override: bool = False,
         log: Callable[..., None] | None = None,
     ) -> bool:
         """Clear all overrides (all slots → follow base schedule)."""
         slot_values = bytes([SLOT_NO_OVERRIDE] * 96)
         return self.set_override(
             home_id, device_id, model, slot_values,
-            high_marker=high_marker, low_marker=low_marker, log=log,
+            high_marker=high_marker, low_marker=low_marker,
+            battery_range_override=battery_range_override, log=log,
+        )
+
+    def set_battery_range(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        *,
+        smart_pct: int,
+        emergency_pct: int,
+        enable: bool = True,
+        log: Callable[..., None] | None = None,
+    ) -> bool:
+        """Write the AI Battery Range — opcode 0x1AA0 with `enable` byte.
+
+        Mirrors the app's "Save Battery Range" button: sends the new
+        smart/emergency markers with all 96 per-slot overrides cleared to
+        ``SLOT_NO_OVERRIDE`` (0x80). ``enable=True`` activates
+        "Battery Range = override" — AI must operate inside
+        [emergency_pct, smart_pct]. ``enable=False`` reverts to AI-chosen
+        range while persisting the markers.
+        """
+        if not (0 <= smart_pct <= 100 and 0 <= emergency_pct <= 100):
+            raise ValueError("smart_pct and emergency_pct must be 0..100")
+        if smart_pct < emergency_pct:
+            raise ValueError("smart_pct must be >= emergency_pct")
+        return self.reset_overrides(
+            home_id, device_id, model,
+            high_marker=smart_pct, low_marker=emergency_pct,
+            battery_range_override=enable, log=log,
         )
 
     # ── Sell (discharge-to-grid) ──────────────────────────────────────

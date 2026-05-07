@@ -63,6 +63,7 @@ def build_override_packet(
     *,
     high_marker: int = DEFAULT_MARKER_HIGH,
     low_marker: int = DEFAULT_MARKER_LOW,
+    battery_range_override: bool = False,
 ) -> bytes:
     """Build an E2E override UDP packet (type 0x1a).
 
@@ -73,6 +74,11 @@ def build_override_packet(
         msg_id: 27-char message ID (generated if *None*).
         high_marker: High battery marker percentage (default 72).
         low_marker: Low battery marker percentage (default 20).
+        battery_range_override: When ``True`` sets byte 2 to 0x01 — this is
+            the "AI Battery Range = override" flag that the app's Battery
+            Range save sends (BmtCmd.SET_RESERVE_MODE_AI). When ``False``
+            (default) byte 2 is 0x00 → Battery Range stays in AI mode and
+            only the per-slot overrides apply.
 
     Returns:
         Complete UDP packet ready to send.
@@ -88,8 +94,9 @@ def build_override_packet(
     assert len(msg_id) == 27
 
     # Payload: 4-byte header + slot bytes
-    # Header: [high_marker, low_marker, version_flag, slot_count]
-    override_payload = bytes([high_marker, low_marker, 0x00, n_slots]) + slot_values
+    # Header: [high_marker, low_marker, enable_flag, slot_count]
+    enable_byte = 0x01 if battery_range_override else 0x00
+    override_payload = bytes([high_marker, low_marker, enable_byte, n_slots]) + slot_values
     encrypted = encrypt_payload(override_payload, e2e_creds["chat_secret"], nonce)
 
     pkt = bytes([0xD9, 0xA0, 0xA0])
@@ -377,7 +384,7 @@ def parse_override_state(payload: bytes) -> dict | None:
     Payload format:
         Byte 0:   high battery marker (percentage)
         Byte 1:   low battery marker (percentage)
-        Byte 2:   version / dirty flag
+        Byte 2:   battery-range override-enable flag (0 = AI, 1 = override)
         Byte 3:   ``0x58`` (subscription response tag)
         Bytes 4-7: extended header
         Byte 8:   slot count (``0x60``=96 or ``0xC0``=192)
@@ -390,7 +397,8 @@ def parse_override_state(payload: bytes) -> dict | None:
 
     Returns:
         Dict with ``slots`` (list of 96 or 192 ints), ``high_marker``,
-        and ``low_marker``; or *None* on invalid input.
+        ``low_marker``, and ``battery_range_override`` (bool); or *None*
+        on invalid input.
     """
     if payload is None or len(payload) < 105:
         return None
@@ -402,6 +410,7 @@ def parse_override_state(payload: bytes) -> dict | None:
     return {
         "high_marker": payload[0],
         "low_marker": payload[1],
+        "battery_range_override": payload[2] != 0,
         "slots": list(payload[9 : 9 + n_slots]),
     }
 
@@ -1023,13 +1032,16 @@ def send_override(
     *,
     high_marker: int = DEFAULT_MARKER_HIGH,
     low_marker: int = DEFAULT_MARKER_LOW,
+    battery_range_override: bool = False,
     timeout: float = 3.0,
     log: Callable[..., None] | None = None,
 ) -> bool:
     """Send override slot values via E2E protocol.
 
     Performs the full session flow and sends the override packet.
-    Returns *True* if the server acknowledged the override.
+    Returns *True* if the server acknowledged the override. Set
+    ``battery_range_override=True`` to also activate the app's
+    "Battery Range = override" mode (byte 2 of payload).
     """
     session_nonce = generate_nonce()
 
@@ -1048,6 +1060,7 @@ def send_override(
     override_pkt = build_override_packet(
         e2e_creds, slot_values, nonce=session_nonce,
         high_marker=high_marker, low_marker=low_marker,
+        battery_range_override=battery_range_override,
     )
 
     host, port = _resolve_host(e2e_creds["host"])

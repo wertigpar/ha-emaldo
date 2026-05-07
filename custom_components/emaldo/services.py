@@ -44,6 +44,15 @@ SERVICE_RESET_TO_INTERNAL = "reset_to_internal"
 SERVICE_REFRESH_SCHEDULE = "refresh_schedule"
 SERVICE_SET_EV_SCHEDULE = "set_ev_schedule"
 SERVICE_BACKFILL_SOLAR = "backfill_solar"
+SERVICE_SET_BATTERY_RANGE = "set_battery_range"
+
+SCHEMA_SET_BATTERY_RANGE = vol.Schema(
+    {
+        vol.Required("smart_pct"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Required("emergency_pct"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("enable", default=True): cv.boolean,
+    }
+)
 
 SCHEMA_SET_SLOT_RANGE = vol.Schema(
     {
@@ -565,6 +574,52 @@ async def async_handle_backfill_solar(
     _LOGGER.info("Backfill solar: done")
 
 
+async def async_handle_set_battery_range(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Handle the set_battery_range service call.
+
+    Writes the AI Battery Range — the SoC band the AI must operate within.
+    Mirrors the app's "Save Battery Range" save: clears all 96 per-15-min
+    slot overrides to 0x80 and sets byte 2 = 1 ("override mode active") when
+    ``enable`` is True.
+    """
+    smart = call.data["smart_pct"]
+    emergency = call.data["emergency_pct"]
+    enable = call.data.get("enable", True)
+    if smart < emergency:
+        raise vol.Invalid("smart_pct must be >= emergency_pct")
+
+    def _do_write():
+        for attempt in range(2):
+            try:
+                coord, client = _get_coordinator_and_client(hass)
+                hid, did, model = coord.home_id, coord._device_id, coord._model
+                ok = client.set_battery_range(
+                    hid, did, model,
+                    smart_pct=smart, emergency_pct=emergency, enable=enable,
+                )
+                if ok:
+                    _LOGGER.info(
+                        "Battery Range set: %d-%d%% (override=%s)",
+                        emergency, smart, enable,
+                    )
+                return ok
+            except EmaldoAuthError:
+                if attempt == 0:
+                    _LOGGER.debug("Session expired, re-authenticating")
+                    coord._client = None
+                else:
+                    raise
+
+    await hass.async_add_executor_job(_do_write)
+
+    entries = hass.data.get(DOMAIN, {})
+    for entry_data in entries.values():
+        coord = entry_data["schedule"]
+        await coord.async_request_refresh()
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Register Emaldo services."""
     if hass.services.has_service(DOMAIN, SERVICE_SET_SLOT_RANGE):
@@ -587,6 +642,9 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def handle_backfill_solar(call: ServiceCall) -> None:
         await async_handle_backfill_solar(hass, call)
+
+    async def handle_set_battery_range(call: ServiceCall) -> None:
+        await async_handle_set_battery_range(hass, call)
 
     hass.services.async_register(
         DOMAIN,
@@ -623,6 +681,12 @@ def async_register_services(hass: HomeAssistant) -> None:
         handle_backfill_solar,
         schema=SCHEMA_BACKFILL_SOLAR,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_BATTERY_RANGE,
+        handle_set_battery_range,
+        schema=SCHEMA_SET_BATTERY_RANGE,
+    )
 
 
 def async_unregister_services(hass: HomeAssistant) -> None:
@@ -634,3 +698,4 @@ def async_unregister_services(hass: HomeAssistant) -> None:
         hass.services.async_remove(DOMAIN, SERVICE_REFRESH_SCHEDULE)
         hass.services.async_remove(DOMAIN, SERVICE_SET_EV_SCHEDULE)
         hass.services.async_remove(DOMAIN, SERVICE_BACKFILL_SOLAR)
+        hass.services.async_remove(DOMAIN, SERVICE_SET_BATTERY_RANGE)

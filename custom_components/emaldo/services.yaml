@@ -169,3 +169,46 @@ backfill_solar:
           min: 1
           max: 90
           step: 1
+
+set_battery_range:
+  name: Set AI Battery Range
+  description: >
+    Write the AI Battery Range — the SoC band the AI must operate within.
+    Mirrors the app's Battery Range slider + override toggle. Sends opcode
+    0x1AA0 with all 96 per-15-min slot overrides cleared to 0x80
+    (no-override). Live-confirmed 2026-05-07 against Power Core 2.0.
+  fields:
+    smart_pct:
+      name: Smart reserve %
+      description: Upper SoC threshold of the AI operating band (0-100).
+      required: true
+      example: 50
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    emergency_pct:
+      name: Emergency reserve %
+      description: >
+        Lower SoC threshold of the AI operating band (0-100). Must be
+        less than or equal to smart_pct.
+      required: true
+      example: 10
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    enable:
+      name: Override active
+      description: >
+        True (default) activates "Battery Range = override" — AI is constrained
+        to [emergency_pct, smart_pct]. False reverts to "Battery Range = AI" —
+        the markers are persisted but AI picks its own band.
+      default: true
+      example: true
+      selector:
+        boolean:
