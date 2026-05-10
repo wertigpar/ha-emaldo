@@ -1,21 +1,17 @@
-[![GitHub Release](https://img.shields.io/github/release/wertigpar/ha-emaldo.svg)](https://github.com/wertigpar/ha-emaldo/releases)
-[![License](https://img.shields.io/github/license/wertigpar/ha-emaldo.svg)](https://github.com/wertigpar/ha-emaldo/blob/main/LICENSE)
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![Validate](https://github.com/wertigpar/ha-emaldo/actions/workflows/validate.yml/badge.svg)](https://github.com/wertigpar/ha-emaldo/actions/workflows/validate.yml)
-
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wertigpar&repository=ha-emaldo&category=integration)
-
 # Emaldo Battery — Home Assistant Custom Integration
 
 A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery systems. Provides real-time power monitoring, battery state tracking, schedule visualization, and full override control via services.
 
 ## Features
 
-- **Real-time sensors** — Battery SoC, battery power, grid power, load power, daily charge/discharge energy
+- **Real-time + daily energy sensors** — Battery SoC/capacity/power, grid power/import/export, load power/energy, solar power/energy, EV charge power
 - **Schedule visualization** — Exposes the Emaldo AI schedule and override data as chart-ready attributes
 - **Override services** — Set time-range overrides, push full 96-slot schedules, or reset to the internal AI plan
+- **Advanced services** — EV smart schedule writes, historical solar backfill for Energy Dashboard, and AI Battery Range write
 - **E2E communication** — Reads and writes override slots via Emaldo's end-to-end encrypted channel
-- **EV charge control** — Select EV charging mode and set fixed charge amount (Power Core models only)
+- **EV charge control** — Select EV charging mode, set fixed charge amount, and write weekday/weekend EV schedule (Power Core models only)
+- **Third-party PV control** — Built-in switch for external PV routing; used by Battery Optimizer PV sell strategy
+- **AI Battery Range controls** — Smart/Emergency reserve sliders and override switch
 - **Resilient polling** — On API failures, sensors keep their last-known values while exponential-backoff retries recover automatically (60 s → 120 s → 4 min → … capped at 30 min)
 - **Next-day schedule event** — Fires `emaldo_next_day_schedule_ready` when tomorrow's schedule appears
 - **Reconfigure without removing** — Update credentials or app version via the Reconfigure menu
@@ -31,21 +27,13 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 
 ## Installation
 
-### Option 1: HACS (Recommended)
+1. Copy the `emaldo` folder into your Home Assistant `custom_components/` directory.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wertigpar&repository=ha-emaldo&category=integration)
+   See the [Architecture](#architecture) section for the full file list.
 
-1. Click the button above, or open HACS in Home Assistant, go to **Custom repositories**, add `https://github.com/wertigpar/ha-emaldo` with category **Integration**.
-2. Search for **Emaldo Battery** in HACS and click **Install**.
-3. Restart Home Assistant.
-4. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
+2. Restart Home Assistant.
 
-### Option 2: Manual Installation
-
-1. Download the [latest release](https://github.com/wertigpar/ha-emaldo/releases) from GitHub.
-2. Copy the `custom_components/emaldo` folder into your Home Assistant `config/custom_components/` directory.
-3. Restart Home Assistant.
-4. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
+3. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
 
 ## Configuration
 
@@ -57,7 +45,7 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 | **Password** | Your Emaldo account password |
 | **App ID** | Application ID from the Emaldo APK |
 | **App Secret** | Application secret from the Emaldo APK |
-| **App Version** | Application version string (e.g. `2.8.4`) |
+| **App Version** | Application version string (e.g. `2.8.3`) |
 | **Home ID** | *(optional)* Leave empty to auto-detect |
 
 ### Reconfiguring credentials
@@ -80,9 +68,9 @@ After setup, configure schedule polling via **Configure**:
 
 ## Sensors
 
-### Power & Battery Sensors
+### Power & Energy Sensors
 
-Polled every 60 seconds from the Emaldo cloud API.
+Mixed source: slow REST polling (daily totals) and fast E2E polling (realtime power).
 
 | Sensor | Unit | Description |
 |---|---|---|
@@ -90,9 +78,28 @@ Polled every 60 seconds from the Emaldo cloud API.
 | **Battery capacity** | kWh | Total battery capacity |
 | **Battery charged today** | kWh | Energy charged today (cumulative) |
 | **Battery discharged today** | kWh | Energy discharged today (cumulative) |
-| **Battery power** | W | Net battery power (positive = charging, negative = discharging) |
+| **Solar energy today** | kWh | Total solar production today |
+| **Grid import today** | kWh | Total imported energy today |
+| **Grid export today** | kWh | Total exported energy today |
+| **Load energy today** | kWh | Total household consumption today |
+| **Battery power** | W | Net battery power (HA convention: positive = discharging to home, negative = charging) |
 | **Grid power** | W | Net grid power (positive = importing, negative = exporting) |
-| **Load power** | W | Household load power |
+| **Consumption** | W | Household load power |
+
+### Power Core-only Realtime Sensors
+
+Available on Power Core models (e.g. `PC1-*`, `PC3-*`).
+
+| Sensor | Unit | Description |
+|---|---|---|
+| **Solar power** | W | Instant PV production |
+| **Car charge power** | W | Instant EV charging power |
+
+### Diagnostic Sensors
+
+| Sensor | Description |
+|---|---|
+| **Realtime connection** | E2E realtime session health/state |
 
 ### Schedule Sensors
 
@@ -148,6 +155,21 @@ The **EV fixed charge amount** number is only effective when mode is `instant_fi
 | `balancing_failed` | The balancing session ended with an error reported by the Emaldo server |
 
 The sensor uses `device_class: enum`. It is best-effort — if the E2E connection fails it returns `unknown` until the next successful poll.
+
+### Control Entities
+
+| Entity | Type | Description |
+|---|---|---|
+| **Third-party PV** | Switch | Enables/disables external PV routing in Emaldo |
+| **AI Battery Range override** | Switch | When ON, AI is constrained to the Smart/Emergency reserve band |
+| **AI Smart reserve** | Number | Upper SoC marker for AI battery range |
+| **AI Emergency reserve** | Number | Lower SoC marker for AI battery range |
+
+#### Third-party PV behavior
+
+- **ON**: third-party PV is enabled and solar is used to charge the battery.
+- **OFF**: third-party PV is disabled and solar is exported to the grid.
+- The [Battery Optimizer](../battery_optimizer/README.md) can drive this switch slot-by-slot via its PV sell strategy (typically selling earlier solar, then re-enabling charge later so battery still reaches target SoC).
 
 ### Schedule Chart Attributes
 
@@ -256,6 +278,56 @@ Manually trigger an immediate schedule and override data refresh. Useful after A
 
 ```yaml
 service: emaldo.refresh_schedule
+```
+
+### `emaldo.set_ev_schedule`
+
+Switches EV charging mode to `scheduled` and writes weekday/weekend allowed-hour bitmaps.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `weekdays` | list[int] | no | Allowed charging hours (0–23) for weekdays |
+| `weekend` | list[int] | no | Allowed charging hours (0–23) for weekend days |
+| `sync` | boolean | no | Mirror app "Sync" toggle to propagate schedule to other devices |
+
+```yaml
+service: emaldo.set_ev_schedule
+data:
+  weekdays: [6, 7, 22, 23]
+  weekend: [10, 11, 12]
+  sync: false
+```
+
+### `emaldo.backfill_solar`
+
+Imports historical solar production into Home Assistant long-term statistics (`emaldo:solar_energy_backfill`) for Energy Dashboard continuity.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `days` | int | no | Number of days to fetch (1–90, default: 30) |
+
+```yaml
+service: emaldo.backfill_solar
+data:
+  days: 30
+```
+
+### `emaldo.set_battery_range`
+
+Writes AI Battery Range (Smart/Emergency reserves) and optionally enables override mode.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `smart_pct` | int | yes | Upper SoC threshold (0–100) |
+| `emergency_pct` | int | yes | Lower SoC threshold (0–100, must be `<= smart_pct`) |
+| `enable` | boolean | no | `true` = constrain AI to band, `false` = persist markers but let AI choose mode |
+
+```yaml
+service: emaldo.set_battery_range
+data:
+  smart_pct: 50
+  emergency_pct: 10
+  enable: true
 ```
 
 ## Slot Encoding
@@ -553,12 +625,13 @@ emaldo/
 ├── config_flow.py           # Config + options + reconfigure flow
 ├── const.py                 # Integration constants and defaults
 ├── coordinator.py           # Power/battery data coordinator (60s polling)
-├── number.py                # EV fixed charge amount number entity
+├── number.py                # EV fixed charge amount + AI Battery Range number entities
 ├── schedule_coordinator.py  # Schedule + override coordinator (custom time triggers, E2E retry)
 ├── select.py                # Control priority + EV charge mode select entities
-├── sensor.py                # 7 power sensors + 3 schedule sensors + 1 balancing state sensor
-├── services.py              # set_slot_range, apply_bulk_schedule, reset_to_internal, refresh_schedule
+├── sensor.py                # Realtime + daily energy sensors, schedule sensors, balancing, diagnostics
+├── services.py              # Override, EV schedule, solar backfill, AI Battery Range services
 ├── services.yaml            # Service UI descriptions
+├── switch.py                # Third-party PV + AI Battery Range override switches
 ├── strings.json             # Translation strings
 └── emaldo_lib/              # Bundled Emaldo client library
     ├── __init__.py           # Re-exports EmaldoClient + exceptions
