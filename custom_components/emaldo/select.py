@@ -14,12 +14,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
-    CONTROL_PRIORITY_INTERNAL,
-    CONTROL_PRIORITY_OVERRIDE,
     EV_UNSUPPORTED_MODELS,
 )
 from .coordinator import EmaldoCoordinator
-from .schedule_coordinator import EmaldoScheduleCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,44 +38,15 @@ async def async_setup_entry(
 ) -> None:
     """Set up Emaldo select entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
     power_coordinator: EmaldoCoordinator = data["power"]
 
-    entities: list[SelectEntity] = [EmaldoControlPrioritySelect(schedule_coordinator)]
+    entities: list[SelectEntity] = []
 
     model = power_coordinator.device_model or ""
     if model not in EV_UNSUPPORTED_MODELS:
         entities.append(EmaldoEVChargeModeSelect(power_coordinator))
 
     async_add_entities(entities)
-
-
-class EmaldoControlPrioritySelect(SelectEntity):
-    """Virtual select entity for controlling override priority."""
-
-    _attr_has_entity_name = True
-    _attr_name = "Control priority"
-    _attr_options = [CONTROL_PRIORITY_INTERNAL, CONTROL_PRIORITY_OVERRIDE]
-    _attr_current_option = CONTROL_PRIORITY_INTERNAL
-
-    def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{coordinator.home_id}_control_priority"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        c = self._coordinator
-        return DeviceInfo(
-            identifiers={(DOMAIN, c.device_id or c.home_id)},
-            name=c.device_name or "Emaldo Battery",
-            manufacturer="Emaldo",
-            model=c.device_model,
-        )
-
-    async def async_select_option(self, option: str) -> None:
-        """Handle option selection."""
-        self._attr_current_option = option
-        self.async_write_ha_state()
 
 
 class EmaldoEVChargeModeSelect(CoordinatorEntity[EmaldoCoordinator], SelectEntity):

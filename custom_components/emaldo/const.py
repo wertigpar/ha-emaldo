@@ -24,10 +24,6 @@ DEFAULT_SCHEDULE_START_HOUR = 14
 DEFAULT_SCHEDULE_START_MINUTE = 0
 DEFAULT_SCHEDULE_INTERVAL = 7200  # 2 hours in seconds
 
-# Control priority select options
-CONTROL_PRIORITY_INTERNAL = "internal"
-CONTROL_PRIORITY_OVERRIDE = "override"
-
 # Models that do not support the EV charger function
 EV_UNSUPPORTED_MODELS: frozenset[str] = frozenset({"PS1-BAK10-HS10"})
 
