@@ -937,6 +937,192 @@ def _log_power_flow_raw(payload: bytes, log: Callable[..., None]) -> None:
         log(f"  [20:22] dualPowerWat    = {struct.unpack_from('<h', payload, 20)[0]}")
 
 
+# ---------------------------------------------------------------------------
+# Grid frequency regulation state (FCR / mFRR balancing)
+# ---------------------------------------------------------------------------
+
+# E2E type for GET_REGULATE_FREQUENCY_STATE
+_REGULATE_FREQ_TYPE = 0x45
+
+# RegulateFrequencyStateType enum values (Mcu.java)
+_REGULATE_FREQ_STATES: dict[int, str] = {
+    0: "Idle",
+    1: "OnHold",
+    2: "FcrN",
+    3: "FcrDUp",
+    4: "FcrDDown",
+    5: "FcrDUpDown",
+    6: "MFRRUp",
+    7: "MFRRDown",
+}
+
+
+def _is_regulate_frequency_payload(payload: bytes) -> bool:
+    """Check if decrypted payload is a regulate-frequency-state response.
+
+    Response is 2 or 4 bytes: state(LE u16) [+ has_error(LE u16)].
+    State value must be in 0..7.
+    """
+    if payload is None or len(payload) not in (2, 4):
+        return False
+    state = struct.unpack_from("<H", payload, 0)[0]
+    return state in _REGULATE_FREQ_STATES
+
+
+def parse_regulate_frequency_state(payload: bytes) -> dict | None:
+    """Parse a GET_REGULATE_FREQUENCY_STATE response payload.
+
+    Payload layout:
+        bytes [0..1]  state      LE uint16 — RegulateFrequencyStateType value
+        bytes [2..3]  has_error  LE uint16 — present only when len > 2
+
+    Returns:
+        Dict with:
+            ``state`` (int): raw enum value 0–7
+            ``state_name`` (str): human-readable name (e.g. "FcrN")
+            ``has_error`` (bool | None): True when device reports error;
+                None when not present in payload
+            ``display`` (str): "idle" | "pre_balancing" | "fcr_n" |
+                "fcr_d_up" | "fcr_d_down" | "fcr_d_up_down" |
+                "mfrr_up" | "mfrr_down" | "balancing_failed"
+        or *None* on invalid input.
+    """
+    if payload is None or len(payload) < 2:
+        return None
+
+    state = struct.unpack_from("<H", payload, 0)[0]
+    if state not in _REGULATE_FREQ_STATES:
+        return None
+
+    has_error: bool | None = None
+    if len(payload) >= 4:
+        raw_error = struct.unpack_from("<H", payload, 2)[0]
+        has_error = raw_error != 1
+
+    # Display logic mirrors APK sb/y0.java dealRegulateFrequency()
+    if has_error is True:
+        display = "balancing_failed"
+    elif state == 0:
+        display = "idle"
+    elif state == 1:
+        display = "pre_balancing"
+    elif state == 2:
+        display = "fcr_n"
+    elif state == 3:
+        display = "fcr_d_up"
+    elif state == 4:
+        display = "fcr_d_down"
+    elif state == 5:
+        display = "fcr_d_up_down"
+    elif state == 6:
+        display = "mfrr_up"
+    else:  # state == 7
+        display = "mfrr_down"
+
+    return {
+        "state": state,
+        "state_name": _REGULATE_FREQ_STATES[state],
+        "has_error": has_error,
+        "display": display,
+    }
+
+
+def read_regulate_frequency_state(
+    e2e_creds: dict,
+    *,
+    timeout: float = 5.0,
+    log: Callable[..., None] | None = None,
+) -> dict | None:
+    """Read real-time FCR/mFRR grid frequency regulation state (E2E type 0x45).
+
+    Sends GET_REGULATE_FREQUENCY_STATE to the device and returns a dict
+    with ``state``, ``state_name``, ``has_error``, and ``display``.
+
+    ``display`` is one of:
+      - ``"idle"``             — no balancing activity
+      - ``"pre_balancing"``    — device is on hold, balancing imminent
+      - ``"fcr_n"``            — actively providing FCR-N
+      - ``"fcr_d_up"``         — actively providing FCR-D Up
+      - ``"fcr_d_down"``       — actively providing FCR-D Down
+      - ``"fcr_d_up_down"``    — actively providing FCR-D Up+Down
+      - ``"mfrr_up"``          — providing mFRR Up
+      - ``"mfrr_down"``        — providing mFRR Down
+      - ``"balancing_failed"`` — device reported an error
+
+    Returns *None* if the device did not respond or payload was unreadable.
+    """
+    session_nonce = generate_nonce()
+
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    req_pkt = build_subscription_packet(
+        e2e_creds, _REGULATE_FREQ_TYPE, session_nonce,
+        request_mode=True,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B → got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            if log:
+                log(f"{label}: sent {len(pkt)}B → no response")
+            return None
+
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+
+        resp = _send(req_pkt, "RegulateFrequencyState(0x45)")
+        if not resp:
+            return None
+
+        decrypted = decrypt_response(
+            resp, e2e_creds["chat_secret"],
+            payload_validator=_is_regulate_frequency_payload,
+        )
+        result = parse_regulate_frequency_state(decrypted)
+        if result is not None:
+            return result
+
+        # First response may be an echo/ACK; try a few more
+        for _ in range(5):
+            try:
+                resp, _ = sock.recvfrom(4096)
+                decrypted = decrypt_response(
+                    resp, e2e_creds["chat_secret"],
+                    payload_validator=_is_regulate_frequency_payload,
+                )
+                result = parse_regulate_frequency_state(decrypted)
+                if result is not None:
+                    return result
+            except socket.timeout:
+                break
+
+        return None
+    finally:
+        sock.close()
+
+
 def read_power_flow(
     e2e_creds: dict,
     *,
@@ -2111,6 +2297,50 @@ def load_ev_page_data(
 
 
 # ---------------------------------------------------------------------------
+# Third-party PV
+# ---------------------------------------------------------------------------
+#
+# The official app exposes a boolean "Third-Party PV" switch under Energy
+# Settings. The state is returned in the 0x30 power-flow response (byte 19)
+# and can be changed with opcode 0x41 (SET_THIRDPARTYPV_ON).
+#
+# Wire: 0x41 A0 (subscribe mode), payload = 1 byte: 0x01=on, 0x00=off.
+# APK: dispatch-table case 56 (=0x38) in Lcom/dinsafer/module_bmt/hd/j;.b(Map);
+#      addOptionHeader short=-24511 (0xA041); wire byte-swapped → 0x41A0.
+# setIsNeedResult=false → fire-and-forget (no response payload to parse).
+
+_THIRDPARTY_PV_SET_TYPE = 0x41  # SET_THIRDPARTYPV_ON (APK Short 0xA041, wire byte-swapped)
+
+
+def set_thirdparty_pv(
+    e2e_creds: dict,
+    enabled: bool,
+    *,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> bool:
+    """Enable or disable third-party PV input (type 0x41).
+
+    Sends ``SET_THIRDPARTYPV_ON`` with a 1-byte boolean payload.
+    This is a fire-and-forget command; the updated state is visible
+    in the next :func:`read_power_flow` response (byte 19).
+
+    Returns *True* if the server acknowledged the command.
+    """
+    session_nonce = generate_nonce()
+    payload = bytes([0x01 if enabled else 0x00])
+    pkt = build_subscription_packet(
+        e2e_creds, _THIRDPARTY_PV_SET_TYPE, session_nonce, payload=payload,
+    )
+    results = _run_session(
+        e2e_creds, [("SetThirdpartyPV(0x41)", pkt)],
+        timeout=timeout, log=log,
+    )
+    _, resp = results[0]
+    return resp is not None
+
+
+# ---------------------------------------------------------------------------
 # Persistent E2E Session (for real-time polling)
 # ---------------------------------------------------------------------------
 
@@ -2184,11 +2414,17 @@ class PersistentE2ESession:
         self._addr: tuple[str, int] | None = None
         self._session_nonce: str | None = None
         self._closed = False
+        self._regulate_frequency_cache: dict | None = None
 
     @property
     def closed(self) -> bool:
         """True once :meth:`close` has been called."""
         return self._closed
+
+    @property
+    def regulate_frequency_cache(self) -> dict | None:
+        """Last 0x45 state passively captured during power-flow polling."""
+        return self._regulate_frequency_cache
 
     @property
     def connected(self) -> bool:
@@ -2290,6 +2526,8 @@ class PersistentE2ESession:
 
             # Drain up to 10 more packets in case of interleaved responses
             # from the keepalive / subscription channel.
+            # Also passively cache any 0x45 regulate-frequency pushes the
+            # device sends on the same subscription socket.
             drained = 0
             while drained < 10:
                 try:
@@ -2304,6 +2542,11 @@ class PersistentE2ESession:
                 result = self._try_parse_power_flow(more_resp)
                 if result is not None:
                     return result
+                rf = self._try_parse_regulate_frequency(more_resp)
+                if rf is not None:
+                    self._regulate_frequency_cache = rf
+                    if self._log:
+                        self._log(f"Passive 0x45 push captured: {rf}")
 
             # If we still have nothing on the first attempt, force a reconnect
             # and try once more. This covers the case where the relay has
@@ -2318,6 +2561,74 @@ class PersistentE2ESession:
 
         return None
 
+    def read_regulate_frequency_state(self) -> dict | None:
+        """Read FCR/mFRR frequency regulation state (0x45) over the existing session.
+
+        Reuses the persistent socket/session so it does not conflict with the
+        concurrent power-flow subscription.  Returns *None* on timeout or when
+        the payload cannot be decrypted.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+
+        for attempt in range(2):
+            req_pkt = build_subscription_packet(
+                self._creds, _REGULATE_FREQ_TYPE, self._session_nonce,
+                request_mode=False,  # subscription mode (0xA0) — device rejects direct-request (0x10)
+            )
+            resp = self._send_raw(req_pkt, "RegulateFrequencyState(0x45)")
+            if resp is None:
+                if attempt == 0:
+                    self._reconnect()
+                    continue
+                return None
+
+            if self._is_session_expired(resp):
+                if attempt == 0:
+                    self._reconnect()
+                    continue
+                return None
+
+            result = self._try_parse_regulate_frequency(resp)
+            if result is not None:
+                self._regulate_frequency_cache = result
+                return result
+
+            # Drain a few extra packets (keepalive/subscription echoes)
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    break
+                result = self._try_parse_regulate_frequency(more_resp)
+                if result is not None:
+                    self._regulate_frequency_cache = result
+                    return result
+
+            if attempt == 0:
+                self._reconnect()
+                continue
+
+            return None
+
+        # No explicit response — fall back to any passively-captured push.
+        return self._regulate_frequency_cache
+
+        return None
+
+    def _try_parse_regulate_frequency(self, resp: bytes) -> dict | None:
+        """Decrypt+parse a response as a regulate-frequency payload. Returns None on mismatch."""
+        try:
+            decrypted = decrypt_response(
+                resp, self._creds["chat_secret"],
+                payload_validator=_is_regulate_frequency_payload,
+            )
+        except Exception:  # noqa: BLE001 - best-effort parse
+            return None
+        return parse_regulate_frequency_state(decrypted)
+
     def _try_parse_power_flow(self, resp: bytes) -> dict | None:
         """Decrypt+parse a response as a power flow payload. Returns None on mismatch."""
         try:
@@ -2328,6 +2639,28 @@ class PersistentE2ESession:
         except Exception:  # noqa: BLE001 - best-effort parse
             return None
         return parse_power_flow(decrypted)
+
+    def send_command(self, msg_type: int, payload: bytes) -> bytes | None:
+        """Send a single write command over the existing session socket.
+
+        Uses the session's established nonce and socket so the relay sees the
+        command on the same connection it already knows about.  This avoids the
+        session-conflict that arises when ``_run_session`` opens a competing
+        second socket while the persistent session is active.
+
+        Args:
+            msg_type: E2E message type byte (e.g. 0x38 for SET_THIRDPARTYPV_ON).
+            payload:  Raw command payload bytes.
+
+        Returns:
+            The relay's response bytes, or *None* on timeout / closed session.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+        pkt = build_subscription_packet(
+            self._creds, msg_type, self._session_nonce, payload=payload,
+        )
+        return self._send_raw(pkt, f"Command(0x{msg_type:02x})")
 
     def close(self) -> None:
         """Close the socket and mark the session closed."""

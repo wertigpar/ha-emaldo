@@ -759,6 +759,18 @@ class EmaldoClient:
         creds = self.e2e_login(home_id, device_id, model)
         return _e2e.read_power_flow(creds, log=log)
 
+    def get_regulate_frequency_state(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        *,
+        log: Callable[..., None] | None = None,
+    ) -> dict | None:
+        """Read FCR/mFRR grid frequency regulation state via E2E (type 0x45)."""
+        creds = self.e2e_login(home_id, device_id, model)
+        return _e2e.read_regulate_frequency_state(creds, log=log)
+
     def set_override(
         self,
         home_id: str,
@@ -1002,3 +1014,16 @@ class EmaldoClient:
         """Set peak shaving redundancy value."""
         creds = self.e2e_login(home_id, device_id, model)
         return _e2e.set_peak_shaving_redundancy(creds, redundancy, log=log)
+
+    def set_third_party_pv(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        enabled: bool,
+        *,
+        log: Callable[..., None] | None = None,
+    ) -> bool:
+        """Enable or disable third-party PV input."""
+        creds = self.e2e_login(home_id, device_id, model)
+        return _e2e.set_thirdparty_pv(creds, enabled, log=log)

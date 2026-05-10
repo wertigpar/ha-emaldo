@@ -24,6 +24,7 @@ from .emaldo_lib import (
     EmaldoConnectionError,
     PersistentE2ESession,
 )
+from .emaldo_lib.exceptions import EmaldoE2EError
 from .emaldo_lib.const import set_params
 from .emaldo_lib.e2e import (
     build_subscription_packet,
@@ -31,6 +32,10 @@ from .emaldo_lib.e2e import (
     generate_nonce,
     _run_session,
     parse_ev_charging_info,
+    set_ev_charging_mode_smart,
+    set_ev_charging_mode_instant,
+    EV_MODE_INSTANT_FULL,
+    EV_MODE_INSTANT_FIXED,
     _EV_TYPE_GET_STATE,
 )
 
@@ -221,6 +226,20 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "sync": sync_flag,
         }
 
+    def _write_ev_mode(self, mode: int, fixed_kwh: int = 0) -> bool:
+        """Write EV charging mode via E2E (synchronous, call via executor).
+
+        Modes 1-3 are Smart sub-modes; 4-5 are Instant sub-modes.
+        Returns True if the device acknowledged the write.
+        """
+        client = self._ensure_client()
+        creds = client.e2e_login(self.home_id, self._device_id, self._model)
+        if mode in (1, 2, 3):
+            return set_ev_charging_mode_smart(creds, mode)
+        if mode in (EV_MODE_INSTANT_FULL, EV_MODE_INSTANT_FIXED):
+            return set_ev_charging_mode_instant(creds, mode, fixed_kwh=fixed_kwh)
+        raise ValueError(f"Unknown EV mode: {mode}")
+
 
 class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     """Fast coordinator for E2E real-time power flow (10s).
@@ -258,6 +277,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._session: PersistentE2ESession | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
+        self._regulate_frequency: dict | None = None
+        self._balancing_poll_counter: int = 0
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
@@ -325,6 +346,34 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._session = None
         return data
 
+    def _write_thirdparty_pv(self, enabled: bool) -> None:
+        """Send SET_THIRDPARTYPV_ON (0x41) via the existing persistent session.
+
+        Routing the command through the active session socket avoids the
+        conflict that would arise from opening a second socket with
+        ``_run_session`` while the keepalive loop is running.
+
+        On auth or session expiry the client and session are reset and the
+        command is retried once with fresh credentials.
+        """
+        payload = bytes([0x01 if enabled else 0x00])
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                session.send_command(0x41, payload)
+                return
+            except EmaldoAuthError:
+                # REST token expired — force full re-login on next _ensure_session
+                self._parent._client = None  # noqa: SLF001
+                self._session = None
+                if attempt == 1:
+                    raise
+            except EmaldoE2EError:
+                # UDP session closed/expired — drop it so _ensure_session reconnects
+                self._session = None
+                if attempt == 1:
+                    raise
+
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
 
@@ -389,7 +438,33 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._empty_reads = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
+
+        # Poll balancing state every 6th successful read (~60s) using the same session.
+        # This avoids opening a competing UDP socket from the slow coordinator.
+        self._balancing_poll_counter += 1
+        if self._balancing_poll_counter >= 6:
+            self._balancing_poll_counter = 0
+            try:
+                rf = await self.hass.async_add_executor_job(
+                    self._session.read_regulate_frequency_state
+                )
+                # APK analysis (zd/j.java class y): device always responds
+                # with the actual state (0=Idle, 1=OnHold, 2+=active).
+                # None means the query itself failed (session/timeout), so
+                # keep the last known value rather than falsely reporting idle.
+                if rf is not None:
+                    self._regulate_frequency = rf
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Regulate frequency state read failed: %s", err)
+                # Keep the last known value so the sensor doesn't flicker to unknown
+                # on a transient failure.
+
         return data
+
+    @property
+    def regulate_frequency(self) -> dict | None:
+        """Return the last known grid frequency regulation state, or None."""
+        return self._regulate_frequency
 
     async def _close_session(self) -> None:
         """Close the current session (if any)."""
