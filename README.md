@@ -1,3 +1,10 @@
+[![GitHub Release](https://img.shields.io/github/release/wertigpar/ha-emaldo.svg)](https://github.com/wertigpar/ha-emaldo/releases)
+[![License](https://img.shields.io/github/license/wertigpar/ha-emaldo.svg)](https://github.com/wertigpar/ha-emaldo/blob/main/LICENSE)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![Validate](https://github.com/wertigpar/ha-emaldo/actions/workflows/validate.yml/badge.svg)](https://github.com/wertigpar/ha-emaldo/actions/workflows/validate.yml)
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wertigpar&repository=ha-emaldo&category=integration)
+
 # Emaldo Battery — Home Assistant Custom Integration
 
 A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery systems. Provides real-time power monitoring, battery state tracking, schedule visualization, and full override control via services.
@@ -8,8 +15,10 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 - **Schedule visualization** — Exposes the Emaldo AI schedule and override data as chart-ready attributes
 - **Override services** — Set time-range overrides, push full 96-slot schedules, or reset to the internal AI plan
 - **E2E communication** — Reads and writes override slots via Emaldo's end-to-end encrypted channel
+- **EV charge control** — Select EV charging mode and set fixed charge amount (Power Core models only)
 - **Resilient polling** — On API failures, sensors keep their last-known values while exponential-backoff retries recover automatically (60 s → 120 s → 4 min → … capped at 30 min)
 - **Next-day schedule event** — Fires `emaldo_next_day_schedule_ready` when tomorrow's schedule appears
+- **Reconfigure without removing** — Update credentials or app version via the Reconfigure menu
 
 ## Prerequisites
 
@@ -22,33 +31,21 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 
 ## Installation
 
-1. Copy the `emaldo` folder into your Home Assistant `custom_components/` directory:
+### Option 1: HACS (Recommended)
 
-   ```
-   custom_components/
-   └── emaldo/
-       ├── __init__.py
-       ├── config_flow.py
-       ├── const.py
-       ├── coordinator.py
-       ├── manifest.json
-       ├── schedule_coordinator.py
-       ├── sensor.py
-       ├── services.py
-       ├── services.yaml
-       ├── strings.json
-       └── emaldo_lib/
-           ├── __init__.py
-           ├── client.py
-           ├── const.py
-           ├── crypto.py
-           ├── e2e.py
-           └── exceptions.py
-   ```
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wertigpar&repository=ha-emaldo&category=integration)
 
-2. Restart Home Assistant.
+1. Click the button above, or open HACS in Home Assistant, go to **Custom repositories**, add `https://github.com/wertigpar/ha-emaldo` with category **Integration**.
+2. Search for **Emaldo Battery** in HACS and click **Install**.
+3. Restart Home Assistant.
+4. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
 
-3. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
+### Option 2: Manual Installation
+
+1. Download the [latest release](https://github.com/wertigpar/ha-emaldo/releases) from GitHub.
+2. Copy the `custom_components/emaldo` folder into your Home Assistant `config/custom_components/` directory.
+3. Restart Home Assistant.
+4. Go to **Settings → Devices & Services → Add Integration → Emaldo Battery**.
 
 ## Configuration
 
@@ -60,8 +57,16 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 | **Password** | Your Emaldo account password |
 | **App ID** | Application ID from the Emaldo APK |
 | **App Secret** | Application secret from the Emaldo APK |
-| **App Version** | Application version string (e.g. `2.8.3`) |
+| **App Version** | Application version string (e.g. `2.8.4`) |
 | **Home ID** | *(optional)* Leave empty to auto-detect |
+
+### Reconfiguring credentials
+
+To update your email, password, app version, or encryption keys without removing the integration:
+
+**Settings → Devices & Services → Emaldo → ⋮ (three-dot menu) → Reconfigure**
+
+All current values are pre-filled. After saving, the integration reloads automatically with the new credentials.
 
 ### Options (Schedule Polling)
 
@@ -98,6 +103,51 @@ Updated on the configured polling schedule.
 | **Plan source** | Whether the current slot is `Internal` (AI schedule) or `Override` |
 | **Active mode** | The effective action of the current slot (e.g. `Charge`, `Discharge`, `Idle`, `charge-high (72%)`) |
 | **Schedule chart** | Numeric mode of current slot (1/0/−1) with full schedule data in attributes |
+
+### Real-time Balancing Sensor
+
+Read via E2E on every coordinator poll (best-effort — unavailable when E2E is unreachable).
+
+| Sensor | Description |
+|---|---|
+| **Balancing state** | Current grid frequency regulation state (`idle`, `pre_balancing`, `balancing`, `balancing_failed`) |
+
+### EV Charge Controls (Power Core models only)
+
+These entities are created only for **Power Core** models (e.g. `PC1-BAK15-HS10`, `PC3-*`). They are hidden for models without an integrated EV charger such as `PS1-BAK10-HS10`.
+
+| Entity | Type | Description |
+|---|---|---|
+| **EV charge mode** | Select | Sets the EV charging strategy (see modes below) |
+| **EV fixed charge amount** | Number | Target kWh for *Instant Fixed* mode (1–100 kWh) |
+
+**EV charge mode options:**
+
+| Option | Description |
+|---|---|
+| `lowest_price` | Smart — charge during the cheapest grid hours |
+| `solar_only` | Smart — charge only from surplus solar PV |
+| `scheduled` | Smart — charge on a configured weekday/weekend hour schedule |
+| `instant_full` | Instant — charge at full power until the car is full |
+| `instant_fixed` | Instant — charge exactly the configured kWh amount then stop |
+
+The **EV fixed charge amount** number is only effective when mode is `instant_fixed`.
+
+#### Balancing State Values
+
+| Value | Meaning |
+|---|---|
+| `idle` | Battery is not participating in any grid balancing service |
+| `pre_balancing` | Battery is on hold, balancing is imminent |
+| `fcr_n` | Actively providing FCR-N (Normal Frequency Containment Reserve) |
+| `fcr_d_up` | Actively providing FCR-D Up (Disturbance reserve, upward regulation) |
+| `fcr_d_down` | Actively providing FCR-D Down (Disturbance reserve, downward regulation) |
+| `fcr_d_up_down` | Actively providing FCR-D Up+Down (bidirectional disturbance reserve) |
+| `mfrr_up` | Providing mFRR Up (manual Frequency Restoration Reserve, upward) |
+| `mfrr_down` | Providing mFRR Down (manual Frequency Restoration Reserve, downward) |
+| `balancing_failed` | The balancing session ended with an error reported by the Emaldo server |
+
+The sensor uses `device_class: enum`. It is best-effort — if the E2E connection fails it returns `unknown` until the next successful poll.
 
 ### Schedule Chart Attributes
 
@@ -394,7 +444,7 @@ Solar forecast and electricity price on a single chart:
 ```yaml
 type: custom:apexcharts-card
 header:
-  title: Solar + Price
+  title: Emaldo Solar & Price Tables
   show: true
   show_states: false
 graph_span: 48h
@@ -432,7 +482,7 @@ series:
       legend_value: false
     data_generator: |
       const schedule = entity.attributes.schedule || [];
-      return schedule.map(s => [new Date(s.t).getTime(), s.solar]);
+      return schedule.map(s => [new Date(s.t).getTime(), s.solar * 10]);
   - entity: sensor.power_store_schedule_chart
     name: Price
     type: line
@@ -499,11 +549,14 @@ cards:
 ```
 emaldo/
 ├── __init__.py              # Entry setup, platform forwarding, options listener
-├── config_flow.py           # Config + options flow (credentials, schedule polling)
+├── calendar.py              # Battery schedule calendar entity
+├── config_flow.py           # Config + options + reconfigure flow
 ├── const.py                 # Integration constants and defaults
 ├── coordinator.py           # Power/battery data coordinator (60s polling)
+├── number.py                # EV fixed charge amount number entity
 ├── schedule_coordinator.py  # Schedule + override coordinator (custom time triggers, E2E retry)
-├── sensor.py                # 7 power sensors + 3 schedule sensors
+├── select.py                # Control priority + EV charge mode select entities
+├── sensor.py                # 7 power sensors + 3 schedule sensors + 1 balancing state sensor
 ├── services.py              # set_slot_range, apply_bulk_schedule, reset_to_internal, refresh_schedule
 ├── services.yaml            # Service UI descriptions
 ├── strings.json             # Translation strings

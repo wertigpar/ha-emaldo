@@ -12,6 +12,7 @@ from .schedule_coordinator import EmaldoScheduleCoordinator
 from .services import async_register_services, async_unregister_services
 
 PLATFORMS: list[Platform] = [
+    Platform.SWITCH,
     Platform.SENSOR,
     Platform.SELECT,
     Platform.NUMBER,
