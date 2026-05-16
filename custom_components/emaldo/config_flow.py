@@ -12,7 +12,6 @@ from homeassistant.config_entries import (
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
-    OptionsFlowWithConfigEntry,
 )
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import callback
@@ -191,7 +190,7 @@ class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
-class EmaldoOptionsFlow(OptionsFlowWithConfigEntry):
+class EmaldoOptionsFlow(OptionsFlow):
     """Handle Emaldo options."""
 
     async def async_step_init(
