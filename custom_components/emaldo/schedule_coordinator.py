@@ -25,6 +25,9 @@ from .const import (
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_APP_VERSION,
+    DEFAULT_APP_ID,
+    DEFAULT_APP_SECRET,
+    DEFAULT_APP_VERSION,
     CONF_SCHEDULE_START_HOUR,
     CONF_SCHEDULE_START_MINUTE,
     CONF_SCHEDULE_INTERVAL,
@@ -93,10 +96,13 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _ensure_client(self) -> EmaldoClient:
         data = self._entry.data
-        set_params(data[CONF_APP_ID], data[CONF_APP_SECRET], data[CONF_APP_VERSION])
+        app_id = data.get(CONF_APP_ID, DEFAULT_APP_ID)
+        app_secret = data.get(CONF_APP_SECRET, DEFAULT_APP_SECRET)
+        app_version = data.get(CONF_APP_VERSION, DEFAULT_APP_VERSION)
+        set_params(app_id, app_secret, app_version)
 
         if self._client is None or not self._client.is_authenticated:
-            self._client = EmaldoClient(app_version=data[CONF_APP_VERSION])
+            self._client = EmaldoClient(app_version=app_version)
             self._client.login(data[CONF_EMAIL], data[CONF_PASSWORD])
 
         if self._device_id is None:

@@ -45,6 +45,9 @@ from .const import (
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_APP_VERSION,
+    DEFAULT_APP_ID,
+    DEFAULT_APP_SECRET,
+    DEFAULT_APP_VERSION,
     DEFAULT_SCAN_INTERVAL,
     REALTIME_SCAN_INTERVAL,
     KEEPALIVE_INTERVAL,
@@ -95,12 +98,15 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _ensure_client(self) -> EmaldoClient:
         """Create and authenticate the client if needed."""
         data = self._entry.data
+        app_id = data.get(CONF_APP_ID, DEFAULT_APP_ID)
+        app_secret = data.get(CONF_APP_SECRET, DEFAULT_APP_SECRET)
+        app_version = data.get(CONF_APP_VERSION, DEFAULT_APP_VERSION)
 
         # Always set app params before any client operation
-        set_params(data[CONF_APP_ID], data[CONF_APP_SECRET], data[CONF_APP_VERSION])
+        set_params(app_id, app_secret, app_version)
 
         if self._client is None or not self._client.is_authenticated:
-            self._client = EmaldoClient(app_version=data[CONF_APP_VERSION])
+            self._client = EmaldoClient(app_version=app_version)
             self._client.login(data[CONF_EMAIL], data[CONF_PASSWORD])
 
         if self._device_id is None:
