@@ -6,7 +6,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    CONF_APP_ID,
+    CONF_APP_SECRET,
+    CONF_APP_VERSION,
+    DEFAULT_APP_ID,
+    DEFAULT_APP_SECRET,
+    DEFAULT_APP_VERSION,
+)
 from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 from .services import async_register_services, async_unregister_services
@@ -18,6 +26,18 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.SWITCH,
 ]
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate config entries to newer schema versions."""
+    if entry.version < 2:
+        migrated = dict(entry.data)
+        migrated.setdefault(CONF_APP_ID, DEFAULT_APP_ID)
+        migrated.setdefault(CONF_APP_SECRET, DEFAULT_APP_SECRET)
+        migrated.setdefault(CONF_APP_VERSION, DEFAULT_APP_VERSION)
+        hass.config_entries.async_update_entry(entry, data=migrated, version=2)
+
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

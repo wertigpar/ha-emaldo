@@ -54,7 +54,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Emaldo."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback
@@ -169,9 +169,17 @@ class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(CONF_EMAIL, default=current.get(CONF_EMAIL, "")): str,
                 vol.Required(CONF_PASSWORD, default=current.get(CONF_PASSWORD, "")): str,
-                vol.Required(CONF_APP_ID, default=current.get(CONF_APP_ID, "")): str,
-                vol.Required(CONF_APP_SECRET, default=current.get(CONF_APP_SECRET, "")): str,
-                vol.Required(CONF_APP_VERSION, default=current.get(CONF_APP_VERSION, "")): str,
+                vol.Required(
+                    CONF_APP_ID, default=current.get(CONF_APP_ID, DEFAULT_APP_ID)
+                ): str,
+                vol.Required(
+                    CONF_APP_SECRET,
+                    default=current.get(CONF_APP_SECRET, DEFAULT_APP_SECRET),
+                ): str,
+                vol.Required(
+                    CONF_APP_VERSION,
+                    default=current.get(CONF_APP_VERSION, DEFAULT_APP_VERSION),
+                ): str,
                 vol.Optional(CONF_HOME_ID, default=current.get(CONF_HOME_ID, "")): str,
             }
         )
