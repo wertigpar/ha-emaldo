@@ -78,6 +78,9 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._device_id: str | None = None
         self._model: str | None = None
         self._device_name: str | None = None
+        self._emergency_charge_active: bool = False
+        self._emergency_charge_start_dt: object = None  # datetime | None
+        self._emergency_charge_end_dt: object = None   # datetime | None
 
     @property
     def home_id(self) -> str:
@@ -170,6 +173,9 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "power": power,
             "solar": solar,
             "ev": ev,
+            "emergency_charge_active": self._emergency_charge_active,
+            "emergency_charge_start_dt": self._emergency_charge_start_dt,
+            "emergency_charge_end_dt": self._emergency_charge_end_dt,
         }
 
     def _read_ev_state(self) -> dict | None:
@@ -249,6 +255,55 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if mode in (EV_MODE_INSTANT_FULL, EV_MODE_INSTANT_FIXED):
             return set_ev_charging_mode_instant(creds, mode, fixed_kwh=fixed_kwh)
         raise ValueError(f"Unknown EV mode: {mode}")
+
+    def _write_emergency_charge_on(
+        self, start_unix: int | None = None, end_unix: int | None = None
+    ) -> None:
+        """Start emergency charge for the given time window via the REST API.
+
+        If *start_unix* is None the device starts immediately (now).
+        If *end_unix* is None the E2E library falls back to its own default
+        (top-of-current-hour + 48 h).
+        """
+        import time as _time
+        if start_unix is None:
+            start_unix = int(_time.time())
+        if end_unix is None:
+            end_unix = start_unix + 3600  # 1 hour fallback
+        for attempt in range(2):
+            try:
+                client = self._ensure_client()
+                client.emergency_charge_window(
+                    self.home_id, self._device_id, self._model,
+                    start_unix, end_unix,
+                )
+                self._emergency_charge_active = True
+                return
+            except EmaldoAuthError:
+                self._client = None
+                if attempt == 1:
+                    raise
+            except Exception:
+                if attempt == 1:
+                    raise
+
+    def _write_emergency_charge_off(self) -> None:
+        """Cancel active emergency charge via the REST API."""
+        for attempt in range(2):
+            try:
+                client = self._ensure_client()
+                client.emergency_charge_off(
+                    self.home_id, self._device_id, self._model
+                )
+                self._emergency_charge_active = False
+                return
+            except EmaldoAuthError:
+                self._client = None
+                if attempt == 1:
+                    raise
+            except Exception:
+                if attempt == 1:
+                    raise
 
 
 class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):

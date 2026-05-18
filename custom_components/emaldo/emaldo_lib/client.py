@@ -923,6 +923,29 @@ class EmaldoClient:
             label="Emergency charge", log=log,
         )
 
+    def emergency_charge_window(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        start_unix: int,
+        end_unix: int,
+        *,
+        log: Callable[..., None] | None = None,
+    ) -> bool:
+        """Start emergency charge for a specific time window.
+
+        Args:
+            start_unix: Window start as a Unix timestamp.
+            end_unix:   Window end as a Unix timestamp.
+        """
+        creds = self.e2e_login(home_id, device_id, model)
+        return _e2e.set_emergency_charge(
+            creds, on=True,
+            start_unix=start_unix, end_unix=end_unix,
+            log=log,
+        )
+
     def emergency_charge_off(
         self,
         home_id: str,

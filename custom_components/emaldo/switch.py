@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import EmaldoRealtimeCoordinator
+from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 from .emaldo_lib.exceptions import EmaldoAuthError
 
@@ -33,12 +33,14 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     realtime_coordinator: EmaldoRealtimeCoordinator = data["realtime"]
     schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
+    power_coordinator: EmaldoCoordinator = data["power"]
 
     async_add_entities(
         [
             EmaldoThirdPartyPVSwitch(realtime_coordinator),
             EmaldoSellBackToGridSwitch(realtime_coordinator),
             EmaldoSellLimitSwitch(realtime_coordinator),
+            EmaldoEmergencyChargeSwitch(power_coordinator),
             EmaldoBatteryRangeOverrideSwitch(schedule_coordinator),
         ]
     )
@@ -292,3 +294,70 @@ class EmaldoBatteryRangeOverrideSwitch(
                 enable,
             )
         await self.coordinator.async_request_refresh()
+
+
+class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEntity):
+    """Switch entity for starting and cancelling emergency charge.
+
+    Turning ON starts a charge session using the duration configured in the
+    companion :class:`~emaldo.number.EmaldoEmergencyChargeHours` entity.
+    Turning OFF cancels any active session immediately.
+
+    State is tracked optimistically — there is no dedicated device read-back
+    for this command (it shares E2E type 0x01 with the manual-sell command).
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Emergency charge"
+    _attr_icon = "mdi:battery-charging-high"
+
+    def __init__(self, coordinator: EmaldoCoordinator) -> None:
+        """Initialize the emergency charge switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.home_id}_emergency_charge"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True while an emergency charge session is active."""
+        if self.coordinator.data is None:
+            return None
+        return bool(self.coordinator.data.get("emergency_charge_active", False))
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Start emergency charge using the configured start/end window."""
+        import time as _time
+        now = int(_time.time())
+        data = self.coordinator.data or {}
+        start_dt = data.get("emergency_charge_start_dt")
+        end_dt = data.get("emergency_charge_end_dt")
+        start_unix = int(start_dt.timestamp()) if start_dt is not None else now
+        end_unix = int(end_dt.timestamp()) if end_dt is not None else start_unix + 3600
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_emergency_charge_on,  # noqa: SLF001
+            start_unix, end_unix,
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["emergency_charge_active"] = True
+            self.coordinator.async_set_updated_data(updated)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Cancel the active emergency charge session."""
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_emergency_charge_off  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["emergency_charge_active"] = False
+            self.coordinator.async_set_updated_data(updated)
