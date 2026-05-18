@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import logging
+import struct
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -37,6 +38,9 @@ from .emaldo_lib.e2e import (
     EV_MODE_INSTANT_FULL,
     EV_MODE_INSTANT_FIXED,
     _EV_TYPE_GET_STATE,
+    _SELLING_PROTECTION_SET_TYPE,
+    _VIRTUALPOWERPLANT_SET_TYPE,
+    _build_vpp_payload,
 )
 
 from .const import (
@@ -284,7 +288,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
         self._regulate_frequency: dict | None = None
-        self._balancing_poll_counter: int = 0
+        self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
@@ -380,6 +384,65 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if attempt == 1:
                     raise
 
+    def _write_sell_back_to_grid(self, enabled: bool) -> None:
+        """Enable or disable grid export (sell-back to grid) via set_virtualpowerplant.
+
+        Uses ``set_virtualpowerplant`` (type 0x05).  The APK dispatcher
+        (case 47) includes the account user-id in the payload when the user is
+        logged in; the device firmware uses it for VPP authorisation.
+        Payload: ``[on(1B), len(1B), user_id_utf8(N B)]`` when user_id is
+        available, or ``[on(1B)]`` only as a fallback.
+        """
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                user_id: str = session._creds.get("user_id", "")  # noqa: SLF001
+                payload = _build_vpp_payload(enabled, user_id)
+                session.send_command(_VIRTUALPOWERPLANT_SET_TYPE, payload)
+                return
+            except EmaldoAuthError:
+                self._parent._client = None  # noqa: SLF001
+                self._session = None
+                if attempt == 1:
+                    raise
+            except EmaldoE2EError:
+                self._session = None
+                if attempt == 1:
+                    raise
+
+    def _read_virtualpowerplant(self) -> dict | None:
+        """Read sell-back-to-grid state (0x06) via the persistent session."""
+        session = self._ensure_session()
+        return session.read_virtualpowerplant()
+
+    def _write_sell_limit(self, enabled: bool, threshold: int) -> None:
+        """Set sell-limit protection (set_sellingprotection, type 0x5E).
+
+        Args:
+            enabled:   True = sell limit active; False = no limit.
+            threshold: Daily limit in kWh/day (1-300).
+        """
+        payload = struct.pack("<BI", 0x01 if enabled else 0x00, max(0, threshold))
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                session.send_command(_SELLING_PROTECTION_SET_TYPE, payload)
+                return
+            except EmaldoAuthError:
+                self._parent._client = None  # noqa: SLF001
+                self._session = None
+                if attempt == 1:
+                    raise
+            except EmaldoE2EError:
+                self._session = None
+                if attempt == 1:
+                    raise
+
+    def _read_sell_limit(self) -> dict | None:
+        """Read sell-limit (selling protection) state via the persistent session."""
+        session = self._ensure_session()
+        return session.read_selling_protection()
+
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
 
@@ -464,6 +527,42 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 _LOGGER.debug("Regulate frequency state read failed: %s", err)
                 # Keep the last known value so the sensor doesn't flicker to unknown
                 # on a transient failure.
+
+            # Poll virtual power plant (sell-back to grid) state alongside balancing (~60s).
+            try:
+                vpp = await self.hass.async_add_executor_job(
+                    self._read_virtualpowerplant
+                )
+                if vpp is not None:
+                    data["sell_back_to_grid_on"] = vpp["sell_back_to_grid_on"]
+                elif self.data and "sell_back_to_grid_on" in self.data:
+                    data["sell_back_to_grid_on"] = self.data["sell_back_to_grid_on"]
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Virtual power plant state read failed: %s", err)
+                if self.data and "sell_back_to_grid_on" in self.data:
+                    data["sell_back_to_grid_on"] = self.data["sell_back_to_grid_on"]
+
+            # Poll sell-limit (selling protection) state alongside balancing (~60s).
+            try:
+                sl = await self.hass.async_add_executor_job(self._read_sell_limit)
+                if sl is not None:
+                    data["sell_limit_on"] = sl["selling_protection_on"]
+                    data["sell_limit_threshold"] = sl["threshold_kwh"]
+                elif self.data:
+                    for _k in ("sell_limit_on", "sell_limit_threshold"):
+                        if _k in self.data:
+                            data[_k] = self.data[_k]
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Sell limit state read failed: %s", err)
+                if self.data:
+                    for _k in ("sell_limit_on", "sell_limit_threshold"):
+                        if _k in self.data:
+                            data[_k] = self.data[_k]
+        elif self.data and "sell_back_to_grid_on" in self.data:
+            data["sell_back_to_grid_on"] = self.data["sell_back_to_grid_on"]
+            for _k in ("sell_limit_on", "sell_limit_threshold"):
+                if _k in self.data:
+                    data[_k] = self.data[_k]
 
         return data
 

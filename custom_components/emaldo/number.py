@@ -16,7 +16,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, EV_UNSUPPORTED_MODELS
-from .coordinator import EmaldoCoordinator
+from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 from .emaldo_lib.e2e import EV_MODE_INSTANT_FIXED
 from .emaldo_lib.exceptions import EmaldoAuthError
@@ -32,6 +32,7 @@ async def async_setup_entry(
     """Set up Emaldo number entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
     power_coordinator: EmaldoCoordinator = data["power"]
+    realtime_coordinator: EmaldoRealtimeCoordinator = data["realtime"]
     schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
 
     entities: list[NumberEntity] = []
@@ -45,6 +46,9 @@ async def async_setup_entry(
     # battery_range_override flag to whatever the switch entity reads.
     entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "smart"))
     entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "emergency"))
+
+    # Sell Limit daily threshold slider (1-300 kWh/day).
+    entities.append(EmaldoSellLimitThreshold(realtime_coordinator))
 
     async_add_entities(entities)
 
@@ -194,3 +198,64 @@ class EmaldoBatteryRangeMarker(
         if not ok:
             _LOGGER.warning("Battery Range write was not acknowledged")
         await self.coordinator.async_request_refresh()
+
+
+class EmaldoSellLimitThreshold(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], NumberEntity
+):
+    """Slider for the daily sell-back limit (set_sellingprotection threshold).
+
+    Reads from coordinator.data["sell_limit_threshold"].  When set, sends the
+    new threshold while preserving the current enabled/disabled state from
+    coordinator.data["sell_limit_on"].
+
+    Range: 1–300 kWh/day as reported by the app UI.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Sell Limit threshold"
+    _attr_icon = "mdi:gauge"
+    _attr_mode = NumberMode.SLIDER
+    _attr_native_min_value = 1
+    _attr_native_max_value = 300
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "kWh/d"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialize the sell-limit threshold number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.home_id}_sell_limit_threshold"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking to the main Emaldo device."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current threshold value."""
+        if self.coordinator.data is None:
+            return None
+        val = self.coordinator.data.get("sell_limit_threshold")
+        if val is None:
+            return None
+        # Clamp to the declared range in case the device reports out-of-range.
+        return float(max(1, min(300, val)))
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Write new threshold, preserving the current enabled state."""
+        threshold = int(round(value))
+        enabled = bool((self.coordinator.data or {}).get("sell_limit_on", False))
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_limit, enabled, threshold  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["sell_limit_threshold"] = threshold
+            self.coordinator.async_set_updated_data(updated)

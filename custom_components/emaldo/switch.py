@@ -37,6 +37,8 @@ async def async_setup_entry(
     async_add_entities(
         [
             EmaldoThirdPartyPVSwitch(realtime_coordinator),
+            EmaldoSellBackToGridSwitch(realtime_coordinator),
+            EmaldoSellLimitSwitch(realtime_coordinator),
             EmaldoBatteryRangeOverrideSwitch(schedule_coordinator),
         ]
     )
@@ -89,6 +91,134 @@ class EmaldoThirdPartyPVSwitch(
         )
         await asyncio.sleep(1.5)
         await self.coordinator.async_request_refresh()
+
+
+class EmaldoSellBackToGridSwitch(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], SwitchEntity
+):
+    """Switch entity for enabling/disabling grid export (sell back to grid).
+
+    ON  = sell-back allowed   (selling protection OFF, type 0x5E payload on=0x00)
+    OFF = sell-back blocked   (selling protection ON,  type 0x5E payload on=0x01)
+
+    State is read from the device via type 0x5F (get_sellingprotection) and
+    stored in coordinator.data["sell_back_to_grid_on"].
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Sell Back to Grid"
+    _attr_icon = "mdi:transmission-tower-export"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialise the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.home_id}_sell_back_to_grid"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True when selling back to the grid is allowed."""
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("sell_back_to_grid_on")
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Allow grid export (enable sell-back to grid)."""
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_back_to_grid, True  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["sell_back_to_grid_on"] = True
+            self.coordinator.async_set_updated_data(updated)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Block grid export (disable sell-back to grid)."""
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_back_to_grid, False  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["sell_back_to_grid_on"] = False
+            self.coordinator.async_set_updated_data(updated)
+
+
+class EmaldoSellLimitSwitch(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], SwitchEntity
+):
+    """Switch entity for enabling/disabling the daily sell limit (selling protection).
+
+    ON  = sell limit active   (set_sellingprotection on=1, type 0x5E)
+    OFF = no daily sell limit (set_sellingprotection on=0, type 0x5E)
+
+    The limit value is controlled by :class:`EmaldoSellLimitThreshold` (number
+    entity).  Both entities preserve each other's last-known value when written.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Sell Limit"
+    _attr_icon = "mdi:transmission-tower-off"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialise the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.home_id}_sell_limit"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True when the daily sell limit is active."""
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("sell_limit_on")
+
+    def _current_threshold(self) -> int:
+        """Return the last-known threshold so writes preserve it."""
+        if self.coordinator.data is None:
+            return 0
+        return int(self.coordinator.data.get("sell_limit_threshold") or 0)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Activate sell limit with the last-known threshold."""
+        threshold = self._current_threshold()
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_limit, True, threshold  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["sell_limit_on"] = True
+            self.coordinator.async_set_updated_data(updated)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Deactivate sell limit (keep threshold for future re-activation)."""
+        threshold = self._current_threshold()
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_limit, False, threshold  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["sell_limit_on"] = False
+            self.coordinator.async_set_updated_data(updated)
 
 
 class EmaldoBatteryRangeOverrideSwitch(
