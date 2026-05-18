@@ -11,6 +11,8 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 - **E2E communication** — Reads and writes override slots via Emaldo's end-to-end encrypted channel
 - **EV charge control** — Select EV charging mode, set fixed charge amount, and write weekday/weekend EV schedule (Power Core models only)
 - **Third-party PV control** — Built-in switch for external PV routing; used by Battery Optimizer PV sell strategy
+- **Grid export controls** — Sell Back to Grid toggle and Sell Limit switch + daily threshold slider (kWh/day)
+- **Emergency charge** — Force-charge the battery during a scheduled time window; configure start/end datetime entities then activate the switch (or automate via a service call)
 - **AI Battery Range controls** — Smart/Emergency reserve sliders and override switch
 - **Resilient polling** — On API failures, sensors keep their last-known values while exponential-backoff retries recover automatically (60 s → 120 s → 4 min → … capped at 30 min)
 - **Next-day schedule event** — Fires `emaldo_next_day_schedule_ready` when tomorrow's schedule appears
@@ -161,6 +163,12 @@ The sensor uses `device_class: enum`. It is best-effort — if the E2E connectio
 | Entity | Type | Description |
 |---|---|---|
 | **Third-party PV** | Switch | Enables/disables external PV routing in Emaldo |
+| **Sell Back to Grid** | Switch | Enables/disables selling surplus energy back to the grid (`set_virtualpowerplant` 0x05) |
+| **Sell Limit** | Switch | Activates the daily grid-export limit protection (`set_sellingprotection` 0x5E) |
+| **Sell Limit threshold** | Number | Daily export limit in kWh/day (1–300). Only effective when Sell Limit is ON |
+| **Emergency charge** | Switch | Starts a force-charge session for the configured time window; turn off to cancel |
+| **Emergency charge start** | Datetime | Window start time. If unset when the switch is turned on, defaults to now |
+| **Emergency charge end** | Datetime | Window end time. If unset when the switch is turned on, defaults to start + 1 hour |
 | **AI Battery Range override** | Switch | When ON, AI is constrained to the Smart/Emergency reserve band |
 | **AI Smart reserve** | Number | Upper SoC marker for AI battery range |
 | **AI Emergency reserve** | Number | Lower SoC marker for AI battery range |
@@ -170,6 +178,45 @@ The sensor uses `device_class: enum`. It is best-effort — if the E2E connectio
 - **ON**: third-party PV is enabled and solar is used to charge the battery.
 - **OFF**: third-party PV is disabled and solar is exported to the grid.
 - The [Battery Optimizer](../battery_optimizer/README.md) can drive this switch slot-by-slot via its PV sell strategy (typically selling earlier solar, then re-enabling charge later so battery still reaches target SoC).
+
+#### Emergency charge
+
+Emergency charge forces the battery to charge from the grid during a specific time window — useful for pre-charging before a high-price period or ensuring a minimum SoC before an outage.
+
+**Workflow:**
+1. Set `Emergency charge start` to the desired start time (or leave it blank to start immediately).
+2. Set `Emergency charge end` to the desired end time (or leave it blank to end 1 hour after start).
+3. Turn on the `Emergency charge` switch.
+
+The integration sends the start/end Unix timestamps directly to the battery. The official app restricts the inputs to full hours; this integration accepts any minute-level precision.
+
+To cancel an active session, turn the switch off.
+
+**Automation example** — pre-charge every night at 02:00 until 05:00:
+
+```yaml
+automation:
+  - alias: "Nightly emergency charge"
+    trigger:
+      - platform: time
+        at: "01:55:00"
+    action:
+      - service: datetime.set_value
+        target:
+          entity_id: datetime.emaldo_battery_emergency_charge_start
+        data:
+          datetime: >-
+            {{ (now().replace(hour=2, minute=0, second=0, microsecond=0)).isoformat() }}
+      - service: datetime.set_value
+        target:
+          entity_id: datetime.emaldo_battery_emergency_charge_end
+        data:
+          datetime: >-
+            {{ (now().replace(hour=5, minute=0, second=0, microsecond=0)).isoformat() }}
+      - service: switch.turn_on
+        target:
+          entity_id: switch.emaldo_battery_emergency_charge
+```
 
 ### Schedule Chart Attributes
 
@@ -625,13 +672,14 @@ emaldo/
 ├── config_flow.py           # Config + options + reconfigure flow
 ├── const.py                 # Integration constants and defaults
 ├── coordinator.py           # Power/battery data coordinator (60s polling)
+├── datetime.py              # Emergency charge start/end datetime entities
 ├── number.py                # EV fixed charge amount + AI Battery Range number entities
 ├── schedule_coordinator.py  # Schedule + override coordinator (custom time triggers, E2E retry)
 ├── select.py                # Control priority + EV charge mode select entities
 ├── sensor.py                # Realtime + daily energy sensors, schedule sensors, balancing, diagnostics
 ├── services.py              # Override, EV schedule, solar backfill, AI Battery Range services
 ├── services.yaml            # Service UI descriptions
-├── switch.py                # Third-party PV + AI Battery Range override switches
+├── switch.py                # Third-party PV, AI Battery Range override, and Emergency charge switches
 ├── strings.json             # Translation strings
 └── emaldo_lib/              # Bundled Emaldo client library
     ├── __init__.py           # Re-exports EmaldoClient + exceptions
