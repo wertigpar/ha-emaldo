@@ -2341,6 +2341,236 @@ def set_thirdparty_pv(
 
 
 # ---------------------------------------------------------------------------
+# Selling protection (controls whether grid export / sell-back is allowed)
+# ---------------------------------------------------------------------------
+#
+# "Selling protection" is the app-level feature that blocks or allows the
+# inverter from exporting power back to the grid.  When selling protection
+# is ON the inverter is prevented from selling; when OFF selling is allowed.
+#
+# Opcodes confirmed by APK 2.8.4 reverse engineering:
+#   0x5E A0  set_sellingprotection  write [on u8, threshold u32le]  5 bytes
+#   0x5F A0  get_sellingprotection  subscribe  empty payload
+#
+# APK: dispatch-table case 64 (0x40) → j.m(Map); Short -24482 (0xA05E) → 0x5EA0
+#      dispatch-table case 11 (0x0B) → j.o();    Short -24481 (0xA05F) → 0x5FA0
+# Payload for set: [on(1B), threshold(4B LE u32)] = 5 bytes total.
+# "threshold" is a power threshold in watts; 0 is the safe default.
+
+_SELLING_PROTECTION_SET_TYPE = 0x5E  # set_sellingprotection (= "Sell Limit" in app)
+_SELLING_PROTECTION_GET_TYPE = 0x5F  # get_sellingprotection
+
+# APK: dispatch-table case 47 → inline Short(-24571) = 0xA005 → msg_type=0x05
+#      dispatch-table case 81 → inline Short(-24570) = 0xA006 → msg_type=0x06
+# wc/r UI fragment method Y sends set_virtualpowerplant with {on}.
+# b9/g (ManualSellingBackManager) logs '\u7535\u7f51\u5356\u7535\u72b6\u6001' = "Grid selling state" on get response.
+# Payload for set: [on(1B), len(1B), user_id_utf8(N B)] when user_id non-empty,
+# or [on(1B)] only when user_id is empty (not logged in).
+# Encoding per APK j.a(String): prepend len(utf8_bytes) & 0xFF before the UTF-8 bytes.
+_VIRTUALPOWERPLANT_SET_TYPE = 0x05  # set_virtualpowerplant (= "Sell Back to Grid")
+_VIRTUALPOWERPLANT_GET_TYPE = 0x06  # get_virtualpowerplant
+
+
+def _build_vpp_payload(enabled: bool, user_id: str) -> bytes:
+    """Build the set_virtualpowerplant (0x05) payload.
+
+    APK dispatcher case 47 always includes the account user-id when the user
+    is logged in.  Encoding matches ``j.a(String)[B``:
+    ``[len(utf8) & 0xFF, utf8_bytes...]``, prepended with the on/off byte.
+
+    Returns:
+        ``[on(1B), len(1B), utf8_user_id(N B)]`` when *user_id* is non-empty;
+        ``[on(1B)]`` only when *user_id* is empty (not authenticated).
+    """
+    on_byte = bytes([0x01 if enabled else 0x00])
+    if not user_id:
+        return on_byte
+    uid_utf8 = user_id.encode("utf-8")
+    return on_byte + bytes([len(uid_utf8) & 0xFF]) + uid_utf8
+
+
+
+
+
+def set_selling_protection(
+    e2e_creds: dict,
+    enabled: bool,
+    threshold_w: int = 0,
+    *,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> bool:
+    """Enable or disable selling protection (grid-export block).
+
+    When *enabled* is ``True`` the inverter is prevented from exporting to
+    the grid ("selling protection on" = sell-back blocked).
+    When *enabled* is ``False`` grid export is permitted ("selling protection
+    off" = sell-back allowed).
+
+    Args:
+        enabled: ``True`` to block grid export; ``False`` to allow it.
+        threshold_w: Daily export cap in kWh (0 = safe default; max 300).
+
+    Returns:
+        *True* if the server acknowledged the command.
+    """
+    payload = struct.pack("<BI", 0x01 if enabled else 0x00, threshold_w & 0xFFFFFFFF)
+    session_nonce = generate_nonce()
+    pkt = build_subscription_packet(
+        e2e_creds, _SELLING_PROTECTION_SET_TYPE, session_nonce, payload=payload,
+    )
+    results = _run_session(
+        e2e_creds, [("SetSellingProtection(0x5E)", pkt)],
+        timeout=timeout, log=log,
+    )
+    _, resp = results[0]
+    return resp is not None
+
+
+def _is_selling_protection_payload(payload: bytes) -> bool:
+    """Check if decrypted payload is a get_sellingprotection response.
+
+    Actual device layout: [extra_byte(1B), on(1B), threshold_u32le(4B), ...]
+    Minimum 6 bytes. Reject power-flow (≥20 B) and other large frames.
+    The extra leading byte appears to be a firstUse/status byte (always 0x00);
+    the on flag is at offset 1.
+    """
+    return (
+        payload is not None
+        and 6 <= len(payload) <= 16
+        and payload[1] in (0, 1)
+    )
+
+
+def parse_selling_protection_response(payload: bytes | None) -> dict | None:
+    """Decode a get_sellingprotection (0x5F) response payload.
+
+    Actual device payload layout (confirmed by protocol capture):
+        byte 0:     extra/status byte (firstUse flag, always 0x00)
+        byte 1:     on (1 = selling protection enabled = export blocked/capped)
+        bytes 2-5:  threshold as LE uint32 in kWh/day
+
+    Returns:
+        Dict with ``selling_protection_on`` (bool) and ``threshold_kwh`` (int);
+        or *None* on invalid input.
+    """
+    if payload is None or len(payload) < 6:
+        return None
+    return {
+        "selling_protection_on": bool(payload[1]),
+        "threshold_kwh": struct.unpack_from("<I", payload, 2)[0],
+    }
+
+
+def get_selling_protection(
+    e2e_creds: dict,
+    *,
+    timeout: float = 5.0,
+    log: Callable[..., None] | None = None,
+) -> dict | None:
+    """Read current selling-protection state via E2E subscribe (type 0x5F).
+
+    Returns a dict with ``selling_protection_on`` (bool) and ``threshold_kwh``
+    (int); or *None* on failure.  When ``selling_protection_on`` is ``False``
+    the inverter is allowed to export power to the grid.
+    """
+    session_nonce = generate_nonce()
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+    sub_pkt = build_subscription_packet(
+        e2e_creds, _SELLING_PROTECTION_GET_TYPE, session_nonce,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B → got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            if log:
+                log(f"{label}: sent {len(pkt)}B → no response")
+            return None
+
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        import time as _time
+        _time.sleep(0.2)
+
+        resp = _send(sub_pkt, "GetSellingProtection(0x5F)")
+        if not resp:
+            return None
+
+        decrypted = decrypt_response(
+            resp, e2e_creds["chat_secret"],
+            payload_validator=_is_selling_protection_payload,
+        )
+        result = parse_selling_protection_response(decrypted)
+        if result is not None:
+            return result
+
+        for _ in range(5):
+            try:
+                resp, _ = sock.recvfrom(4096)
+                decrypted = decrypt_response(
+                    resp, e2e_creds["chat_secret"],
+                    payload_validator=_is_selling_protection_payload,
+                )
+                result = parse_selling_protection_response(decrypted)
+                if result is not None:
+                    return result
+            except socket.timeout:
+                break
+
+        return None
+    finally:
+        sock.close()
+
+
+def _is_virtualpowerplant_payload(payload: bytes) -> bool:
+    """Return True if payload looks like a get_virtualpowerplant response.
+
+    Expects 1-4 bytes where byte 0 is 0 or 1 (boolean on/off). The strict size
+    limit prevents accidentally accepting a battery broadcast (0x06 reuse) which
+    is much longer.
+    """
+    return payload is not None and 1 <= len(payload) <= 4 and payload[0] in (0, 1)
+
+
+def parse_virtualpowerplant_response(payload: bytes | None) -> dict | None:
+    """Decode a get_virtualpowerplant (0x06) response payload.
+
+    Payload layout:
+        byte 0:  on (1 = sell-back to grid enabled)
+
+    Returns:
+        Dict with ``sell_back_to_grid_on`` (bool); or *None* on invalid input.
+    """
+    if payload is None or len(payload) < 1:
+        return None
+    return {"sell_back_to_grid_on": bool(payload[0])}
+
+
+# ---------------------------------------------------------------------------
 # Persistent E2E Session (for real-time polling)
 # ---------------------------------------------------------------------------
 
@@ -2639,6 +2869,134 @@ class PersistentE2ESession:
         except Exception:  # noqa: BLE001 - best-effort parse
             return None
         return parse_power_flow(decrypted)
+
+    def read_selling_protection(self) -> dict | None:
+        """Read selling-protection state (0x5F) over the existing session.
+
+        Returns a dict with ``selling_protection_on`` and ``threshold_kwh``,
+        or *None* on timeout / parse failure.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+
+        for attempt in range(2):
+            req_pkt = build_subscription_packet(
+                self._creds, _SELLING_PROTECTION_GET_TYPE, self._session_nonce,
+            )
+            resp = self._send_raw(req_pkt, "GetSellingProtection(0x5F)")
+            if resp is None:
+                if attempt == 0:
+                    self._reconnect()
+                    continue
+                return None
+
+            if self._is_session_expired(resp):
+                if attempt == 0:
+                    self._reconnect()
+                    continue
+                return None
+
+            try:
+                decrypted = decrypt_response(
+                    resp, self._creds["chat_secret"],
+                    payload_validator=_is_selling_protection_payload,
+                )
+            except Exception:  # noqa: BLE001 - best-effort parse
+                decrypted = None
+
+            result = parse_selling_protection_response(decrypted)
+            if result is not None:
+                return result
+
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    break
+                try:
+                    decrypted = decrypt_response(
+                        more_resp, self._creds["chat_secret"],
+                        payload_validator=_is_selling_protection_payload,
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+                result = parse_selling_protection_response(decrypted)
+                if result is not None:
+                    return result
+
+            if attempt == 0:
+                self._reconnect()
+                continue
+
+            return None
+
+        return None
+
+    def read_virtualpowerplant(self) -> dict | None:
+        """Read sell-back-to-grid (virtual power plant) state via 0x06 subscribe.
+
+        Returns a dict with ``sell_back_to_grid_on`` (bool), or *None* on
+        timeout / parse failure.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+
+        for attempt in range(2):
+            req_pkt = build_subscription_packet(
+                self._creds, _VIRTUALPOWERPLANT_GET_TYPE, self._session_nonce,
+            )
+            resp = self._send_raw(req_pkt, "GetVirtualPowerPlant(0x06)")
+            if resp is None:
+                if attempt == 0:
+                    self._reconnect()
+                    continue
+                return None
+
+            if self._is_session_expired(resp):
+                if attempt == 0:
+                    self._reconnect()
+                    continue
+                return None
+
+            try:
+                decrypted = decrypt_response(
+                    resp, self._creds["chat_secret"],
+                    payload_validator=_is_virtualpowerplant_payload,
+                )
+            except Exception:  # noqa: BLE001 - best-effort parse
+                decrypted = None
+
+            result = parse_virtualpowerplant_response(decrypted)
+            if result is not None:
+                return result
+
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    break
+                try:
+                    decrypted = decrypt_response(
+                        more_resp, self._creds["chat_secret"],
+                        payload_validator=_is_virtualpowerplant_payload,
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+                result = parse_virtualpowerplant_response(decrypted)
+                if result is not None:
+                    return result
+
+            if attempt == 0:
+                self._reconnect()
+                continue
+
+            return None
+
+        return None
 
     def send_command(self, msg_type: int, payload: bytes) -> bytes | None:
         """Send a single write command over the existing session socket.
