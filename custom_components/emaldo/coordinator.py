@@ -342,6 +342,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._session: PersistentE2ESession | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
+        self._consecutive_read_errors: int = 0
         self._regulate_frequency: dict | None = None
         self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
         # -- Stats for diagnostic sensor --
@@ -525,8 +526,18 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         except Exception as err:
             await self._close_session()
             self._empty_reads = 0
+            self._consecutive_read_errors += 1
             self.stats_last_failure = _time.time()
-            _LOGGER.warning("E2E power flow read failed: %s", err)
+            if self._consecutive_read_errors >= self._MAX_EMPTY_READS:
+                _LOGGER.warning(
+                    "E2E power flow read failed %d times consecutively: %s",
+                    self._consecutive_read_errors, err,
+                )
+            else:
+                _LOGGER.debug(
+                    "E2E power flow read failed (attempt %d/%d): %s",
+                    self._consecutive_read_errors, self._MAX_EMPTY_READS, err,
+                )
             return self.data  # keep last known values visible
 
         # Ensure keepalive task is running
@@ -560,6 +571,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return self.data
 
         self._empty_reads = 0
+        if self._consecutive_read_errors >= self._MAX_EMPTY_READS:
+            _LOGGER.info(
+                "E2E power flow recovered after %d consecutive errors",
+                self._consecutive_read_errors,
+            )
+        self._consecutive_read_errors = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
 

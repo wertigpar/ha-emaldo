@@ -127,8 +127,11 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         overrides = None
         try:
             overrides = client.get_overrides(hid, did, model)
-        except Exception:
-            _LOGGER.warning("Failed to read E2E overrides, skipping", exc_info=True)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.info(
+                "Failed to read E2E overrides, skipping (%s: %s)",
+                type(err).__name__, err,
+            )
 
         return {"schedule": schedule, "overrides": overrides}
 
