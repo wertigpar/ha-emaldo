@@ -13,7 +13,7 @@ DEFAULT_APP_VERSION = "2.8.4"
 
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 REALTIME_SCAN_INTERVAL = 10  # seconds — fast E2E power flow polling
-KEEPALIVE_INTERVAL = 15  # seconds — UDP session keepalive
+KEEPALIVE_INTERVAL = 7  # seconds — UDP session keepalive (relay TTL ~10s)
 
 # Schedule polling configuration
 CONF_SCHEDULE_START_HOUR = "schedule_start_hour"

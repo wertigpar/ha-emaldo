@@ -337,13 +337,29 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Start emergency charge using the configured start/end window."""
-        import time as _time
-        now = int(_time.time())
+        from datetime import date, datetime, timedelta
+        now = datetime.now()
+        today = date.today()
         data = self.coordinator.data or {}
-        start_dt = data.get("emergency_charge_start_dt")
-        end_dt = data.get("emergency_charge_end_dt")
-        start_unix = int(start_dt.timestamp()) if start_dt is not None else now
-        end_unix = int(end_dt.timestamp()) if end_dt is not None else start_unix + 3600
+        start_t = data.get("emergency_charge_start_t")
+        end_t = data.get("emergency_charge_end_t")
+
+        if start_t is not None:
+            start_dt = datetime.combine(today, start_t)
+            if start_dt < now:
+                start_dt += timedelta(days=1)
+        else:
+            start_dt = now
+
+        if end_t is not None:
+            end_dt = datetime.combine(start_dt.date(), end_t)
+            if end_dt <= start_dt:
+                end_dt += timedelta(days=1)
+        else:
+            end_dt = start_dt + timedelta(hours=1)
+
+        start_unix = int(start_dt.timestamp())
+        end_unix = int(end_dt.timestamp())
         await self.hass.async_add_executor_job(
             self.coordinator._write_emergency_charge_on,  # noqa: SLF001
             start_unix, end_unix,
