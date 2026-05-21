@@ -79,8 +79,8 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._model: str | None = None
         self._device_name: str | None = None
         self._emergency_charge_active: bool = False
-        self._emergency_charge_start_dt: object = None  # datetime | None
-        self._emergency_charge_end_dt: object = None   # datetime | None
+        self._emergency_charge_start_t: object = None  # datetime.time | None
+        self._emergency_charge_end_t: object = None    # datetime.time | None
 
     @property
     def home_id(self) -> str:
@@ -174,8 +174,8 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "solar": solar,
             "ev": ev,
             "emergency_charge_active": self._emergency_charge_active,
-            "emergency_charge_start_dt": self._emergency_charge_start_dt,
-            "emergency_charge_end_dt": self._emergency_charge_end_dt,
+            "emergency_charge_start_t": self._emergency_charge_start_t,
+            "emergency_charge_end_t": self._emergency_charge_end_t,
         }
 
     def _read_ev_state(self) -> dict | None:
@@ -343,6 +343,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
         self._consecutive_read_errors: int = 0
+        self._consecutive_reconnects: int = 0
         self._regulate_frequency: dict | None = None
         self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
         # -- Stats for diagnostic sensor --
@@ -354,6 +355,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_last_success: float | None = None
         self.stats_last_failure: float | None = None
         self.stats_last_reconnect: float | None = None
+        # Diagnostic info collected by executor thread, logged from main thread
+        self._e2e_diag: str = "(not yet called)"
 
     # -- Proxy properties so sensors can share one class across coordinators --
 
@@ -399,14 +402,21 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             raise UpdateFailed("Device not yet discovered")
 
         creds = client.e2e_login(home_id, device_id, model)
-        self._session = PersistentE2ESession(creds)
+        _LOGGER.debug("E2E session host: %s", creds.get("host", "(default)"))
+        self._session = PersistentE2ESession(
+            creds,
+            log=lambda msg: _LOGGER.debug("[E2E] %s", msg),
+        )
         self._session.connect()
         return self._session
 
     def _read_power_flow(self) -> dict | None:
         """Synchronous helper that runs in the executor."""
         session = self._ensure_session()
+        # Collect diagnostic info — will be logged from main thread in _async_update_data
+        self._e2e_diag = f"host={session._creds.get('host','?')} has_log={session._log is not None} closed={session.closed}"
         data = session.read_power_flow()
+        self._e2e_diag += f" result={'data' if data else 'None'}"
         if data is None and session.closed:
             # Session died mid-read — force recreation on next call
             self._session = None
@@ -501,6 +511,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
+    #: After this many consecutive reconnect cycles with no recovery, switch from
+    #: WARNING to DEBUG to avoid flooding the log during persistent failures.
+    _WARN_RECONNECT_THRESHOLD = 3
 
     async def _async_update_data(self) -> dict[str, Any] | None:
         """Fetch realtime power flow via the persistent E2E session.
@@ -515,13 +528,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         try:
             data = await self.hass.async_add_executor_job(self._read_power_flow)
+            _LOGGER.debug("[E2E diag] %s", self._e2e_diag)
         except EmaldoAuthError as err:
-            # Token expired — force REST re-login and E2E reconnect
+            # Token expired — force REST re-login and E2E reconnect.
+            # This is self-healing (next poll re-logins automatically), so log at INFO.
             self._parent._client = None  # noqa: SLF001
             await self._close_session()
             self._empty_reads = 0
+            self._consecutive_reconnects += 1
             self.stats_last_failure = _time.time()
-            _LOGGER.warning("E2E auth failed, will re-login on next poll: %s", err)
+            _LOGGER.info("E2E auth expired, will re-login on next poll: %s", err)
             return self.data  # keep last known values visible
         except Exception as err:
             await self._close_session()
@@ -552,14 +568,32 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.stats_last_failure = _time.time()
             if self._empty_reads >= self._MAX_EMPTY_READS:
                 self.stats_reconnects += 1
+                self._consecutive_reconnects += 1
                 self.stats_last_reconnect = _time.time()
-                _LOGGER.warning(
-                    "E2E power flow: %d consecutive empty reads, reconnecting "
-                    "(total drops: %d, reconnects: %d since start)",
-                    self._empty_reads,
-                    self.stats_empty_reads,
-                    self.stats_reconnects,
-                )
+                if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
+                    # Session expiry is normal relay behaviour — always INFO unless persistent
+                    _LOGGER.info(
+                        "E2E power flow: %d consecutive empty reads, reconnecting "
+                        "(total drops: %d, reconnects: %d since start)",
+                        self._empty_reads,
+                        self.stats_empty_reads,
+                        self.stats_reconnects,
+                    )
+                elif self._consecutive_reconnects == self._WARN_RECONNECT_THRESHOLD + 1:
+                    _LOGGER.warning(
+                        "E2E power flow: persistent connection failure after %d reconnect "
+                        "cycles — suppressing further reconnect warnings (total drops: %d). "
+                        "Check device/relay connectivity.",
+                        self._consecutive_reconnects - 1,
+                        self.stats_empty_reads,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "E2E power flow: empty reads, reconnecting "
+                        "(total drops: %d, reconnects: %d since start)",
+                        self.stats_empty_reads,
+                        self.stats_reconnects,
+                    )
                 await self._close_session()
                 self._empty_reads = 0
                 return self.data  # keep last known values visible
@@ -571,6 +605,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return self.data
 
         self._empty_reads = 0
+        if self._consecutive_reconnects > self._WARN_RECONNECT_THRESHOLD:
+            _LOGGER.info(
+                "E2E power flow recovered after %d reconnect cycles",
+                self._consecutive_reconnects,
+            )
+        self._consecutive_reconnects = 0
         if self._consecutive_read_errors >= self._MAX_EMPTY_READS:
             _LOGGER.info(
                 "E2E power flow recovered after %d consecutive errors",
