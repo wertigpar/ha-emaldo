@@ -299,8 +299,9 @@ class EmaldoBatteryRangeOverrideSwitch(
 class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEntity):
     """Switch entity for starting and cancelling emergency charge.
 
-    Turning ON starts a charge session using the duration configured in the
-    companion :class:`~emaldo.number.EmaldoEmergencyChargeHours` entity.
+    Turning ON starts a charge session using the window defined by the
+    companion :class:`~emaldo.datetime.EmaldoEmergencyChargeStart` and
+    :class:`~emaldo.datetime.EmaldoEmergencyChargeEnd` datetime entities.
     Turning OFF cancels any active session immediately.
 
     State is tracked optimistically — there is no dedicated device read-back
