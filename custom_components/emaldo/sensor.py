@@ -246,7 +246,7 @@ class EmaldoSensorEntityDescription(SensorEntityDescription):
 REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="battery_soc",
-        name="Battery SoC",
+        translation_key="battery_soc",
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
@@ -254,7 +254,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="battery_charged_today",
-        name="Battery charged today",
+        translation_key="battery_charged_today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -262,7 +262,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="battery_discharged_today",
-        name="Battery discharged today",
+        translation_key="battery_discharged_today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -270,7 +270,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="solar_energy_today",
-        name="Solar energy today",
+        translation_key="solar_energy_today",
         icon="mdi:solar-power",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
@@ -279,7 +279,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="grid_import_today",
-        name="Grid import today",
+        translation_key="grid_import_today",
         icon="mdi:transmission-tower-import",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
@@ -288,7 +288,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="grid_export_today",
-        name="Grid export today",
+        translation_key="grid_export_today",
         icon="mdi:transmission-tower-export",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
@@ -297,7 +297,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="load_energy_today",
-        name="Load energy today",
+        translation_key="load_energy_today",
         icon="mdi:home-lightning-bolt",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
@@ -310,7 +310,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
 REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="battery_power",
-        name="Battery power",
+        translation_key="battery_power",
         icon="mdi:battery-charging",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
@@ -319,7 +319,7 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="grid_power",
-        name="Grid power",
+        translation_key="grid_power",
         icon="mdi:transmission-tower",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
@@ -328,7 +328,7 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="dual_power",
-        name="Consumption",
+        translation_key="dual_power",
         icon="mdi:home-lightning-bolt",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
@@ -341,7 +341,7 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
 POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="solar_power",
-        name="Solar power",
+        translation_key="solar_power",
         icon="mdi:solar-power",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
@@ -350,7 +350,7 @@ POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
     EmaldoSensorEntityDescription(
         key="car_charge_power",
-        name="Car charge power",
+        translation_key="car_charge_power",
         icon="mdi:car-electric",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
@@ -470,7 +470,7 @@ class EmaldoPlanSourceSensor(
     """Reports whether the current slot is 'Internal' or 'Override'."""
 
     _attr_has_entity_name = True
-    _attr_name = "Plan source"
+    _attr_translation_key = "plan_source"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = ["Internal", "Override"]
 
@@ -513,7 +513,7 @@ class EmaldoActiveModeSensor(
     """Reports the effective mode of the current time slot."""
 
     _attr_has_entity_name = True
-    _attr_name = "Active mode"
+    _attr_translation_key = "active_mode"
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         super().__init__(coordinator)
@@ -598,7 +598,7 @@ class EmaldoScheduleChartSensor(
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Schedule chart"
+    _attr_translation_key = "schedule_chart"
     _attr_icon = "mdi:chart-timeline-variant"
     _unrecorded_attributes = frozenset({"schedule"})
 
@@ -724,7 +724,7 @@ class EmaldoBalancingStateSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], S
     """Reports the real-time grid frequency regulation (balancing) state."""
 
     _attr_has_entity_name = True
-    _attr_name = "Balancing state"
+    _attr_translation_key = "balancing_state"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [
         "idle",
@@ -764,7 +764,7 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
     """Diagnostic sensor showing E2E realtime connection health."""
 
     _attr_has_entity_name = True
-    _attr_name = "Realtime connection"
+    _attr_translation_key = "realtime_connection"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:lan-connect"
 

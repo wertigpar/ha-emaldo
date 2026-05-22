@@ -1,0 +1,96 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Emaldo-akku",
+        "description": "Yhdistä Emaldo-akkujärjestelmäsi.",
+        "data": {
+          "email": "Sähköposti",
+          "password": "Salasana",
+          "home_id": "Kodin tunnus (jätä tyhjäksi automaattitunnistusta varten)",
+          "app_id": "Sovellustunnus",
+          "app_secret": "Sovellussalaisuus",
+          "app_version": "Sovellusversio"
+        }
+      },
+      "reconfigure": {
+        "title": "Määritä Emaldo uudelleen",
+        "description": "Päivitä tunnistetiedot tai sovelluksen parametrit poistamatta integraatiota.",
+        "data": {
+          "email": "Sähköposti",
+          "password": "Salasana",
+          "home_id": "Kodin tunnus (jätä tyhjäksi uudelleentunnistusta varten)",
+          "app_id": "Sovellustunnus",
+          "app_secret": "Sovellussalaisuus",
+          "app_version": "Sovellusversio"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Virheellinen sähköpostiosoite tai salasana.",
+      "cannot_connect": "Emaldo-ohjelmointirajapintaan ei saada yhteyttä.",
+      "no_devices": "Määritetystä kodista ei löydy akkulaitteitä."
+    },
+    "abort": {
+      "already_configured": "Tili on jo määritetty.",
+      "reconfigure_successful": "Tunnistetiedot päivitetty ja integraatio ladattu uudelleen."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Aikataulukyselyt",
+        "description": "Määritä, milloin integraatio tarkistaa aikataulupäivitykset.",
+        "data": {
+          "schedule_start_hour": "Alkutunti (0–23)",
+          "schedule_start_minute": "Alkuminuutti (0–59)",
+          "schedule_interval": "Toistovälintervalli (sekuntia)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_soc": { "name": "Akun varaus" },
+      "battery_charged_today": { "name": "Akku ladattu tänään" },
+      "battery_discharged_today": { "name": "Akku purettu tänään" },
+      "solar_energy_today": { "name": "Aurinkoenergia tänään" },
+      "grid_import_today": { "name": "Verkkotuonti tänään" },
+      "grid_export_today": { "name": "Verkkovienti tänään" },
+      "load_energy_today": { "name": "Kulutusenergia tänään" },
+      "battery_power": { "name": "Akkuteho" },
+      "grid_power": { "name": "Verkkoteho" },
+      "dual_power": { "name": "Kulutus" },
+      "solar_power": { "name": "Aurinkoteho" },
+      "car_charge_power": { "name": "Auton latasteho" },
+      "plan_source": { "name": "Suunnitelman lähde" },
+      "active_mode": { "name": "Aktiivinen tila" },
+      "schedule_chart": { "name": "Aikataulukaavio" },
+      "balancing_state": { "name": "Taajuussäätötila" },
+      "realtime_connection": { "name": "Reaaliaikayhteys" }
+    },
+    "switch": {
+      "thirdparty_pv": { "name": "Kolmannen osapuolen aurinkopaneeli" },
+      "sell_back_to_grid": { "name": "Takaisinmyynti verkkoon" },
+      "sell_limit": { "name": "Myyntisuoja" },
+      "ai_battery_range_override": { "name": "Akkualueen manuaalinen ohjaus" },
+      "emergency_charge": { "name": "Hätälataus" }
+    },
+    "number": {
+      "ev_fixed_charge_amount": { "name": "Kiinteä latausmäärä (auto)" },
+      "ai_battery_range_smart": { "name": "Tekoälyn älyreservi" },
+      "ai_battery_range_emergency": { "name": "Tekoälyn hätäreservi" },
+      "sell_limit_threshold": { "name": "Myyntisuojakynnys" }
+    },
+    "select": {
+      "ev_charge_mode": { "name": "Auton latausmoodi" }
+    },
+    "time": {
+      "charge_start": { "name": "Latauksen aloitus" },
+      "charge_stop": { "name": "Latauksen lopetus" }
+    },
+    "calendar": {
+      "battery_schedule": { "name": "Akun aikataulu" }
+    }
+  }
+}

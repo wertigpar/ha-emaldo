@@ -57,7 +57,7 @@ class EmaldoEVFixedChargeAmount(CoordinatorEntity[EmaldoCoordinator], NumberEnti
     """Number entity for EV fixed charge amount (Instant Fixed mode)."""
 
     _attr_has_entity_name = True
-    _attr_name = "EV fixed charge amount"
+    _attr_translation_key = "ev_fixed_charge_amount"
     _attr_icon = "mdi:battery-charging-outline"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_mode = NumberMode.BOX
@@ -135,7 +135,7 @@ class EmaldoBatteryRangeMarker(
             raise ValueError(f"kind must be 'smart' or 'emergency' (got {kind!r})")
         self._kind = kind
         nice = "Smart reserve" if kind == "smart" else "Emergency reserve"
-        self._attr_name = f"AI {nice}"
+        self._attr_translation_key = f"ai_battery_range_{kind}"
         self._attr_unique_id = f"{coordinator.home_id}_battery_range_{kind}"
 
     @property
@@ -213,7 +213,7 @@ class EmaldoSellLimitThreshold(
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Sell Limit threshold"
+    _attr_translation_key = "sell_limit_threshold"
     _attr_icon = "mdi:gauge"
     _attr_mode = NumberMode.SLIDER
     _attr_native_min_value = 1

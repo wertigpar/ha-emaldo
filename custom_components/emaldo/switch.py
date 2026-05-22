@@ -52,7 +52,7 @@ class EmaldoThirdPartyPVSwitch(
     """Switch entity for enabling/disabling Third-Party PV (3rd-party solar)."""
 
     _attr_has_entity_name = True
-    _attr_name = "Third-party PV"
+    _attr_translation_key = "thirdparty_pv"
     _attr_icon = "mdi:solar-panel"
 
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
@@ -108,7 +108,7 @@ class EmaldoSellBackToGridSwitch(
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Sell Back to Grid"
+    _attr_translation_key = "sell_back_to_grid"
     _attr_icon = "mdi:transmission-tower-export"
 
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
@@ -168,7 +168,7 @@ class EmaldoSellLimitSwitch(
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Sell Limit"
+    _attr_translation_key = "sell_limit"
     _attr_icon = "mdi:transmission-tower-off"
 
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
@@ -229,7 +229,7 @@ class EmaldoBatteryRangeOverrideSwitch(
     """ON means AI must stay inside [emergency, smart] marker percentages."""
 
     _attr_has_entity_name = True
-    _attr_name = "AI Battery Range override"
+    _attr_translation_key = "ai_battery_range_override"
     _attr_icon = "mdi:battery-lock"
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
@@ -309,7 +309,7 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Emergency charge"
+    _attr_translation_key = "emergency_charge"
     _attr_icon = "mdi:battery-charging-high"
 
     def __init__(self, coordinator: EmaldoCoordinator) -> None:
