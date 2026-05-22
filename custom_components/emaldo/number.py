@@ -91,8 +91,9 @@ class EmaldoEVFixedChargeAmount(CoordinatorEntity[EmaldoCoordinator], NumberEnti
 
         kwh = ev.get("fixed_kwh")
         full = ev.get("fixed_full_kwh")
-        if full and full > self._attr_native_max_value:
+        if full and full > self.native_max_value:
             self._attr_native_max_value = float(full)
+            self.__dict__.pop("native_max_value", None)  # Invalidate cached value
         return float(kwh) if kwh is not None else None
 
     async def async_set_native_value(self, value: float) -> None:
