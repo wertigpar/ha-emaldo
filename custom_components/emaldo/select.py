@@ -53,7 +53,7 @@ class EmaldoEVChargeModeSelect(CoordinatorEntity[EmaldoCoordinator], SelectEntit
     """Select entity to read and write the EV charging mode."""
 
     _attr_has_entity_name = True
-    _attr_name = "EV charge mode"
+    _attr_translation_key = "ev_charge_mode"
     _attr_options = list(EV_MODE_OPTIONS.keys())
     _attr_icon = "mdi:ev-station"
 

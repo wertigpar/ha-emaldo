@@ -162,7 +162,7 @@ class EmaldoBatteryScheduleCalendar(
     """Calendar entity that shows the battery schedule as events."""
 
     _attr_has_entity_name = True
-    _attr_name = "Battery schedule"
+    _attr_translation_key = "battery_schedule"
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         super().__init__(coordinator)

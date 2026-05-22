@@ -76,7 +76,7 @@ class EmaldoEmergencyChargeStart(_EmaldoEmergencyChargeTimeBase):
     turned on, the integration uses the current time as the start.
     """
 
-    _attr_name = "Emergency charge start"
+    _attr_translation_key = "charge_start"
     _attr_icon = "mdi:battery-clock"
     _coordinator_key = "emergency_charge_start_t"
     _coordinator_attr = "_emergency_charge_start_t"
@@ -97,7 +97,7 @@ class EmaldoEmergencyChargeEnd(_EmaldoEmergencyChargeTimeBase):
     falls before the start.
     """
 
-    _attr_name = "Emergency charge end"
+    _attr_translation_key = "charge_stop"
     _attr_icon = "mdi:battery-clock-outline"
     _coordinator_key = "emergency_charge_end_t"
     _coordinator_attr = "_emergency_charge_end_t"
