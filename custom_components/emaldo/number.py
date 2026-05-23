@@ -50,6 +50,9 @@ async def async_setup_entry(
     # Sell Limit daily threshold slider (1-300 kWh/day).
     entities.append(EmaldoSellLimitThreshold(realtime_coordinator))
 
+    # Manual selling target energy amount (1-100 kWh).
+    entities.append(EmaldoManualSellingTarget(realtime_coordinator))
+
     async_add_entities(entities)
 
 
@@ -259,4 +262,63 @@ class EmaldoSellLimitThreshold(
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
             updated["sell_limit_threshold"] = threshold
+            self.coordinator.async_set_updated_data(updated)
+
+
+class EmaldoManualSellingTarget(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], NumberEntity
+):
+    """Target energy amount for manual selling (0x80).
+
+    Reads from coordinator.data["manual_selling_target_kwh"].  When set, sends
+    the new target while preserving the current enabled/disabled state.
+
+    Range: 1–100 kWh, step 1.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "manual_selling_target"
+    _attr_icon = "mdi:lightning-bolt"
+    _attr_mode = NumberMode.BOX
+    _attr_native_min_value = 1
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "kWh"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialize the manual selling target number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.home_id}_manual_selling_target"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking to the main Emaldo device."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current target kWh value."""
+        if self.coordinator.data is None:
+            return None
+        val = self.coordinator.data.get("manual_selling_target_kwh")
+        if val is None:
+            return None
+        return float(max(1, min(100, val)))
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Write new target kWh, preserving the current enabled state."""
+        target = int(round(value))
+        enabled = bool((self.coordinator.data or {}).get("manual_selling_on", False))
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_manual_selling, enabled, target  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["manual_selling_target_kwh"] = float(target)
             self.coordinator.async_set_updated_data(updated)

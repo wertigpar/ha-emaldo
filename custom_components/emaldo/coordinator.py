@@ -509,6 +509,34 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         session = self._ensure_session()
         return session.read_selling_protection()
 
+    def _write_manual_selling(self, on: bool, target_kwh: int) -> None:
+        """Enable or disable manual energy selling (type 0x80).
+
+        Args:
+            on:         True = start selling; False = stop selling.
+            target_kwh: Target energy to sell in kWh (integer, ignored when off).
+        """
+        payload = struct.pack("<BIB", 1 if on else 0, max(0, target_kwh), 0)
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                session.send_command(0x80, payload)
+                return
+            except EmaldoAuthError:
+                self._parent._client = None  # noqa: SLF001
+                self._session = None
+                if attempt == 1:
+                    raise
+            except EmaldoE2EError:
+                self._session = None
+                if attempt == 1:
+                    raise
+
+    def _read_manual_selling(self) -> dict | None:
+        """Read manual-selling state (0x81) via the persistent session."""
+        session = self._ensure_session()
+        return session.read_manual_selling()
+
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
     #: After this many consecutive reconnect cycles with no recovery, switch from
@@ -670,9 +698,31 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     for _k in ("sell_limit_on", "sell_limit_threshold"):
                         if _k in self.data:
                             data[_k] = self.data[_k]
+
+            # Poll manual selling state alongside balancing (~60s).
+            _MS_KEYS = ("manual_selling_on", "manual_selling_target_kwh", "manual_selling_sold_kwh")
+            try:
+                ms = await self.hass.async_add_executor_job(self._read_manual_selling)
+                if ms is not None:
+                    data["manual_selling_on"] = ms["enabled"]
+                    data["manual_selling_target_kwh"] = ms["target_energy_kwh"]
+                    data["manual_selling_sold_kwh"] = ms["sold_so_far_kwh"]
+                elif self.data:
+                    for _k in _MS_KEYS:
+                        if _k in self.data:
+                            data[_k] = self.data[_k]
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Manual selling state read failed: %s", err)
+                if self.data:
+                    for _k in _MS_KEYS:
+                        if _k in self.data:
+                            data[_k] = self.data[_k]
         elif self.data and "sell_back_to_grid_on" in self.data:
             data["sell_back_to_grid_on"] = self.data["sell_back_to_grid_on"]
             for _k in ("sell_limit_on", "sell_limit_threshold"):
+                if _k in self.data:
+                    data[_k] = self.data[_k]
+            for _k in ("manual_selling_on", "manual_selling_target_kwh", "manual_selling_sold_kwh"):
                 if _k in self.data:
                     data[_k] = self.data[_k]
 

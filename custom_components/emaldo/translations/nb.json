@@ -1,0 +1,98 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Emaldo-batteri",
+        "description": "Koble til ditt Emaldo-batterisystem.",
+        "data": {
+          "email": "E-post",
+          "password": "Passord",
+          "home_id": "Hjem-ID (la stå tom for automatisk gjenkjenning)",
+          "app_id": "App-ID",
+          "app_secret": "App-hemmelighet",
+          "app_version": "App-versjon"
+        }
+      },
+      "reconfigure": {
+        "title": "Konfigurer Emaldo på nytt",
+        "description": "Oppdater påloggingsinformasjon eller appparametere uten å fjerne integrasjonen.",
+        "data": {
+          "email": "E-post",
+          "password": "Passord",
+          "home_id": "Hjem-ID (la stå tom for ny gjenkjenning)",
+          "app_id": "App-ID",
+          "app_secret": "App-hemmelighet",
+          "app_version": "App-versjon"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Ugyldig e-post eller passord.",
+      "cannot_connect": "Kunne ikke koble til Emaldo API.",
+      "no_devices": "Ingen batterienheter funnet i det angitte hjemmet."
+    },
+    "abort": {
+      "already_configured": "Denne kontoen er allerede konfigurert.",
+      "reconfigure_successful": "Påloggingsinformasjon oppdatert og integrasjonen lastet på nytt."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tidsplanpolling",
+        "description": "Konfigurer når integrasjonen sjekker for tidsplanoppdateringer.",
+        "data": {
+          "schedule_start_hour": "Starttime (0-23)",
+          "schedule_start_minute": "Startminutt (0-59)",
+          "schedule_interval": "Gjentaksintervall (sekunder)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_soc": { "name": "Batterinivå" },
+      "battery_charged_today": { "name": "Batteri ladet i dag" },
+      "battery_discharged_today": { "name": "Batteri utladet i dag" },
+      "solar_energy_today": { "name": "Solenergi i dag" },
+      "grid_import_today": { "name": "Nettimport i dag" },
+      "grid_export_today": { "name": "Netteksport i dag" },
+      "load_energy_today": { "name": "Forbruksenergi i dag" },
+      "battery_power": { "name": "Batterieffekt" },
+      "grid_power": { "name": "Netteffekt" },
+      "dual_power": { "name": "Forbruk" },
+      "solar_power": { "name": "Soleffekt" },
+      "car_charge_power": { "name": "Ladeeffekt bil" },
+      "plan_source": { "name": "Plankilde" },
+      "active_mode": { "name": "Aktiv modus" },
+      "schedule_chart": { "name": "Tidsplandiagram" },
+      "balancing_state": { "name": "Frekvensregulering" },
+      "realtime_connection": { "name": "Sanntidsforbindelse" }
+    },
+    "switch": {
+      "thirdparty_pv": { "name": "Tredjeparts solpanel" },
+      "sell_back_to_grid": { "name": "Selge tilbake til nettet" },
+      "sell_limit": { "name": "Salgsbegrensning" },
+      "manual_selling": { "name": "Manuelt salg" },
+      "ai_battery_range_override": { "name": "Manuell batterinivå" },
+      "emergency_charge": { "name": "Nødlading" }
+    },
+    "number": {
+      "ev_fixed_charge_amount": { "name": "Fast lademengde (bil)" },
+      "ai_battery_range_smart": { "name": "AI smart reserve" },
+      "ai_battery_range_emergency": { "name": "AI nødreserve" },
+      "sell_limit_threshold": { "name": "Salgsbegrensningsterskel" },
+      "manual_selling_target": { "name": "Mål for manuelt salg" }
+    },
+    "select": {
+      "ev_charge_mode": { "name": "Lademodus (bil)" }
+    },
+    "time": {
+      "charge_start": { "name": "Lading start" },
+      "charge_stop": { "name": "Lading stopp" }
+    },
+    "calendar": {
+      "battery_schedule": { "name": "Batteritidsplan" }
+    }
+  }
+}

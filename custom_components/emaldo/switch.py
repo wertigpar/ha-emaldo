@@ -40,6 +40,7 @@ async def async_setup_entry(
             EmaldoThirdPartyPVSwitch(realtime_coordinator),
             EmaldoSellBackToGridSwitch(realtime_coordinator),
             EmaldoSellLimitSwitch(realtime_coordinator),
+            EmaldoManualSellingSwitch(realtime_coordinator),
             EmaldoEmergencyChargeSwitch(power_coordinator),
             EmaldoBatteryRangeOverrideSwitch(schedule_coordinator),
         ]
@@ -220,6 +221,70 @@ class EmaldoSellLimitSwitch(
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
             updated["sell_limit_on"] = False
+            self.coordinator.async_set_updated_data(updated)
+
+
+class EmaldoManualSellingSwitch(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], SwitchEntity
+):
+    """Switch entity for manual energy selling (0x80).
+
+    ON  = selling enabled (sends target_kwh from last-known number entity value)
+    OFF = selling disabled
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "manual_selling"
+    _attr_icon = "mdi:cash-plus"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialise the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.home_id}_manual_selling"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True when manual selling is active."""
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("manual_selling_on")
+
+    def _current_target(self) -> int:
+        """Return the last-known target kWh so turn_on preserves it."""
+        if self.coordinator.data is None:
+            return 1
+        return max(1, int(round(self.coordinator.data.get("manual_selling_target_kwh") or 1)))
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Start manual selling with the last-known target kWh."""
+        target = self._current_target()
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_manual_selling, True, target  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["manual_selling_on"] = True
+            self.coordinator.async_set_updated_data(updated)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop manual selling."""
+        await self.hass.async_add_executor_job(
+            self.coordinator._write_manual_selling, False, 0  # noqa: SLF001
+        )
+        if self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["manual_selling_on"] = False
             self.coordinator.async_set_updated_data(updated)
 
 
