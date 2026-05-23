@@ -3101,6 +3101,72 @@ class PersistentE2ESession:
 
             return None
 
+    def read_manual_selling(self) -> dict | None:
+        """Read manual-selling state (0x81) over the existing session.
+
+        Returns a dict with ``enabled`` (bool), ``target_energy_kwh`` (float),
+        ``sold_so_far_kwh`` (float), ``remaining_kwh`` (float); or *None* on
+        timeout / parse failure.
+        """
+        with self._lock:
+            if self._sock is None or self._closed:
+                raise EmaldoE2EError("Session is not connected")
+
+            for attempt in range(2):
+                req_pkt = build_subscription_packet(
+                    self._creds, 0x81, self._session_nonce,
+                )
+                resp = self._send_raw(req_pkt, "GetManualSelling(0x81)")
+                if resp is None:
+                    if attempt == 0:
+                        self._reconnect()
+                        continue
+                    return None
+
+                if self._is_session_expired(resp):
+                    if attempt == 0:
+                        self._reconnect()
+                        continue
+                    return None
+
+                try:
+                    decrypted = decrypt_response(
+                        resp, self._creds["chat_secret"],
+                        payload_validator=lambda b: len(b) >= 10,
+                    )
+                except Exception:  # noqa: BLE001
+                    decrypted = None
+
+                result = parse_manual_selling_response(decrypted)
+                if result is not None:
+                    return result
+
+                for _ in range(5):
+                    try:
+                        more_resp, _ = self._sock.recvfrom(4096)
+                    except socket.timeout:
+                        break
+                    if self._is_session_expired(more_resp):
+                        break
+                    try:
+                        decrypted = decrypt_response(
+                            more_resp, self._creds["chat_secret"],
+                            payload_validator=lambda b: len(b) >= 10,
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
+                    result = parse_manual_selling_response(decrypted)
+                    if result is not None:
+                        return result
+
+                if attempt == 0:
+                    self._reconnect()
+                    continue
+
+                return None
+
+            return None
+
     def send_command(self, msg_type: int, payload: bytes) -> bytes | None:
         """Send a single write command over the existing session socket.
 

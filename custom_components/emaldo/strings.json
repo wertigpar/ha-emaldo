@@ -73,6 +73,7 @@
       "thirdparty_pv": { "name": "Third-party PV" },
       "sell_back_to_grid": { "name": "Sell Back to Grid" },
       "sell_limit": { "name": "Sell Limit" },
+      "manual_selling": { "name": "Manual Selling" },
       "ai_battery_range_override": { "name": "AI Battery Range override" },
       "emergency_charge": { "name": "Emergency charge" }
     },
@@ -80,7 +81,8 @@
       "ev_fixed_charge_amount": { "name": "EV fixed charge amount" },
       "ai_battery_range_smart": { "name": "AI Smart reserve" },
       "ai_battery_range_emergency": { "name": "AI Emergency reserve" },
-      "sell_limit_threshold": { "name": "Sell Limit threshold" }
+      "sell_limit_threshold": { "name": "Sell Limit threshold" },
+      "manual_selling_target": { "name": "Manual Selling target" }
     },
     "select": {
       "ev_charge_mode": { "name": "EV charge mode" }

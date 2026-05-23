@@ -12,6 +12,7 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 - **EV charge control** — Select EV charging mode, set fixed charge amount, and write weekday/weekend EV schedule (Power Core models only)
 - **Third-party PV control** — Built-in switch for external PV routing; used by Battery Optimizer PV sell strategy
 - **Grid export controls** — Sell Back to Grid toggle and Sell Limit switch + daily threshold slider (kWh/day)
+- **Manual selling** — Switch + target kWh number for direct E2E grid-export selling (opcode 0x80/0x81)
 - **Emergency charge** — Force-charge the battery during a scheduled time window; configure start/end datetime entities then activate the switch (or automate via a service call)
 - **AI Battery Range controls** — Smart/Emergency reserve sliders and override switch
 - **Resilient polling** — On API failures, sensors keep their last-known values while exponential-backoff retries recover automatically (60 s → 120 s → 4 min → … capped at 30 min)
@@ -166,6 +167,8 @@ The sensor uses `device_class: enum`. It is best-effort — if the E2E connectio
 | **Sell Back to Grid** | Switch | Enables/disables selling surplus energy back to the grid (`set_virtualpowerplant` 0x05) |
 | **Sell Limit** | Switch | Activates the daily grid-export limit protection (`set_sellingprotection` 0x5E) |
 | **Sell Limit threshold** | Number | Daily export limit in kWh/day (1–300). Only effective when Sell Limit is ON |
+| **Manual selling** | Switch | Starts direct grid-export via E2E; ON = start, OFF = stop (`set_manual_selling` 0x80) |
+| **Manual selling target** | Number | Total kWh to sell before auto-stopping (1–100 kWh). Configure before enabling |
 | **Emergency charge** | Switch | Starts a force-charge session for the configured time window; turn off to cancel |
 | **Emergency charge start** | Datetime | Window start time. If unset when the switch is turned on, defaults to now |
 | **Emergency charge end** | Datetime | Window end time. If unset when the switch is turned on, defaults to start + 1 hour |

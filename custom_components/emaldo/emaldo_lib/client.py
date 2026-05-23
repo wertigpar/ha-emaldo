@@ -1106,3 +1106,50 @@ class EmaldoClient:
         """Read sell-back-to-grid state (0x06)."""
         creds = self.e2e_login(home_id, device_id, model)
         return _e2e.get_virtualpowerplant(creds, log=log)
+
+    # ── Manual selling (0x80 / 0x81) ─────────────────────────────────
+
+    def set_manual_selling(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        on: bool,
+        target_energy_kwh: int | float = 0,
+        *,
+        expand: bool = False,
+        log: Callable[..., None] | None = None,
+    ) -> bool:
+        """Start or stop manual grid-export (selling) with a kWh target.
+
+        Args:
+            on: ``True`` to start selling, ``False`` to stop.
+            target_energy_kwh: Total kWh to sell before stopping (required
+                when *on* is ``True``).
+            expand: Set the ``isExpandSelling`` flag in the payload.
+            log: Optional log callback.
+
+        Returns:
+            ``True`` if the device acknowledged the command.
+        """
+        creds = self.e2e_login(home_id, device_id, model)
+        return _e2e.set_manual_selling(
+            creds, on, target_energy_kwh, expand=expand, log=log,
+        )
+
+    def get_manual_selling(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        *,
+        log: Callable[..., None] | None = None,
+    ) -> dict | None:
+        """Read current manual-selling state and energy counters (0x81).
+
+        Returns a dict with ``enabled``, ``first_use``,
+        ``target_energy_kwh``, ``sold_so_far_kwh``, and
+        ``remaining_kwh``; or *None* if the device did not respond.
+        """
+        creds = self.e2e_login(home_id, device_id, model)
+        return _e2e.get_manual_selling(creds, log=log)
