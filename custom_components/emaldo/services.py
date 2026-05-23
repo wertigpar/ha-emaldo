@@ -147,7 +147,7 @@ def _get_coordinator_and_client(hass: HomeAssistant):
         client = schedule_coord._ensure_client()
     except Exception:
         # Session may be stale — force re-login
-        schedule_coord._client = None
+        schedule_coord._reset_client()
         client = schedule_coord._ensure_client()
     return schedule_coord, client
 
@@ -192,7 +192,7 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
             except EmaldoAuthError:
                 if attempt == 0:
                     _LOGGER.debug("Session expired, re-authenticating")
-                    coord._client = None
+                    coord._reset_client()
                 else:
                     raise
 
@@ -232,7 +232,7 @@ async def async_handle_apply_bulk_schedule(
             except EmaldoAuthError:
                 if attempt == 0:
                     _LOGGER.debug("Session expired, re-authenticating")
-                    coord._client = None
+                    coord._reset_client()
                 else:
                     raise
 
@@ -297,7 +297,7 @@ async def async_handle_reset_to_internal(
             except EmaldoAuthError:
                 if attempt == 0:
                     _LOGGER.debug("Session expired, re-authenticating")
-                    coord._client = None
+                    coord._reset_client()
                 else:
                     raise
 
@@ -608,7 +608,7 @@ async def async_handle_set_battery_range(
             except EmaldoAuthError:
                 if attempt == 0:
                     _LOGGER.debug("Session expired, re-authenticating")
-                    coord._client = None
+                    coord._reset_client()
                 else:
                     raise
 

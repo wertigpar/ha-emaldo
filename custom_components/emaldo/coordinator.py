@@ -81,6 +81,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._emergency_charge_active: bool = False
         self._emergency_charge_start_t: object = None  # datetime.time | None
         self._emergency_charge_end_t: object = None    # datetime.time | None
+        self._ev_poll_counter: int = 0
 
     @property
     def home_id(self) -> str:
@@ -160,13 +161,18 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # hardware (with EV charger) exposes these commands. Errors are
         # swallowed so a device without EV support doesn't break the
         # whole coordinator refresh.
-        ev = None
-        try:
-            ev = await self.hass.async_add_executor_job(
-                self._read_ev_state
-            )
-        except Exception as err:
-            _LOGGER.debug("EV state fetch failed: %s", err)
+        # Throttle to every 5th poll (~5 min) to avoid opening a competing
+        # UDP session on every 60s cycle.
+        ev = self.data.get("ev") if self.data else None
+        self._ev_poll_counter += 1
+        if self._ev_poll_counter >= 5:
+            self._ev_poll_counter = 0
+            try:
+                ev = await self.hass.async_add_executor_job(
+                    self._read_ev_state
+                )
+            except Exception as err:
+                _LOGGER.debug("EV state fetch failed: %s", err)
 
         return {
             "battery": battery,
