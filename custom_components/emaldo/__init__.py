@@ -53,7 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:  # noqa: BLE001
         pass
 
-    schedule_coordinator = EmaldoScheduleCoordinator(hass, entry)
+    schedule_coordinator = EmaldoScheduleCoordinator(hass, entry, power_coordinator)
     await schedule_coordinator.async_config_entry_first_refresh()
     schedule_coordinator.async_setup_listeners()
 

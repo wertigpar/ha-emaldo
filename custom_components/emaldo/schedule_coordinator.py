@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .coordinator import EmaldoCoordinator
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_call_later,
@@ -17,17 +19,10 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .emaldo_lib import EmaldoClient, EmaldoAuthError, EmaldoConnectionError
-from .emaldo_lib.const import set_params
 
 from .const import (
     DOMAIN,
     CONF_HOME_ID,
-    CONF_APP_ID,
-    CONF_APP_SECRET,
-    CONF_APP_VERSION,
-    DEFAULT_APP_ID,
-    DEFAULT_APP_SECRET,
-    DEFAULT_APP_VERSION,
     CONF_SCHEDULE_START_HOUR,
     CONF_SCHEDULE_START_MINUTE,
     CONF_SCHEDULE_INTERVAL,
@@ -53,7 +48,7 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     _RETRY_BASE_SECONDS = 60
     _RETRY_MAX_SECONDS = 1800
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, parent: EmaldoCoordinator) -> None:
         """Initialize the schedule coordinator."""
         # We use a very long update_interval as a fallback safety net;
         # actual updates are driven by our custom time tracking.
@@ -64,7 +59,8 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(hours=24),
         )
         self._entry = entry
-        self._client: EmaldoClient | None = None
+        self._parent = parent
+        self._client: None = None  # unused; kept for type safety
         self._device_id: str | None = None
         self._model: str | None = None
         self._device_name: str | None = None
@@ -92,26 +88,19 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def device_name(self) -> str | None:
         return self._device_name
 
-    # -- Client management (shared pattern with sensor coordinator) --
+    # -- Client management (delegates to parent EmaldoCoordinator) --
 
     def _ensure_client(self) -> EmaldoClient:
-        data = self._entry.data
-        app_id = data.get(CONF_APP_ID, DEFAULT_APP_ID)
-        app_secret = data.get(CONF_APP_SECRET, DEFAULT_APP_SECRET)
-        app_version = data.get(CONF_APP_VERSION, DEFAULT_APP_VERSION)
-        set_params(app_id, app_secret, app_version)
+        client = self._parent._ensure_client()
+        # Sync device identity from parent (populated on first find_device call)
+        self._device_id = self._parent._device_id
+        self._model = self._parent._model
+        self._device_name = self._parent._device_name
+        return client
 
-        if self._client is None or not self._client.is_authenticated:
-            self._client = EmaldoClient(app_version=app_version)
-            self._client.login(data[CONF_EMAIL], data[CONF_PASSWORD])
-
-        if self._device_id is None:
-            did, model, name = self._client.find_device(self.home_id)
-            self._device_id = did
-            self._model = model
-            self._device_name = name
-
-        return self._client
+    def _reset_client(self) -> None:
+        """Invalidate the shared client so both coordinators re-authenticate."""
+        self._parent._client = None
 
     # -- Data fetching --
 

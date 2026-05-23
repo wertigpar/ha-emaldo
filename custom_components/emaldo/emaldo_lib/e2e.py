@@ -2904,47 +2904,34 @@ class PersistentE2ESession:
             if self._sock is None or self._closed:
                 raise EmaldoE2EError("Session is not connected")
 
-            for attempt in range(2):
-                req_pkt = build_subscription_packet(
-                    self._creds, _REGULATE_FREQ_TYPE, self._session_nonce,
-                    request_mode=False,  # subscription mode (0xA0) — device rejects direct-request (0x10)
-                )
-                resp = self._send_raw(req_pkt, "RegulateFrequencyState(0x45)")
-                if resp is None:
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            req_pkt = build_subscription_packet(
+                self._creds, _REGULATE_FREQ_TYPE, self._session_nonce,
+                request_mode=False,  # subscription mode (0xA0) — device rejects direct-request (0x10)
+            )
+            resp = self._send_raw(req_pkt, "RegulateFrequencyState(0x45)")
+            if resp is None:
+                return self._regulate_frequency_cache
 
-                if self._is_session_expired(resp):
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            if self._is_session_expired(resp):
+                return self._regulate_frequency_cache
 
-                result = self._try_parse_regulate_frequency(resp)
+            result = self._try_parse_regulate_frequency(resp)
+            if result is not None:
+                self._regulate_frequency_cache = result
+                return result
+
+            # Drain a few extra packets (keepalive/subscription echoes)
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    break
+                result = self._try_parse_regulate_frequency(more_resp)
                 if result is not None:
                     self._regulate_frequency_cache = result
                     return result
-
-                # Drain a few extra packets (keepalive/subscription echoes)
-                for _ in range(5):
-                    try:
-                        more_resp, _ = self._sock.recvfrom(4096)
-                    except socket.timeout:
-                        break
-                    if self._is_session_expired(more_resp):
-                        break
-                    result = self._try_parse_regulate_frequency(more_resp)
-                    if result is not None:
-                        self._regulate_frequency_cache = result
-                        return result
-
-                if attempt == 0:
-                    self._reconnect()
-                    continue
-
-                return None
 
             # No explicit response — fall back to any passively-captured push.
             return self._regulate_frequency_cache
@@ -2981,58 +2968,45 @@ class PersistentE2ESession:
             if self._sock is None or self._closed:
                 raise EmaldoE2EError("Session is not connected")
 
-            for attempt in range(2):
-                req_pkt = build_subscription_packet(
-                    self._creds, _SELLING_PROTECTION_GET_TYPE, self._session_nonce,
+            req_pkt = build_subscription_packet(
+                self._creds, _SELLING_PROTECTION_GET_TYPE, self._session_nonce,
+            )
+            resp = self._send_raw(req_pkt, "GetSellingProtection(0x5F)")
+            if resp is None:
+                return None
+
+            if self._is_session_expired(resp):
+                return None
+
+            try:
+                decrypted = decrypt_response(
+                    resp, self._creds["chat_secret"],
+                    payload_validator=_is_selling_protection_payload,
                 )
-                resp = self._send_raw(req_pkt, "GetSellingProtection(0x5F)")
-                if resp is None:
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            except Exception:  # noqa: BLE001
+                decrypted = None
 
-                if self._is_session_expired(resp):
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            result = parse_selling_protection_response(decrypted)
+            if result is not None:
+                return result
 
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    break
                 try:
                     decrypted = decrypt_response(
-                        resp, self._creds["chat_secret"],
+                        more_resp, self._creds["chat_secret"],
                         payload_validator=_is_selling_protection_payload,
                     )
                 except Exception:  # noqa: BLE001
-                    decrypted = None
-
+                    continue
                 result = parse_selling_protection_response(decrypted)
                 if result is not None:
                     return result
-
-                for _ in range(5):
-                    try:
-                        more_resp, _ = self._sock.recvfrom(4096)
-                    except socket.timeout:
-                        break
-                    if self._is_session_expired(more_resp):
-                        break
-                    try:
-                        decrypted = decrypt_response(
-                            more_resp, self._creds["chat_secret"],
-                            payload_validator=_is_selling_protection_payload,
-                        )
-                    except Exception:  # noqa: BLE001
-                        continue
-                    result = parse_selling_protection_response(decrypted)
-                    if result is not None:
-                        return result
-
-                if attempt == 0:
-                    self._reconnect()
-                    continue
-
-                return None
 
             return None
 
@@ -3046,58 +3020,45 @@ class PersistentE2ESession:
             if self._sock is None or self._closed:
                 raise EmaldoE2EError("Session is not connected")
 
-            for attempt in range(2):
-                req_pkt = build_subscription_packet(
-                    self._creds, _VIRTUALPOWERPLANT_GET_TYPE, self._session_nonce,
+            req_pkt = build_subscription_packet(
+                self._creds, _VIRTUALPOWERPLANT_GET_TYPE, self._session_nonce,
+            )
+            resp = self._send_raw(req_pkt, "GetVirtualPowerPlant(0x06)")
+            if resp is None:
+                return None
+
+            if self._is_session_expired(resp):
+                return None
+
+            try:
+                decrypted = decrypt_response(
+                    resp, self._creds["chat_secret"],
+                    payload_validator=_is_virtualpowerplant_payload,
                 )
-                resp = self._send_raw(req_pkt, "GetVirtualPowerPlant(0x06)")
-                if resp is None:
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            except Exception:  # noqa: BLE001
+                decrypted = None
 
-                if self._is_session_expired(resp):
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            result = parse_virtualpowerplant_response(decrypted)
+            if result is not None:
+                return result
 
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    break
                 try:
                     decrypted = decrypt_response(
-                        resp, self._creds["chat_secret"],
+                        more_resp, self._creds["chat_secret"],
                         payload_validator=_is_virtualpowerplant_payload,
                     )
                 except Exception:  # noqa: BLE001
-                    decrypted = None
-
+                    continue
                 result = parse_virtualpowerplant_response(decrypted)
                 if result is not None:
                     return result
-
-                for _ in range(5):
-                    try:
-                        more_resp, _ = self._sock.recvfrom(4096)
-                    except socket.timeout:
-                        break
-                    if self._is_session_expired(more_resp):
-                        break
-                    try:
-                        decrypted = decrypt_response(
-                            more_resp, self._creds["chat_secret"],
-                            payload_validator=_is_virtualpowerplant_payload,
-                        )
-                    except Exception:  # noqa: BLE001
-                        continue
-                    result = parse_virtualpowerplant_response(decrypted)
-                    if result is not None:
-                        return result
-
-                if attempt == 0:
-                    self._reconnect()
-                    continue
-
-                return None
 
             return None
 
@@ -3112,58 +3073,45 @@ class PersistentE2ESession:
             if self._sock is None or self._closed:
                 raise EmaldoE2EError("Session is not connected")
 
-            for attempt in range(2):
-                req_pkt = build_subscription_packet(
-                    self._creds, 0x81, self._session_nonce,
+            req_pkt = build_subscription_packet(
+                self._creds, 0x81, self._session_nonce,
+            )
+            resp = self._send_raw(req_pkt, "GetManualSelling(0x81)")
+            if resp is None:
+                return None
+
+            if self._is_session_expired(resp):
+                return None
+
+            try:
+                decrypted = decrypt_response(
+                    resp, self._creds["chat_secret"],
+                    payload_validator=lambda b: len(b) >= 10,
                 )
-                resp = self._send_raw(req_pkt, "GetManualSelling(0x81)")
-                if resp is None:
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            except Exception:  # noqa: BLE001
+                decrypted = None
 
-                if self._is_session_expired(resp):
-                    if attempt == 0:
-                        self._reconnect()
-                        continue
-                    return None
+            result = parse_manual_selling_response(decrypted)
+            if result is not None:
+                return result
 
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    break
                 try:
                     decrypted = decrypt_response(
-                        resp, self._creds["chat_secret"],
+                        more_resp, self._creds["chat_secret"],
                         payload_validator=lambda b: len(b) >= 10,
                     )
                 except Exception:  # noqa: BLE001
-                    decrypted = None
-
+                    continue
                 result = parse_manual_selling_response(decrypted)
                 if result is not None:
                     return result
-
-                for _ in range(5):
-                    try:
-                        more_resp, _ = self._sock.recvfrom(4096)
-                    except socket.timeout:
-                        break
-                    if self._is_session_expired(more_resp):
-                        break
-                    try:
-                        decrypted = decrypt_response(
-                            more_resp, self._creds["chat_secret"],
-                            payload_validator=lambda b: len(b) >= 10,
-                        )
-                    except Exception:  # noqa: BLE001
-                        continue
-                    result = parse_manual_selling_response(decrypted)
-                    if result is not None:
-                        return result
-
-                if attempt == 0:
-                    self._reconnect()
-                    continue
-
-                return None
 
             return None
 
