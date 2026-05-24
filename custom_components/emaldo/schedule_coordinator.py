@@ -134,7 +134,7 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             result = await self.hass.async_add_executor_job(self._fetch_schedule_data)
         except EmaldoAuthError as err:
-            self._client = None
+            self._reset_client()
             return self._handle_fetch_failure(f"Authentication failed: {err}", err)
         except EmaldoConnectionError as err:
             return self._handle_fetch_failure(f"Connection error: {err}", err)
