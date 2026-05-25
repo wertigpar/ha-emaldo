@@ -20,6 +20,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .emaldo_lib.const import (
     SLOT_NO_OVERRIDE,
@@ -28,7 +29,7 @@ from .emaldo_lib.const import (
     decode_slot_action,
 )
 
-from .const import DOMAIN
+from .const import DOMAIN, EV_UNSUPPORTED_MODELS, PV_UNSUPPORTED_MODELS
 from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 
@@ -257,7 +258,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         translation_key="battery_charged_today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=_battery_charged_today,
     ),
     EmaldoSensorEntityDescription(
@@ -265,7 +266,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         translation_key="battery_discharged_today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=_battery_discharged_today,
     ),
     EmaldoSensorEntityDescription(
@@ -274,7 +275,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:solar-power",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=_solar_energy_today,
     ),
     EmaldoSensorEntityDescription(
@@ -283,7 +284,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:transmission-tower-import",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=_grid_import_today,
     ),
     EmaldoSensorEntityDescription(
@@ -292,7 +293,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:transmission-tower-export",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=_grid_export_today,
     ),
     EmaldoSensorEntityDescription(
@@ -301,7 +302,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:home-lightning-bolt",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         value_fn=_load_energy_today,
     ),
 )
@@ -337,8 +338,8 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
 )
 
-# Power Core only (PC1-BAK15-HS10, PC3) — also from realtime coordinator
-POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
+# Solar PV sensor — available on models with integrated MPPT (e.g. PC1, PC3)
+PV_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="solar_power",
         translation_key="solar_power",
@@ -348,6 +349,10 @@ POWER_CORE_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=_solar_power,
     ),
+)
+
+# EV charger sensor — available on models with integrated EV charger (e.g. PC1, PC3)
+EV_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
         key="car_charge_power",
         translation_key="car_charge_power",
@@ -382,12 +387,17 @@ async def async_setup_entry(
         for description in REALTIME_SENSOR_DESCRIPTIONS
     )
 
-    # Power Core models have built-in solar PV and EV charger — also realtime
+    # Solar PV and EV charger sensors — created only for models that support them
     model = coordinator.device_model or ""
-    if model.startswith("PC"):
+    if model not in PV_UNSUPPORTED_MODELS:
         entities.extend(
             EmaldoSensor(realtime_coordinator, desc)
-            for desc in POWER_CORE_REALTIME_DESCRIPTIONS
+            for desc in PV_REALTIME_DESCRIPTIONS
+        )
+    if model not in EV_UNSUPPORTED_MODELS:
+        entities.extend(
+            EmaldoSensor(realtime_coordinator, desc)
+            for desc in EV_REALTIME_DESCRIPTIONS
         )
 
     # Diagnostic: realtime connection status
@@ -434,6 +444,13 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
         if self.coordinator.data is None:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def last_reset(self) -> datetime | None:
+        """Return midnight (local) for daily-total sensors; None for others."""
+        if self.entity_description.state_class == SensorStateClass.TOTAL:
+            return dt_util.start_of_local_day()
+        return None
 
 
 # -- Helper to compute current slot index --
