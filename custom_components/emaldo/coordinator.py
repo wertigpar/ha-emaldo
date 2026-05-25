@@ -82,6 +82,9 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._emergency_charge_start_t: object = None  # datetime.time | None
         self._emergency_charge_end_t: object = None    # datetime.time | None
         self._ev_poll_counter: int = 0
+        self._dual_power_fail_count: int = 0
+        self._dual_power_fail_since: float | None = None
+        self._dual_power_last_log: float = 0.0
 
     @property
     def home_id(self) -> str:
@@ -173,6 +176,41 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             except Exception as err:
                 _LOGGER.debug("EV state fetch failed: %s", err)
+
+        import time as _time
+        dp_ok = (
+            battery.get("dual_power") is not None
+            or power.get("dual_power") is not None
+        )
+        if not dp_ok:
+            now = _time.time()
+            if self._dual_power_fail_count == 0:
+                self._dual_power_fail_since = now
+            self._dual_power_fail_count += 1
+            fail_dur = now - (self._dual_power_fail_since or now)
+            if self._dual_power_fail_count == 1:
+                _LOGGER.debug("is-dual-power-open unreachable (first occurrence)")
+            elif fail_dur >= 3600 and now - self._dual_power_last_log >= 3600:
+                _LOGGER.error(
+                    "is-dual-power-open has been unreachable for >%.0fh",
+                    fail_dur / 3600,
+                )
+                self._dual_power_last_log = now
+            elif self._dual_power_fail_count == 2 or now - self._dual_power_last_log >= 600:
+                _LOGGER.warning(
+                    "is-dual-power-open unreachable (attempt %d)",
+                    self._dual_power_fail_count,
+                )
+                self._dual_power_last_log = now
+        else:
+            if self._dual_power_fail_count > 1:
+                _LOGGER.info(
+                    "is-dual-power-open recovered after %d consecutive failures",
+                    self._dual_power_fail_count,
+                )
+            self._dual_power_fail_count = 0
+            self._dual_power_fail_since = None
+            self._dual_power_last_log = 0.0
 
         return {
             "battery": battery,
