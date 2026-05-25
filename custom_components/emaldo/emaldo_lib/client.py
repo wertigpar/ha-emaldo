@@ -84,12 +84,16 @@ class EmaldoClient:
         self._session: dict = session or {}
         self._app_version = app_version if app_version is not None else get_default_app_version()
         self._http = requests.Session()
-        # Retry transient connection / SSL errors automatically.
+        # Retry only on transient HTTP errors (502/503/504), not on
+        # read timeouts or connection failures — those block the executor
+        # thread for up to total*timeout seconds if retried.
         retry = Retry(
             total=3,
             backoff_factor=0.5,
             status_forcelist=[502, 503, 504],
             allowed_methods=["POST", "GET"],
+            read=0,
+            connect=0,
         )
         adapter = HTTPAdapter(max_retries=retry)
         self._http.mount("https://", adapter)
@@ -454,16 +458,20 @@ class EmaldoClient:
             "/bmt/stats/battery-v2/day/",
             json_data={**base, "offset": 0},
         )
-        r_dual = self.api_request(
-            "/bmt/is-dual-power-open/",
-            json_data={"home_id": home_id, "bmt_id": device_id},
-        )
+        try:
+            r_dual = self.api_request(
+                "/bmt/is-dual-power-open/",
+                json_data={"home_id": home_id, "bmt_id": device_id},
+            )
+            dual_power: dict | None = r_dual.get("Result") or {}
+        except Exception:
+            dual_power = None  # best-effort; coordinator logs if persistent
 
         return {
             "sensor": r_sensor.get("Result") or {},
             "power_level": r_level.get("Result") or {},
             "battery": r_bat.get("Result") or {},
-            "dual_power": r_dual.get("Result") or {},
+            "dual_power": dual_power,
         }
 
     def get_usage(
@@ -559,16 +567,20 @@ class EmaldoClient:
             "/bmt/stats/grid/day/",
             json_data={**base, "get_real": True, "query_interval": 5},
         )
-        r_dual = self.api_request(
-            "/bmt/is-dual-power-open/",
-            json_data={"home_id": home_id, "bmt_id": device_id},
-        )
+        try:
+            r_dual = self.api_request(
+                "/bmt/is-dual-power-open/",
+                json_data={"home_id": home_id, "bmt_id": device_id},
+            )
+            dual_power: dict | None = r_dual.get("Result") or {}
+        except Exception:
+            dual_power = None  # best-effort; coordinator logs if persistent
 
         return {
             "usage": r_usage.get("Result") or {},
             "battery": r_bat.get("Result") or {},
             "grid": r_grid.get("Result") or {},
-            "dual_power": r_dual.get("Result") or {},
+            "dual_power": dual_power,
         }
 
     def get_solar(
