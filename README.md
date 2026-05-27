@@ -98,6 +98,17 @@ Available on Power Core models (e.g. `PC1-*`, `PC3-*`).
 | **Solar power** | W | Instant PV production |
 | **Car charge power** | W | Instant EV charging power |
 
+### Per-Module Battery Sensors
+
+One set of sensors per physical battery module, registered dynamically on the first successful battery poll (~10 minutes after startup). Module serials are used for stable `unique_id` values.
+
+| Sensor | Unit | Description |
+|---|---|---|
+| **Battery Module N SoC** | % | Module state of charge |
+| **Battery Module N Temperature** | °C | BMS temperature |
+| **Battery Module N Voltage** | V | Pack voltage (diagnostic) |
+| **Battery Module N Health** | % | State of health / capacity retention (diagnostic) |
+
 ### Diagnostic Sensors
 
 | Sensor | Description |
