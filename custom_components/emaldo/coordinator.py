@@ -390,6 +390,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._consecutive_reconnects: int = 0
         self._regulate_frequency: dict | None = None
         self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
+        self._battery_modules_poll_counter: int = 59  # trigger on first successful poll
+        self._battery_modules: list[dict] = []
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
@@ -769,6 +771,22 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             for _k in ("manual_selling_on", "manual_selling_target_kwh", "manual_selling_sold_kwh"):
                 if _k in self.data:
                     data[_k] = self.data[_k]
+
+        # Poll per-module battery info every 60 successful reads (~10 min).
+        # Uses the existing persistent session to avoid a competing UDP socket.
+        self._battery_modules_poll_counter += 1
+        if self._battery_modules_poll_counter >= 60:
+            self._battery_modules_poll_counter = 0
+            try:
+                modules = await self.hass.async_add_executor_job(
+                    self._session.read_battery_info
+                )
+                if modules:
+                    self._battery_modules = modules
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Battery module info read failed: %s", err)
+
+        data["battery_modules"] = self._battery_modules
 
         return data
 

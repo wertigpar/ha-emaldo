@@ -3115,6 +3115,88 @@ class PersistentE2ESession:
 
             return None
 
+    def read_battery_info(self, *, max_batteries: int = 10) -> list[dict]:
+        """Read per-module battery info (type 0x06) over the existing session.
+
+        Sends one request per cabinet index (0 … *max_batteries*-1) and
+        collects the parsed battery-info dicts.  Stops early after two
+        consecutive empty/short replies, which indicates there are no more
+        modules.
+
+        Returns:
+            List of battery-info dicts (one per module), possibly empty.
+            Each dict contains: ``soc``, ``soh``, ``serial``, ``model``,
+            ``index``, ``cabinet_index``, ``cabinet_position``,
+            ``bms_temp_c``, ``electrode_a_temp_c``, ``electrode_b_temp_c``,
+            ``voltage_v``, ``current_a``, ``current_energy_wh``,
+            ``full_energy_wh``, ``cycle_count``, ``capacity``.
+        """
+        with self._lock:
+            if self._sock is None or self._closed:
+                raise EmaldoE2EError("Session is not connected")
+
+            batteries: list[dict] = []
+            seen_serials: set[str] = set()
+            consecutive_short = 0
+
+            prev_timeout = self._sock.gettimeout()
+            self._sock.settimeout(max(prev_timeout, 3.0))
+            try:
+                for idx in range(max_batteries):
+                    req_pkt = build_subscription_packet(
+                        self._creds, 0x06, self._session_nonce,
+                        payload=bytes([idx]),
+                        request_mode=True,
+                    )
+                    resp = self._send_raw(req_pkt, f"BatteryInfo(idx={idx})")
+                    if resp is None:
+                        consecutive_short += 1
+                        if consecutive_short >= 2:
+                            break
+                        continue
+
+                    # Short response means no battery module at this index.
+                    if len(resp) < 250:
+                        consecutive_short += 1
+                        if consecutive_short >= 1:
+                            break
+                        continue
+
+                    info = self._try_parse_battery(resp)
+                    if info is None:
+                        # First packet may be a subscription ACK — try one more.
+                        try:
+                            extra, _ = self._sock.recvfrom(4096)
+                            if self._log:
+                                self._log(f"BatteryInfo(idx={idx}) follow-up: {len(extra)}B")
+                            info = self._try_parse_battery(extra)
+                        except socket.timeout:
+                            pass
+
+                    if info and info["serial"] not in seen_serials:
+                        seen_serials.add(info["serial"])
+                        batteries.append(info)
+                        consecutive_short = 0
+                    else:
+                        consecutive_short += 1
+                        if consecutive_short >= 2:
+                            break
+            finally:
+                self._sock.settimeout(prev_timeout)
+
+            return batteries
+
+    def _try_parse_battery(self, resp: bytes) -> dict | None:
+        """Decrypt+parse a response as a battery-info payload. Returns None on mismatch."""
+        try:
+            decrypted = decrypt_response(
+                resp, self._creds["chat_secret"],
+                accepted_headers={HEADER_BATTERY},
+            )
+        except Exception:  # noqa: BLE001 - best-effort parse
+            return None
+        return parse_battery_data(decrypted)
+
     def send_command(self, msg_type: int, payload: bytes) -> bytes | None:
         """Send a single write command over the existing session socket.
 

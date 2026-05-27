@@ -14,7 +14,13 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfElectricPotential,
+    UnitOfEnergy,
+    UnitOfPower,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -408,6 +414,29 @@ async def async_setup_entry(
     entities.append(EmaldoActiveModeSensor(schedule_coordinator))
     entities.append(EmaldoScheduleChartSensor(schedule_coordinator))
     async_add_entities(entities)
+
+    # Per-module battery sensors — discovered dynamically when realtime data arrives.
+    _registered_module_serials: set[str] = set()
+
+    def _maybe_add_battery_modules() -> None:
+        modules = (realtime_coordinator.data or {}).get("battery_modules") or []
+        new_entities: list[SensorEntity] = []
+        for num, module in enumerate(modules, start=1):
+            serial = module.get("serial") or ""
+            if not serial or serial in _registered_module_serials:
+                continue
+            _registered_module_serials.add(serial)
+            for metric in ("soc", "soh", "bms_temp_c", "voltage_v"):
+                new_entities.append(
+                    EmaldoBatteryModuleSensor(realtime_coordinator, serial, num, metric)
+                )
+        if new_entities:
+            async_add_entities(new_entities)
+
+    entry.async_on_unload(
+        realtime_coordinator.async_add_listener(_maybe_add_battery_modules)
+    )
+    _maybe_add_battery_modules()  # Handle case where data is already available
 
 
 class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
@@ -848,3 +877,67 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "last_failure": _to_iso(c.stats_last_failure),
             "last_reconnect": _to_iso(c.stats_last_reconnect),
         }
+
+
+class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity):
+    """A sensor for one metric of one physical battery module."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: EmaldoRealtimeCoordinator,
+        serial: str,
+        module_num: int,
+        metric: str,
+    ) -> None:
+        """Initialize a per-module battery sensor."""
+        super().__init__(coordinator)
+        self._serial = serial
+        self._metric = metric
+        self._attr_unique_id = f"{coordinator.home_id}_module_{serial}_{metric}"
+
+        if metric == "soc":
+            self._attr_name = f"Battery Module {module_num} SoC"
+            self._attr_native_unit_of_measurement = PERCENTAGE
+            self._attr_device_class = SensorDeviceClass.BATTERY
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_icon = "mdi:battery"
+        elif metric == "soh":
+            self._attr_name = f"Battery Module {module_num} Health"
+            self._attr_native_unit_of_measurement = PERCENTAGE
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_icon = "mdi:battery-heart"
+            self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        elif metric == "bms_temp_c":
+            self._attr_name = f"Battery Module {module_num} Temperature"
+            self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+            self._attr_device_class = SensorDeviceClass.TEMPERATURE
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif metric == "voltage_v":
+            self._attr_name = f"Battery Module {module_num} Voltage"
+            self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+            self._attr_device_class = SensorDeviceClass.VOLTAGE
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the metric value for this module."""
+        modules = (self.coordinator.data or {}).get("battery_modules") or []
+        for m in modules:
+            if m.get("serial") == self._serial:
+                val = m.get(self._metric)
+                return float(val) if val is not None else None
+        return None
