@@ -28,7 +28,6 @@ DEFAULT_SCHEDULE_INTERVAL = 7200  # 2 hours in seconds
 PV_UNSUPPORTED_MODELS: frozenset[str] = frozenset({
     "PS1-BAK10-HS10",  # Power Store
     "VB1-BAK5-HS10",   # Power Pulse
-    "HP5000",          # Legacy
     "HP5001",          # Legacy
     "PSE1",            # Power Sense 1
     "PSE2",            # Power Sense 2
@@ -38,7 +37,6 @@ PV_UNSUPPORTED_MODELS: frozenset[str] = frozenset({
 EV_UNSUPPORTED_MODELS: frozenset[str] = frozenset({
     "PS1-BAK10-HS10",  # Power Store
     "VB1-BAK5-HS10",   # Power Pulse
-    "HP5000",          # Legacy
     "HP5001",          # Legacy
     "PSE1",            # Power Sense 1
     "PSE2",            # Power Sense 2
