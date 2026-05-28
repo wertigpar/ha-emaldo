@@ -791,17 +791,22 @@ def read_battery_info(
     e2e_creds: dict,
     *,
     timeout: float = 5.0,
-    max_batteries: int = 10,
     log: Callable[..., None] | None = None,
 ) -> list[dict]:
     """Read battery cell info via E2E request (type 0x06).
 
-    Performs the full session flow (alive → heartbeat) then sends one
-    request per cabinet index (0 … *max_batteries*-1).  The device
-    responds with battery data for each valid index.
+    Performs the full session flow (alive → heartbeat) then probes slots
+    in a tiered fashion that mirrors the physical cabinet layout:
+
+    * Tier 1 (indices 0-2):  base cabinet — always scanned fully.
+    * Tier 2 (indices 3-7):  extension cabinet 1 — only if tier 1 is full.
+    * Tier 3 (indices 8-12): extension cabinet 2 — only if tier 2 is full.
+
+    Empty slots (short/no reply) within a tier do not cause early exit;
+    only consecutive *timeouts* abort the scan (each timeout is expensive).
 
     Returns:
-        List of battery-info dicts (one per cell), possibly empty.
+        List of battery-info dicts (one per module), possibly empty.
     """
     session_nonce = generate_nonce()
 
@@ -853,53 +858,64 @@ def read_battery_info(
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
-        # Send all battery requests, then collect responses.
-        # The app sends one request per cabinet index.
-        request_pkts = []
-        for idx in range(max_batteries):
-            req = build_subscription_packet(
-                e2e_creds, 0x06, session_nonce,
-                payload=bytes([idx]),
-                request_mode=True,
-            )
-            request_pkts.append((idx, req))
+        # Tiered cabinet scan:
+        #   Tier 1 — first cabinet:   always scan all 3 slots (indices 0-2)
+        #   Tier 2 — ext. cabinet 1:  scan 5 slots (3-7) only if tier 1 was full
+        #   Tier 3 — ext. cabinet 2:  scan 5 slots (8-12) only if tier 2 was full
+        #
+        # Within each tier every slot is always probed — short/empty responses
+        # are cheap (device replies instantly) so an empty slot 0 must not
+        # prevent discovering a battery in slot 1 or 2.
+        # Only consecutive *timeouts* (no response at all) abort the scan
+        # early, because each timeout costs the full socket timeout period.
+        TIERS = [(0, 3), (3, 5), (8, 5)]
 
-        consecutive_short = 0
-        for idx, req_pkt in request_pkts:
-            resp = _send(req_pkt, f"Battery(idx={idx})")
-            if not resp:
-                consecutive_short += 1
-                if consecutive_short >= 2:
-                    break
-                continue
+        for tier_start, tier_size in TIERS:
+            found_in_tier = 0
+            consecutive_timeouts = 0
+            for idx in range(tier_start, tier_start + tier_size):
+                resp_raw = None
+                req = build_subscription_packet(
+                    e2e_creds, 0x06, session_nonce,
+                    payload=bytes([idx]),
+                    request_mode=True,
+                )
+                resp_raw = _send(req, f"Battery(idx={idx})")
 
-            # A short response (e.g. 206B vs 275B) means no battery at
-            # this index — stop probing after one such reply.
-            if len(resp) < 250:
-                consecutive_short += 1
-                if consecutive_short >= 1:
-                    break
-                continue
+                if not resp_raw:
+                    # True timeout — device not responding; abort on 2 in a row.
+                    consecutive_timeouts += 1
+                    if consecutive_timeouts >= 2:
+                        return batteries
+                    continue
 
-            info = _try_parse_battery(resp)
-            if info is None:
-                # First response might be an echo/ACK; try reading next
-                try:
-                    resp2, _ = sock.recvfrom(4096)
+                consecutive_timeouts = 0
+
+                if len(resp_raw) < 250:
+                    # Short reply — empty slot; continue to next slot in tier.
                     if log:
-                        log(f"  follow-up: {len(resp2)}B")
-                    info = _try_parse_battery(resp2)
-                except socket.timeout:
-                    pass
+                        log(f"Battery(idx={idx}): short reply {len(resp_raw)}B — empty slot")
+                    continue
 
-            if info and info["serial"] not in seen_serials:
-                seen_serials.add(info["serial"])
-                batteries.append(info)
-                consecutive_short = 0
-            else:
-                consecutive_short += 1
-                if consecutive_short >= 2:
-                    break
+                info = _try_parse_battery(resp_raw)
+                if info is None:
+                    try:
+                        resp2, _ = sock.recvfrom(4096)
+                        if log:
+                            log(f"  follow-up: {len(resp2)}B")
+                        info = _try_parse_battery(resp2)
+                    except socket.timeout:
+                        pass
+
+                if info and info["serial"] not in seen_serials:
+                    seen_serials.add(info["serial"])
+                    batteries.append(info)
+                    found_in_tier += 1
+
+            # Only continue to the next tier (extension cabinet) if the
+            # current tier was completely full — a gap means no extension.
+            if found_in_tier < tier_size:
+                break
 
         return batteries
     finally:
@@ -3115,13 +3131,17 @@ class PersistentE2ESession:
 
             return None
 
-    def read_battery_info(self, *, max_batteries: int = 10) -> list[dict]:
+    def read_battery_info(self) -> list[dict]:
         """Read per-module battery info (type 0x06) over the existing session.
 
-        Sends one request per cabinet index (0 … *max_batteries*-1) and
-        collects the parsed battery-info dicts.  Stops early after two
-        consecutive empty/short replies, which indicates there are no more
-        modules.
+        Probes slots in a tiered fashion matching the physical cabinet layout:
+
+        * Tier 1 (indices 0-2):  base cabinet — always scanned fully.
+        * Tier 2 (indices 3-7):  extension cabinet 1 — only if tier 1 is full.
+        * Tier 3 (indices 8-12): extension cabinet 2 — only if tier 2 is full.
+
+        Empty slots (short reply) within a tier do not cause early exit;
+        only consecutive *timeouts* abort the scan.
 
         Returns:
             List of battery-info dicts (one per module), possibly empty.
@@ -3137,50 +3157,56 @@ class PersistentE2ESession:
 
             batteries: list[dict] = []
             seen_serials: set[str] = set()
-            consecutive_short = 0
+
+            TIERS = [(0, 3), (3, 5), (8, 5)]
 
             prev_timeout = self._sock.gettimeout()
             self._sock.settimeout(max(prev_timeout, 3.0))
             try:
-                for idx in range(max_batteries):
-                    req_pkt = build_subscription_packet(
-                        self._creds, 0x06, self._session_nonce,
-                        payload=bytes([idx]),
-                        request_mode=True,
-                    )
-                    resp = self._send_raw(req_pkt, f"BatteryInfo(idx={idx})")
-                    if resp is None:
-                        consecutive_short += 1
-                        if consecutive_short >= 2:
-                            break
-                        continue
+                for tier_start, tier_size in TIERS:
+                    found_in_tier = 0
+                    consecutive_timeouts = 0
+                    for idx in range(tier_start, tier_start + tier_size):
+                        req_pkt = build_subscription_packet(
+                            self._creds, 0x06, self._session_nonce,
+                            payload=bytes([idx]),
+                            request_mode=True,
+                        )
+                        resp = self._send_raw(req_pkt, f"BatteryInfo(idx={idx})")
+                        if resp is None:
+                            # True timeout — device not responding.
+                            consecutive_timeouts += 1
+                            if consecutive_timeouts >= 2:
+                                return batteries
+                            continue
 
-                    # Short response means no battery module at this index.
-                    if len(resp) < 250:
-                        consecutive_short += 1
-                        if consecutive_short >= 1:
-                            break
-                        continue
+                        consecutive_timeouts = 0
 
-                    info = self._try_parse_battery(resp)
-                    if info is None:
-                        # First packet may be a subscription ACK — try one more.
-                        try:
-                            extra, _ = self._sock.recvfrom(4096)
+                        # Short reply — empty slot; continue within tier.
+                        if len(resp) < 250:
                             if self._log:
-                                self._log(f"BatteryInfo(idx={idx}) follow-up: {len(extra)}B")
-                            info = self._try_parse_battery(extra)
-                        except socket.timeout:
-                            pass
+                                self._log(f"BatteryInfo(idx={idx}): short {len(resp)}B — empty slot")
+                            continue
 
-                    if info and info["serial"] not in seen_serials:
-                        seen_serials.add(info["serial"])
-                        batteries.append(info)
-                        consecutive_short = 0
-                    else:
-                        consecutive_short += 1
-                        if consecutive_short >= 2:
-                            break
+                        info = self._try_parse_battery(resp)
+                        if info is None:
+                            # First packet may be a subscription ACK — try one more.
+                            try:
+                                extra, _ = self._sock.recvfrom(4096)
+                                if self._log:
+                                    self._log(f"BatteryInfo(idx={idx}) follow-up: {len(extra)}B")
+                                info = self._try_parse_battery(extra)
+                            except socket.timeout:
+                                pass
+
+                        if info and info["serial"] not in seen_serials:
+                            seen_serials.add(info["serial"])
+                            batteries.append(info)
+                            found_in_tier += 1
+
+                    # Only continue to extension cabinet if current tier was full.
+                    if found_in_tier < tier_size:
+                        break
             finally:
                 self._sock.settimeout(prev_timeout)
 
