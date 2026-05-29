@@ -11,6 +11,11 @@
           "app_id": "App-ID",
           "app_secret": "App-hemmelighet",
           "app_version": "App-versjon"
+        },
+        "data_description": {
+          "app_id": "Forhåndsutfylt med den innebygde standarden. Endre kun hvis du har hentet andre legitimasjonsopplysninger fra APK-en.",
+          "app_secret": "Forhåndsutfylt med den innebygde standarden. Endre kun hvis du har hentet andre legitimasjonsopplysninger fra APK-en.",
+          "app_version": "Forhåndsutfylt med den innebygde standarden. Endre kun hvis du vil angi en annen versjon av Emaldo-appen."
         }
       },
       "reconfigure": {
@@ -23,6 +28,11 @@
           "app_id": "App-ID",
           "app_secret": "App-hemmelighet",
           "app_version": "App-versjon"
+        },
+        "data_description": {
+          "app_id": "Forhåndsutfylt med den innebygde standarden. Endre kun hvis du har hentet andre legitimasjonsopplysninger fra APK-en.",
+          "app_secret": "Forhåndsutfylt med den innebygde standarden. Endre kun hvis du har hentet andre legitimasjonsopplysninger fra APK-en.",
+          "app_version": "Forhåndsutfylt med den innebygde standarden. Endre kun hvis du vil angi en annen versjon av Emaldo-appen."
         }
       }
     },

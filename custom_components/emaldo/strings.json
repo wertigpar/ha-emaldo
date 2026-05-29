@@ -11,6 +11,11 @@
           "app_id": "App ID",
           "app_secret": "App Secret",
           "app_version": "App Version"
+        },
+        "data_description": {
+          "app_id": "Pre-filled with the built-in default. Only change if you have extracted different credentials from the APK.",
+          "app_secret": "Pre-filled with the built-in default. Only change if you have extracted different credentials from the APK.",
+          "app_version": "Pre-filled with the built-in default. Only change if you want to specify a different version of the Emaldo app."
         }
       },
       "reconfigure": {
@@ -23,6 +28,11 @@
           "app_id": "App ID",
           "app_secret": "App Secret",
           "app_version": "App Version"
+        },
+        "data_description": {
+          "app_id": "Pre-filled with the built-in default. Only change if you have extracted different credentials from the APK.",
+          "app_secret": "Pre-filled with the built-in default. Only change if you have extracted different credentials from the APK.",
+          "app_version": "Pre-filled with the built-in default. Only change if you want to specify a different version of the Emaldo app."
         }
       }
     },
