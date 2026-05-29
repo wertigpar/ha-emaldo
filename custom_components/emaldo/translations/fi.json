@@ -11,6 +11,11 @@
           "app_id": "Sovellustunnus",
           "app_secret": "Sovellussalaisuus",
           "app_version": "Sovellusversio"
+        },
+        "data_description": {
+          "app_id": "Esitäytetty sisäänrakennetulla oletusarvolla. Muuta vain, jos olet poiminut erilaiset tunnistetiedot APK:sta.",
+          "app_secret": "Esitäytetty sisäänrakennetulla oletusarvolla. Muuta vain, jos olet poiminut erilaiset tunnistetiedot APK:sta.",
+          "app_version": "Esitäytetty sisäänrakennetulla oletusarvolla. Muuta vain, jos haluat määrittää eri version Emaldo-sovelluksesta."
         }
       },
       "reconfigure": {
@@ -23,6 +28,11 @@
           "app_id": "Sovellustunnus",
           "app_secret": "Sovellussalaisuus",
           "app_version": "Sovellusversio"
+        },
+        "data_description": {
+          "app_id": "Esitäytetty sisäänrakennetulla oletusarvolla. Muuta vain, jos olet poiminut erilaiset tunnistetiedot APK:sta.",
+          "app_secret": "Esitäytetty sisäänrakennetulla oletusarvolla. Muuta vain, jos olet poiminut erilaiset tunnistetiedot APK:sta.",
+          "app_version": "Esitäytetty sisäänrakennetulla oletusarvolla. Muuta vain, jos haluat määrittää eri version Emaldo-sovelluksesta."
         }
       }
     },

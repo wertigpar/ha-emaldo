@@ -11,6 +11,11 @@
           "app_id": "App-ID",
           "app_secret": "App-hemlighet",
           "app_version": "App-version"
+        },
+        "data_description": {
+          "app_id": "Förifylld med det inbyggda standardvärdet. Ändra bara om du har extraherat andra uppgifter från APK:n.",
+          "app_secret": "Förifylld med det inbyggda standardvärdet. Ändra bara om du har extraherat andra uppgifter från APK:n.",
+          "app_version": "Förifylld med det inbyggda standardvärdet. Ändra bara om du vill ange en annan version av Emaldo-appen."
         }
       },
       "reconfigure": {
@@ -23,6 +28,11 @@
           "app_id": "App-ID",
           "app_secret": "App-hemlighet",
           "app_version": "App-version"
+        },
+        "data_description": {
+          "app_id": "Förifylld med det inbyggda standardvärdet. Ändra bara om du har extraherat andra uppgifter från APK:n.",
+          "app_secret": "Förifylld med det inbyggda standardvärdet. Ändra bara om du har extraherat andra uppgifter från APK:n.",
+          "app_version": "Förifylld med det inbyggda standardvärdet. Ändra bara om du vill ange en annan version av Emaldo-appen."
         }
       }
     },
