@@ -1,0 +1,59 @@
+name: Issue Report Form
+description: Report a bug, request a feature, or ask a question about Emaldo Home Assistant battery integration.
+title: "[Issue]: "
+labels: ["triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to open an issue! Please fill out the form below.
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue Type
+      description: What kind of issue are you reporting?
+      options:
+        - "🪲 Bug Report (Something is broken)"
+        - "🚀 Feature Request (Suggest an improvement or new capability)"
+        - "📖 Documentation (Missing info or error in guides)"
+        - "❓ Question / Support Request (Need help with setup)"
+        - "⚡ Performance Issue (Slow data polling or connection drops)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: battery-model
+    attributes:
+      label: Battery Model
+      description: Select the specific battery model experiencing the issue.
+      options:
+        - "HP5000 (Power Core 1.0)"
+        - "HP5001"
+        - "PC1-BAK15-HS10 (Power Core 2.0)"
+        - "PS1-BAK10-HS10 (Power Store)"
+        - "VB1-BAK5-HS10 (Power Pulse)"
+        - "PC3 (Power Core 3.0)"
+        - "PSE1 (Power Sense)"
+        - "PSE2 (Power Sense)"
+    validations:
+      required: true
+
+  - type: input
+    id: integration-version
+    attributes:
+      label: Integration version (Release or commit)
+      description: Enter the specific Release tag (e.g., v1.2.0) or Commit SHA where the issue was found.
+      placeholder: e.g., v2.1.4 or 4a8b2c1
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue-description
+    attributes:
+      label: Details & Description
+      description: Provide a clear description, expected behavior, or steps to reproduce.
+      placeholder: Please include as much detail as possible so we can help you quickly.
+    validations:
+      required: true
