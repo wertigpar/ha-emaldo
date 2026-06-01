@@ -15,7 +15,9 @@ Usage::
 """
 
 import json
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import requests
@@ -41,6 +43,9 @@ from .exceptions import (
     EmaldoAuthError,
     EmaldoConnectionError,
     EmaldoE2EError,
+    EmaldoE2EDecryptError,
+    EmaldoE2EProtocolError,
+    EmaldoE2ESessionExpired,
 )
 from . import e2e as _e2e
 
@@ -59,6 +64,16 @@ def _short_error(exc: Exception) -> str:
             return parts[1][:200]
     # For things like "too many 502 error responses", use as-is
     return msg[:200]
+
+
+@dataclass
+class E2ECredentialCacheEntry:
+    """Cached E2E credentials for one home/device/model tuple."""
+
+    creds: dict
+    created_at: float
+    last_used_at: float
+    generation: int = 0
 
 
 class EmaldoClient:
@@ -105,6 +120,19 @@ class EmaldoClient:
             "User-Agent": "okhttp/4.9.0",
             "Accept-Encoding": "gzip",
         })
+
+        # -- E2E concurrency + credential caching --
+        # A re-entrant per-device lock serializes all E2E operations against a
+        # single device, preventing competing UDP sessions and lost-update
+        # races in read-modify-write override flows. RLock (not Lock) so a
+        # service that holds the device lock can call get_overrides()/
+        # set_override() — which acquire the same lock — without deadlocking.
+        self._e2e_lock = threading.RLock()
+        self._e2e_device_locks: dict[tuple[str, str, str], threading.RLock] = {}
+        self._e2e_creds_cache: dict[tuple[str, str, str], E2ECredentialCacheEntry] = {}
+        # Cache E2E login credentials to avoid the 3 REST round-trips that
+        # e2e_login() performs on every single E2E operation.
+        self._e2e_credential_ttl = 10 * 60  # seconds; tune after field testing
 
     # ------------------------------------------------------------------
     # Session management
@@ -732,6 +760,101 @@ class EmaldoClient:
             "user_id": self._session.get("user_id", "") if self._session else "",
         }
 
+    # ------------------------------------------------------------------
+    # E2E concurrency + credential cache helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _e2e_key(home_id: str, device_id: str, model: str) -> tuple[str, str, str]:
+        return home_id, device_id, model
+
+    def e2e_device_lock(
+        self, home_id: str, device_id: str, model: str
+    ) -> "threading.RLock":
+        """Return a re-entrant lock guarding all E2E operations for one device.
+
+        Hold this around a read-modify-write override transaction so the read
+        and the subsequent write cannot interleave with another writer.
+        """
+        key = self._e2e_key(home_id, device_id, model)
+        with self._e2e_lock:
+            lock = self._e2e_device_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._e2e_device_locks[key] = lock
+            return lock
+
+    def invalidate_e2e_session(
+        self, home_id: str, device_id: str, model: str
+    ) -> None:
+        """Drop cached E2E credentials for one device (forces re-login)."""
+        key = self._e2e_key(home_id, device_id, model)
+        with self._e2e_lock:
+            self._e2e_creds_cache.pop(key, None)
+
+    def _get_e2e_credentials(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        *,
+        force_refresh: bool = False,
+    ) -> dict:
+        """Return cached E2E credentials, refreshing them when needed."""
+        key = self._e2e_key(home_id, device_id, model)
+        now = time.monotonic()
+
+        with self._e2e_lock:
+            entry = self._e2e_creds_cache.get(key)
+            expired = (
+                entry is None
+                or now - entry.created_at > self._e2e_credential_ttl
+            )
+
+            if force_refresh or expired:
+                creds = self.e2e_login(home_id, device_id, model)
+                generation = entry.generation + 1 if entry else 1
+                entry = E2ECredentialCacheEntry(
+                    creds=creds,
+                    created_at=now,
+                    last_used_at=now,
+                    generation=generation,
+                )
+                self._e2e_creds_cache[key] = entry
+            else:
+                entry.last_used_at = now
+
+            return dict(entry.creds)
+
+    def _run_e2e_with_refresh_retry(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        operation: Callable[[dict], Any],
+    ) -> Any:
+        """Run an E2E operation under the device lock with one refresh-retry.
+
+        On a session/protocol/decrypt failure the cached credentials are
+        invalidated and the operation is retried once with fresh credentials.
+        Reads and idempotent writes are safe to retry this way.
+        """
+        lock = self.e2e_device_lock(home_id, device_id, model)
+        with lock:
+            creds = self._get_e2e_credentials(home_id, device_id, model)
+            try:
+                return operation(creds)
+            except (
+                EmaldoE2ESessionExpired,
+                EmaldoE2EDecryptError,
+                EmaldoE2EProtocolError,
+            ):
+                self.invalidate_e2e_session(home_id, device_id, model)
+                refreshed = self._get_e2e_credentials(
+                    home_id, device_id, model, force_refresh=True
+                )
+                return operation(refreshed)
+
     def get_overrides(
         self,
         home_id: str,
@@ -745,8 +868,10 @@ class EmaldoClient:
         Returns a dict with ``slots`` (96 ints), ``high_marker``,
         and ``low_marker``; or *None* if reading fails.
         """
-        creds = self.e2e_login(home_id, device_id, model)
-        return _e2e.read_overrides(creds, log=log)
+        return self._run_e2e_with_refresh_retry(
+            home_id, device_id, model,
+            lambda creds: _e2e.read_overrides(creds, log=log),
+        )
 
     def get_battery_info(
         self,
@@ -822,11 +947,13 @@ class EmaldoClient:
         """
         if len(slot_values) not in (96, 192):
             raise ValueError(f"Expected 96 or 192 slot bytes, got {len(slot_values)}")
-        creds = self.e2e_login(home_id, device_id, model)
-        return _e2e.send_override(
-            creds, slot_values,
-            high_marker=high_marker, low_marker=low_marker,
-            battery_range_override=battery_range_override, log=log,
+        return self._run_e2e_with_refresh_retry(
+            home_id, device_id, model,
+            lambda creds: _e2e.send_override(
+                creds, slot_values,
+                high_marker=high_marker, low_marker=low_marker,
+                battery_range_override=battery_range_override, log=log,
+            ),
         )
 
     def reset_overrides(

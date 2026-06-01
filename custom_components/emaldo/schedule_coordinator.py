@@ -18,7 +18,15 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .emaldo_lib import EmaldoClient, EmaldoAuthError, EmaldoConnectionError
+from .emaldo_lib import (
+    EmaldoClient,
+    EmaldoAuthError,
+    EmaldoConnectionError,
+    EmaldoE2EError,
+    EmaldoE2ETimeout,
+    EmaldoE2ESessionExpired,
+    EmaldoE2EProtocolError,
+)
 
 from .const import (
     DOMAIN,
@@ -112,13 +120,25 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         schedule = client.get_schedule(hid, did, model)
 
         # Override reading via E2E can fail (UDP timeouts etc.) — don't
-        # let that block the entire update.
+        # let that block the entire update. Classify the failure so a stale
+        # relay/device session is dropped before the next retry.
         overrides = None
         try:
             overrides = client.get_overrides(hid, did, model)
-        except Exception as err:  # noqa: BLE001
+        except EmaldoE2ESessionExpired as err:
             _LOGGER.info(
-                "Failed to read E2E overrides, skipping (%s: %s)",
+                "E2E session expired reading overrides, invalidating (%s)", err
+            )
+            client.invalidate_e2e_session(hid, did, model)
+        except EmaldoE2ETimeout as err:
+            _LOGGER.info("E2E override read timed out, skipping (%s)", err)
+        except EmaldoE2EProtocolError as err:
+            _LOGGER.info("E2E override read protocol error, skipping (%s)", err)
+        except EmaldoE2EError as err:
+            _LOGGER.info("E2E override read failed, skipping (%s)", err)
+        except Exception as err:  # noqa: BLE001 — last-resort safety net
+            _LOGGER.info(
+                "Unexpected error reading E2E overrides, skipping (%s: %s)",
                 type(err).__name__, err,
             )
 
@@ -158,6 +178,15 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 {"entry_id": self._entry.entry_id},
             )
         self._had_next_day = has_next_day
+
+        # If E2E overrides failed, preserve the last-known-good overrides so a
+        # transient UDP hiccup doesn't briefly wipe known overrides (which would
+        # flip Plan source back to "Internal" until the next successful poll).
+        had_prior_overrides = (
+            self.data is not None and self.data.get("overrides") is not None
+        )
+        if result.get("overrides") is None and had_prior_overrides:
+            result["overrides"] = self.data["overrides"]
 
         # If E2E overrides failed, schedule a retry (up to 3 attempts)
         if result.get("overrides") is None and self._e2e_retry_count < 3:
@@ -264,7 +293,18 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.hass, delay, self._e2e_retry_callback
                 )
             else:
-                _LOGGER.warning("E2E retries exhausted, overrides unavailable")
+                # If overrides were previously fetched, this is a benign
+                # transient failure that self-heals on the next poll and the
+                # last-known overrides are retained — log at INFO. Only warn
+                # when overrides were never available at all.
+                if self.data is not None and self.data.get("overrides") is not None:
+                    _LOGGER.info(
+                        "E2E retries exhausted; keeping last-known overrides"
+                    )
+                else:
+                    _LOGGER.warning(
+                        "E2E retries exhausted, overrides unavailable"
+                    )
 
         self.hass.async_create_task(_retry_e2e())
 
