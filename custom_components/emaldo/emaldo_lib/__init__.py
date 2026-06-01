@@ -2,6 +2,28 @@
 
 from .client import EmaldoClient
 from .e2e import PersistentE2ESession
-from .exceptions import EmaldoError, EmaldoAuthError, EmaldoAPIError, EmaldoConnectionError
+from .exceptions import (
+    EmaldoError,
+    EmaldoAuthError,
+    EmaldoAPIError,
+    EmaldoConnectionError,
+    EmaldoE2EError,
+    EmaldoE2ETimeout,
+    EmaldoE2ESessionExpired,
+    EmaldoE2EProtocolError,
+    EmaldoE2EDecryptError,
+)
 
-__all__ = ["EmaldoClient", "PersistentE2ESession", "EmaldoError", "EmaldoAuthError", "EmaldoAPIError", "EmaldoConnectionError"]
+__all__ = [
+    "EmaldoClient",
+    "PersistentE2ESession",
+    "EmaldoError",
+    "EmaldoAuthError",
+    "EmaldoAPIError",
+    "EmaldoConnectionError",
+    "EmaldoE2EError",
+    "EmaldoE2ETimeout",
+    "EmaldoE2ESessionExpired",
+    "EmaldoE2EProtocolError",
+    "EmaldoE2EDecryptError",
+]

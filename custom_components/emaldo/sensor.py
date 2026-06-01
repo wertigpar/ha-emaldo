@@ -128,21 +128,48 @@ def _sum_series(series: dict | None, column: int, interval_min: int = 5) -> floa
     return round(total * interval_min / 60 / 1000, 3)
 
 
-def _solar_energy_today(data: dict[str, Any]) -> float | None:
-    """Total solar energy produced today (sum of all MPPT strings)."""
+# Per the ``/bmt/stats/mppt-v2/day/`` layout (confirmed against the v1
+# ``/bmt/stats/mppt/day/`` documentation and the official-app MPPT A/B/C
+# breakdown), each 5-minute row is:
+#   [minute_offset, string_1_W, string_2_W, string_3_W, pv_total_W, state]
+# Only models with integrated MPPT (Power Core) populate these columns;
+# on other models the series is all zeros.
+_MPPT_STRING_COLUMNS = (1, 2, 3)
+
+
+def _solar_series_entries(data: dict[str, Any]) -> list | None:
+    """Return the raw mppt-v2 data rows, or None if unavailable."""
     solar_resp = data.get("solar")
     if not isinstance(solar_resp, dict):
         return None
     series = solar_resp.get("mppt") if "mppt" in solar_resp else solar_resp
     if not isinstance(series, dict):
         return None
-    entries = series.get("data", [])
+    return series.get("data") or None
+
+
+def _solar_string_energy_today(data: dict[str, Any], column: int) -> float | None:
+    """Energy produced today by a single MPPT string (kWh)."""
+    entries = _solar_series_entries(data)
     if not entries:
         return None
-    # Sum all columns except the first (time offset)
-    ncols = len(entries[0]) - 1 if entries else 0
+    total = sum(e[column] for e in entries if len(e) > column)
+    return round(total * 5 / 60 / 1000, 3)
+
+
+def _solar_energy_today(data: dict[str, Any]) -> float | None:
+    """Total solar energy produced today (sum of the MPPT string columns).
+
+    The mppt-v2 series carries the three per-string columns *and* a
+    pre-summed total column plus a state column. Summing only the per-string
+    columns (1-3) yields the true production without double-counting the
+    total/state columns.
+    """
+    entries = _solar_series_entries(data)
+    if not entries:
+        return None
     total = sum(
-        sum(e[i + 1] for i in range(ncols) if len(e) > i + 1)
+        sum(e[c] for c in _MPPT_STRING_COLUMNS if len(e) > c)
         for e in entries
     )
     return round(total * 5 / 60 / 1000, 3)
@@ -313,6 +340,21 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
 )
 
+# Per-string solar energy sensors — only meaningful on models with integrated
+# MPPT (Power Core). Each reads one string column from the mppt-v2 series.
+PV_STRING_ENERGY_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = tuple(
+    EmaldoSensorEntityDescription(
+        key=f"solar_string_{n}_energy_today",
+        translation_key=f"solar_string_{n}_energy_today",
+        icon="mdi:solar-power-variant",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=(lambda d, col=col: _solar_string_energy_today(d, col)),
+    )
+    for n, col in enumerate(_MPPT_STRING_COLUMNS, start=1)
+)
+
 # Sensors that read from the fast E2E realtime coordinator (power flow)
 REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     EmaldoSensorEntityDescription(
@@ -400,6 +442,11 @@ async def async_setup_entry(
             EmaldoSensor(realtime_coordinator, desc)
             for desc in PV_REALTIME_DESCRIPTIONS
         )
+        # Per-string solar energy (from the slow REST mppt-v2 series)
+        entities.extend(
+            EmaldoSensor(coordinator, desc)
+            for desc in PV_STRING_ENERGY_DESCRIPTIONS
+        )
     if model not in EV_UNSUPPORTED_MODELS:
         entities.extend(
             EmaldoSensor(realtime_coordinator, desc)
@@ -426,7 +473,7 @@ async def async_setup_entry(
             if not serial or serial in _registered_module_serials:
                 continue
             _registered_module_serials.add(serial)
-            for metric in ("soc", "soh", "bms_temp_c", "voltage_v"):
+            for metric in ("soc", "soh", "bms_temp_c", "voltage_v", "serial"):
                 new_entities.append(
                     EmaldoBatteryModuleSensor(realtime_coordinator, serial, num, metric)
                 )
@@ -920,6 +967,10 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
             self._attr_device_class = SensorDeviceClass.VOLTAGE
             self._attr_state_class = SensorStateClass.MEASUREMENT
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        elif metric == "serial":
+            self._attr_name = f"Battery Module {module_num} Serial"
+            self._attr_icon = "mdi:identifier"
+            self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -933,11 +984,27 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
         )
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> float | str | None:
         """Return the metric value for this module."""
         modules = (self.coordinator.data or {}).get("battery_modules") or []
         for m in modules:
             if m.get("serial") == self._serial:
+                if self._metric == "serial":
+                    return self._serial or None
                 val = m.get(self._metric)
                 return float(val) if val is not None else None
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return serial number and SoC for diagnostics."""
+        modules = (self.coordinator.data or {}).get("battery_modules") or []
+        for m in modules:
+            if m.get("serial") == self._serial:
+                attrs: dict = {"serial_number": self._serial}
+                soc = m.get("soc")
+                if soc is not None:
+                    attrs["battery_soc"] = int(soc)
+                return attrs
+        return {"serial_number": self._serial}
+
