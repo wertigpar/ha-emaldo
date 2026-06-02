@@ -23,9 +23,8 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 
 | Requirement | Details |
 |---|---|
-| **Home Assistant** | 2024.1+ |
+| **Home Assistant** ||
 | **Emaldo account** | Email + password for the Emaldo app |
-| **App credentials** | App ID, App Secret, App Version (from the Emaldo APK) |
 | **Network** | Internet access to `api.emaldo.com` and UDP access to the E2E server |
 
 ## Installation
@@ -44,11 +43,11 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 
 | Field | Description |
 |---|---|
-| **Email** | Your Emaldo account email |
+| **Email** | Your Emaldo account email (Use your main account with official app and create secondary account for Home Assistant integration use) |
 | **Password** | Your Emaldo account password |
-| **App ID** | Application ID from the Emaldo APK |
-| **App Secret** | Application secret from the Emaldo APK |
-| **App Version** | Application version string (e.g. `2.8.3`) |
+| **App ID** | *(optional, only for testing)* Leave empty for default |
+| **App Secret** | *(optional, only for testing)* Leave empty for default |
+| **App Version** | *(optional, only for testing)* Leave empty for default |
 | **Home ID** | *(optional)* Leave empty to auto-detect |
 
 ### Reconfiguring credentials
@@ -660,18 +659,15 @@ cards:
 ### "Authentication failed"
 
 - Verify email and password work in the Emaldo app.
-- Check that App ID, App Secret, and App Version match the installed APK.
 
 ### "No battery devices found"
 
 - The Home ID may be wrong. Leave it empty to auto-detect.
-- Log in to the Emaldo app and verify your battery appears.
+- Log in to the Emaldo app with same account and verify your battery appears.
 
 ### "Failed to read E2E overrides"
 
 - E2E communication uses UDP — ensure no firewall blocks outbound UDP to the Emaldo E2E server (port 1050).
-- The integration retries up to 3 times with increasing delay (60s, 120s, 180s).
-- Override reading failures don't block schedule updates.
 
 ### Schedule not updating
 
@@ -688,15 +684,22 @@ emaldo/
 ├── config_flow.py           # Config + options + reconfigure flow
 ├── const.py                 # Integration constants and defaults
 ├── coordinator.py           # Power/battery data coordinator (60s polling)
-├── datetime.py              # Emergency charge start/end datetime entities
+├── manifest.json            # Integration manifest (version, requirements, dependencies)
 ├── number.py                # EV fixed charge amount + AI Battery Range number entities
 ├── schedule_coordinator.py  # Schedule + override coordinator (custom time triggers, E2E retry)
 ├── select.py                # Control priority + EV charge mode select entities
 ├── sensor.py                # Realtime + daily energy sensors, schedule sensors, balancing, diagnostics
 ├── services.py              # Override, EV schedule, solar backfill, AI Battery Range services
 ├── services.yaml            # Service UI descriptions
-├── switch.py                # Third-party PV, AI Battery Range override, and Emergency charge switches
 ├── strings.json             # Translation strings
+├── switch.py                # Third-party PV, AI Battery Range override, and Emergency charge switches
+├── time.py                  # Emergency charge start/end time entities
+├── translations/            # Locale strings
+│   ├── da.json
+│   ├── en.json
+│   ├── fi.json
+│   ├── nb.json
+│   └── sv.json
 └── emaldo_lib/              # Bundled Emaldo client library
     ├── __init__.py           # Re-exports EmaldoClient + exceptions
     ├── client.py             # REST API client (login, get_battery, get_power, etc.)
