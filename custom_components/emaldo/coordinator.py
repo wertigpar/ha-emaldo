@@ -15,7 +15,6 @@ import struct
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -26,7 +25,6 @@ from .emaldo_lib import (
     PersistentE2ESession,
 )
 from .emaldo_lib.exceptions import EmaldoE2EError
-from .emaldo_lib.const import set_params
 from .emaldo_lib.e2e import (
     build_subscription_packet,
     decrypt_response,
@@ -46,16 +44,18 @@ from .emaldo_lib.e2e import (
 from .const import (
     DOMAIN,
     CONF_HOME_ID,
-    CONF_APP_ID,
-    CONF_APP_SECRET,
-    CONF_APP_VERSION,
-    DEFAULT_APP_ID,
-    DEFAULT_APP_SECRET,
-    DEFAULT_APP_VERSION,
+    CONF_DEVICE_ID,
+    CONF_DEVICE_MODEL,
+    CONF_DEVICE_NAME,
     DEFAULT_SCAN_INTERVAL,
     REALTIME_SCAN_INTERVAL,
     KEEPALIVE_INTERVAL,
 )
+from .realtime_sanity import (
+    REALTIME_POWER_ABS_MAX_W,
+    get_invalid_realtime_power_channels,
+)
+from .shared_client import SharedEmaldoClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,7 +65,17 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     config_entry: ConfigEntry
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        shared_client: SharedEmaldoClient,
+        *,
+        device_id: str | None = None,
+        device_model: str | None = None,
+        device_name: str | None = None,
+        persist_device_binding: bool = True,
+    ) -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
@@ -74,10 +84,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
         self._entry = entry
-        self._client: EmaldoClient | None = None
-        self._device_id: str | None = None
-        self._model: str | None = None
-        self._device_name: str | None = None
+        self._shared_client = shared_client
+        self._device_id: str | None = device_id or entry.data.get(CONF_DEVICE_ID)
+        self._model: str | None = device_model or entry.data.get(CONF_DEVICE_MODEL)
+        self._device_name: str | None = device_name or entry.data.get(CONF_DEVICE_NAME)
+        self._persist_device_binding = persist_device_binding
         self._emergency_charge_active: bool = False
         self._emergency_charge_start_t: object = None  # datetime.time | None
         self._emergency_charge_end_t: object = None    # datetime.time | None
@@ -106,33 +117,68 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the discovered device name."""
         return self._device_name
 
+    def _reset_client(self) -> None:
+        """Invalidate the shared REST client so the next request re-authenticates."""
+        self._shared_client.reset()
+
     def _ensure_client(self) -> EmaldoClient:
         """Create and authenticate the client if needed."""
-        data = self._entry.data
-        app_id = data.get(CONF_APP_ID, DEFAULT_APP_ID)
-        app_secret = data.get(CONF_APP_SECRET, DEFAULT_APP_SECRET)
-        app_version = data.get(CONF_APP_VERSION, DEFAULT_APP_VERSION)
-
-        # Always set app params before any client operation
-        set_params(app_id, app_secret, app_version)
-
-        if self._client is None or not self._client.is_authenticated:
-            self._client = EmaldoClient(app_version=app_version)
-            self._client.login(data[CONF_EMAIL], data[CONF_PASSWORD])
+        client = self._shared_client.ensure_client()
 
         if self._device_id is None:
-            did, model, name = self._client.find_device(self.home_id)
+            did, model, name = client.find_device(self.home_id)
             self._device_id = did
             self._model = model
             self._device_name = name
+        elif self._model is None or self._device_name is None:
+            devices = client.list_devices(self.home_id)
+            selected = next(
+                (d for d in devices if str(d.get("id", "")) == self._device_id),
+                None,
+            )
+            if selected is not None:
+                self._model = selected.get("model")
+                self._device_name = selected.get("name", self._device_id)
+            else:
+                _LOGGER.warning(
+                    "Configured device_id %s not found in home %s, falling back to first discovered device",
+                    self._device_id,
+                    self.home_id,
+                )
+                did, model, name = client.find_device(self.home_id)
+                self._device_id = did
+                self._model = model
+                self._device_name = name
 
-        return self._client
+        return client
+
+    async def _async_persist_device_binding(self) -> None:
+        """Persist resolved device binding into config entry data."""
+        if not self._persist_device_binding:
+            return
+        if self._device_id is None or self._model is None:
+            return
+
+        current = self._entry.data
+        if (
+            current.get(CONF_DEVICE_ID) == self._device_id
+            and current.get(CONF_DEVICE_MODEL) == self._model
+            and current.get(CONF_DEVICE_NAME) == self._device_name
+        ):
+            return
+
+        updated = dict(current)
+        updated[CONF_DEVICE_ID] = self._device_id
+        updated[CONF_DEVICE_MODEL] = self._model
+        updated[CONF_DEVICE_NAME] = self._device_name or self._device_id
+        self.hass.config_entries.async_update_entry(self._entry, data=updated)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch battery + power data from the REST API."""
         for attempt in range(2):
             try:
                 client = await self.hass.async_add_executor_job(self._ensure_client)
+                await self._async_persist_device_binding()
                 battery = await self.hass.async_add_executor_job(
                     client.get_battery, self.home_id, self._device_id, self._model
                 )
@@ -141,7 +187,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 break
             except EmaldoAuthError:
-                self._client = None
+                self._reset_client()
                 if attempt == 0:
                     _LOGGER.debug("Session expired, re-authenticating")
                     continue
@@ -324,7 +370,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emergency_charge_active = True
                 return
             except EmaldoAuthError:
-                self._client = None
+                self._reset_client()
                 if attempt == 1:
                     raise
             except Exception:
@@ -342,7 +388,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emergency_charge_active = False
                 return
             except EmaldoAuthError:
-                self._client = None
+                self._reset_client()
                 if attempt == 1:
                     raise
             except Exception:
@@ -384,6 +430,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._entry = entry
         self._parent = parent
         self._session: PersistentE2ESession | None = None
+        self._session_binding: tuple[str, str, str] | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
         self._consecutive_read_errors: int = 0
@@ -433,19 +480,41 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._keepalive_task = None
         if self._session is not None:
             await self.hass.async_add_executor_job(self._session.close)
-            self._session = None
+            self._invalidate_session_ref()
+
+    def _invalidate_session_ref(self) -> None:
+        """Drop local references to the active E2E session and binding."""
+        self._session = None
+        self._session_binding = None
 
     def _ensure_session(self) -> PersistentE2ESession:
-        """Create and connect the persistent E2E session if needed."""
-        if self._session is not None and not self._session.closed:
-            return self._session
+        """Create and connect the persistent E2E session if needed.
 
+        Session scope is device-local: one UDP session per
+        ``(home_id, device_id, model)`` binding.
+        """
         client = self._parent._ensure_client()  # noqa: SLF001 - intended
         home_id = self._parent.home_id
         device_id = self._parent._device_id  # noqa: SLF001
         model = self._parent._model  # noqa: SLF001
         if device_id is None or model is None:
             raise UpdateFailed("Device not yet discovered")
+
+        binding = (home_id, device_id, model)
+        if self._session is not None and not self._session.closed:
+            if self._session_binding == binding:
+                return self._session
+            previous_binding = self._session_binding
+            try:
+                self._session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._invalidate_session_ref()
+            _LOGGER.info(
+                "Recreating E2E session due to device binding change: %s -> %s",
+                previous_binding,
+                binding,
+            )
 
         creds = client.e2e_login(home_id, device_id, model)
         _LOGGER.debug("E2E session host: %s", creds.get("host", "(default)"))
@@ -454,6 +523,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             log=lambda msg: _LOGGER.debug("[E2E] %s", msg),
         )
         self._session.connect()
+        self._session_binding = binding
         return self._session
 
     def _read_power_flow(self) -> dict | None:
@@ -465,7 +535,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._e2e_diag += f" result={'data' if data else 'None'}"
         if data is None and session.closed:
             # Session died mid-read — force recreation on next call
-            self._session = None
+            self._invalidate_session_ref()
         return data
 
     def _write_thirdparty_pv(self, enabled: bool) -> None:
@@ -486,13 +556,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 return
             except EmaldoAuthError:
                 # REST token expired — force full re-login on next _ensure_session
-                self._parent._client = None  # noqa: SLF001
-                self._session = None
+                self._parent._reset_client()  # noqa: SLF001
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
             except EmaldoE2EError:
                 # UDP session closed/expired — drop it so _ensure_session reconnects
-                self._session = None
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
 
@@ -513,12 +583,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 session.send_command(_VIRTUALPOWERPLANT_SET_TYPE, payload)
                 return
             except EmaldoAuthError:
-                self._parent._client = None  # noqa: SLF001
-                self._session = None
+                self._parent._reset_client()  # noqa: SLF001
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
             except EmaldoE2EError:
-                self._session = None
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
 
@@ -541,12 +611,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 session.send_command(_SELLING_PROTECTION_SET_TYPE, payload)
                 return
             except EmaldoAuthError:
-                self._parent._client = None  # noqa: SLF001
-                self._session = None
+                self._parent._reset_client()  # noqa: SLF001
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
             except EmaldoE2EError:
-                self._session = None
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
 
@@ -569,12 +639,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 session.send_command(0x80, payload)
                 return
             except EmaldoAuthError:
-                self._parent._client = None  # noqa: SLF001
-                self._session = None
+                self._parent._reset_client()  # noqa: SLF001
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
             except EmaldoE2EError:
-                self._session = None
+                self._invalidate_session_ref()
                 if attempt == 1:
                     raise
 
@@ -606,7 +676,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         except EmaldoAuthError as err:
             # Token expired — force REST re-login and E2E reconnect.
             # This is self-healing (next poll re-logins automatically), so log at INFO.
-            self._parent._client = None  # noqa: SLF001
+            self._parent._reset_client()  # noqa: SLF001
             await self._close_session()
             self._empty_reads = 0
             self._consecutive_reconnects += 1
@@ -676,6 +746,25 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "E2E power flow empty read %d/%d, keeping previous values",
                 self._empty_reads, self._MAX_EMPTY_READS,
             )
+            return self.data
+
+        invalid_channels = get_invalid_realtime_power_channels(data)
+        if invalid_channels:
+            self._empty_reads += 1
+            self.stats_empty_reads += 1
+            self.stats_last_failure = _time.time()
+            _LOGGER.warning(
+                "E2E power flow rejected by sanity filter (channels=%s, abs_max_w=%d) "
+                "— keeping previous values",
+                ",".join(invalid_channels),
+                REALTIME_POWER_ABS_MAX_W,
+            )
+            if self._empty_reads >= self._MAX_EMPTY_READS:
+                self.stats_reconnects += 1
+                self._consecutive_reconnects += 1
+                self.stats_last_reconnect = _time.time()
+                await self._close_session()
+                self._empty_reads = 0
             return self.data
 
         self._empty_reads = 0
@@ -802,7 +891,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 await self.hass.async_add_executor_job(self._session.close)
             except Exception:  # noqa: BLE001
                 pass
-            self._session = None
+            self._invalidate_session_ref()
 
     async def _keepalive_loop(self) -> None:
         """Periodically send alive+heartbeat to keep the relay session alive."""

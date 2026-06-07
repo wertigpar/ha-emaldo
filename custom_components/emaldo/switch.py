@@ -24,6 +24,13 @@ from .emaldo_lib.exceptions import EmaldoAuthError
 _LOGGER = logging.getLogger(__name__)
 
 
+def _uid_base(coordinator: Any) -> str:
+    """Return stable UID base (legacy for primary, device-scoped for fan-out)."""
+    if getattr(coordinator, "_legacy_uid_mode", False):
+        return coordinator.home_id
+    return coordinator.device_id or coordinator.home_id
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -31,20 +38,23 @@ async def async_setup_entry(
 ) -> None:
     """Set up Emaldo switch entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    realtime_coordinator: EmaldoRealtimeCoordinator = data["realtime"]
-    schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
-    power_coordinator: EmaldoCoordinator = data["power"]
+    entities: list[SwitchEntity] = []
+    for item in data.get("devices") or [data]:
+        realtime_coordinator: EmaldoRealtimeCoordinator = item["realtime"]
+        schedule_coordinator: EmaldoScheduleCoordinator = item["schedule"]
+        power_coordinator: EmaldoCoordinator = item["power"]
+        entities.extend(
+            [
+                EmaldoThirdPartyPVSwitch(realtime_coordinator),
+                EmaldoSellBackToGridSwitch(realtime_coordinator),
+                EmaldoSellLimitSwitch(realtime_coordinator),
+                EmaldoManualSellingSwitch(realtime_coordinator),
+                EmaldoEmergencyChargeSwitch(power_coordinator),
+                EmaldoBatteryRangeOverrideSwitch(schedule_coordinator),
+            ]
+        )
 
-    async_add_entities(
-        [
-            EmaldoThirdPartyPVSwitch(realtime_coordinator),
-            EmaldoSellBackToGridSwitch(realtime_coordinator),
-            EmaldoSellLimitSwitch(realtime_coordinator),
-            EmaldoManualSellingSwitch(realtime_coordinator),
-            EmaldoEmergencyChargeSwitch(power_coordinator),
-            EmaldoBatteryRangeOverrideSwitch(schedule_coordinator),
-        ]
-    )
+    async_add_entities(entities)
 
 
 class EmaldoThirdPartyPVSwitch(
@@ -59,7 +69,7 @@ class EmaldoThirdPartyPVSwitch(
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
         """Initialise the switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_thirdparty_pv_on"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_thirdparty_pv_on"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -115,7 +125,7 @@ class EmaldoSellBackToGridSwitch(
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
         """Initialise the switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_sell_back_to_grid"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_sell_back_to_grid"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -175,7 +185,7 @@ class EmaldoSellLimitSwitch(
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
         """Initialise the switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_sell_limit"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_sell_limit"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -240,7 +250,7 @@ class EmaldoManualSellingSwitch(
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
         """Initialise the switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_manual_selling"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_manual_selling"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -300,7 +310,7 @@ class EmaldoBatteryRangeOverrideSwitch(
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         """Initialize the override switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_battery_range_override"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_battery_range_override"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -347,7 +357,7 @@ class EmaldoBatteryRangeOverrideSwitch(
                     )
                 except EmaldoAuthError:
                     if attempt == 0:
-                        self.coordinator._client = None  # noqa: SLF001
+                        self.coordinator._reset_client()  # noqa: SLF001
                     else:
                         raise
             return False
@@ -380,7 +390,7 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
     def __init__(self, coordinator: EmaldoCoordinator) -> None:
         """Initialize the emergency charge switch."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_emergency_charge"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_emergency_charge"
 
     @property
     def device_info(self) -> DeviceInfo:

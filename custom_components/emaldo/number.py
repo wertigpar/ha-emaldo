@@ -24,6 +24,13 @@ from .emaldo_lib.exceptions import EmaldoAuthError
 _LOGGER = logging.getLogger(__name__)
 
 
+def _uid_base(coordinator) -> str:
+    """Return stable UID base (legacy for primary, device-scoped for fan-out)."""
+    if getattr(coordinator, "_legacy_uid_mode", False):
+        return coordinator.home_id
+    return coordinator.device_id or coordinator.home_id
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -31,27 +38,29 @@ async def async_setup_entry(
 ) -> None:
     """Set up Emaldo number entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    power_coordinator: EmaldoCoordinator = data["power"]
-    realtime_coordinator: EmaldoRealtimeCoordinator = data["realtime"]
-    schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
 
     entities: list[NumberEntity] = []
 
-    model = power_coordinator.device_model or ""
-    if model not in EV_UNSUPPORTED_MODELS:
-        entities.append(EmaldoEVFixedChargeAmount(power_coordinator))
+    for item in data.get("devices") or [data]:
+        power_coordinator: EmaldoCoordinator = item["power"]
+        realtime_coordinator: EmaldoRealtimeCoordinator = item["realtime"]
+        schedule_coordinator: EmaldoScheduleCoordinator = item["schedule"]
 
-    # AI Battery Range markers — always present; override write is destructive
-    # (clears all per-15-min slot overrides), so the slider always sets the
-    # battery_range_override flag to whatever the switch entity reads.
-    entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "smart"))
-    entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "emergency"))
+        model = power_coordinator.device_model or ""
+        if model not in EV_UNSUPPORTED_MODELS:
+            entities.append(EmaldoEVFixedChargeAmount(power_coordinator))
 
-    # Sell Limit daily threshold slider (1-300 kWh/day).
-    entities.append(EmaldoSellLimitThreshold(realtime_coordinator))
+        # AI Battery Range markers — always present; override write is destructive
+        # (clears all per-15-min slot overrides), so the slider always sets the
+        # battery_range_override flag to whatever the switch entity reads.
+        entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "smart"))
+        entities.append(EmaldoBatteryRangeMarker(schedule_coordinator, "emergency"))
 
-    # Manual selling target energy amount (1-100 kWh).
-    entities.append(EmaldoManualSellingTarget(realtime_coordinator))
+        # Sell Limit daily threshold slider (1-300 kWh/day).
+        entities.append(EmaldoSellLimitThreshold(realtime_coordinator))
+
+        # Manual selling target energy amount (1-100 kWh).
+        entities.append(EmaldoManualSellingTarget(realtime_coordinator))
 
     async_add_entities(entities)
 
@@ -70,7 +79,7 @@ class EmaldoEVFixedChargeAmount(CoordinatorEntity[EmaldoCoordinator], NumberEnti
     def __init__(self, coordinator: EmaldoCoordinator) -> None:
         """Initialize the EV fixed-charge number entity."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_ev_fixed_charge_amount"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_ev_fixed_charge_amount"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -140,7 +149,7 @@ class EmaldoBatteryRangeMarker(
         self._kind = kind
         nice = "Smart reserve" if kind == "smart" else "Emergency reserve"
         self._attr_translation_key = f"ai_battery_range_{kind}"
-        self._attr_unique_id = f"{coordinator.home_id}_battery_range_{kind}"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_battery_range_{kind}"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -193,7 +202,7 @@ class EmaldoBatteryRangeMarker(
                     )
                 except EmaldoAuthError:
                     if attempt == 0:
-                        self.coordinator._client = None  # noqa: SLF001
+                        self.coordinator._reset_client()  # noqa: SLF001
                     else:
                         raise
             return False
@@ -228,7 +237,7 @@ class EmaldoSellLimitThreshold(
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
         """Initialize the sell-limit threshold number entity."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_sell_limit_threshold"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_sell_limit_threshold"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -288,7 +297,7 @@ class EmaldoManualSellingTarget(
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
         """Initialize the manual selling target number entity."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_manual_selling_target"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_manual_selling_target"
 
     @property
     def device_info(self) -> DeviceInfo:

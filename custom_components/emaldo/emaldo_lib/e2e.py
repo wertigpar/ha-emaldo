@@ -520,25 +520,49 @@ def parse_battery_data(payload: bytes) -> dict | None:
     }
 
 
+_POWER_FLOW_MAX_RAW_HECTOWATTS = 2000  # 200 kW per channel; filters bogus multi-MW spikes
+
+
+def _has_reasonable_power_flow_values(payload: bytes) -> bool:
+    """Return True when the raw 0x30 fields look plausible.
+
+    The protocol reports powers in units of 100 W. Real systems are expected
+    to stay far below 200 kW per channel, so values beyond that are treated as
+    corrupt or misclassified payloads rather than published as multi-megawatt
+    sensor spikes.
+    """
+    signed_offsets = (0, 2, 4, 6, 8, 10)
+    for offset in signed_offsets:
+        if abs(struct.unpack_from("<h", payload, offset)[0]) > _POWER_FLOW_MAX_RAW_HECTOWATTS:
+            return False
+
+    unsigned_offsets = (12, 14)
+    for offset in unsigned_offsets:
+        if struct.unpack_from("<H", payload, offset)[0] > _POWER_FLOW_MAX_RAW_HECTOWATTS:
+            return False
+
+    if len(payload) >= 18:
+        if payload[16] not in (0, 1) or payload[17] not in (0, 1):
+            return False
+    if len(payload) >= 20 and payload[19] not in (0, 1):
+        return False
+    if len(payload) >= 22:
+        if abs(struct.unpack_from("<h", payload, 20)[0]) > _POWER_FLOW_MAX_RAW_HECTOWATTS:
+            return False
+
+    return True
+
+
 def _is_power_flow_payload(payload: bytes) -> bool:
     """Check if decrypted payload looks like a power flow response.
 
     Power flow responses are 16–24 bytes of signed-short watt values.
-    Heuristic: correct length range, reasonable watt values, and
-    boolean flags at bytes 16–17 must be 0 or 1.
+    Heuristic: correct length range, plausible per-channel raw values,
+    and boolean flags using valid 0/1 encodings.
     """
     if len(payload) < 16 or len(payload) > 24:
         return False
-    # First two shorts should be reasonable watt values
-    battery_w = struct.unpack_from("<h", payload, 0)[0]
-    solar_w = struct.unpack_from("<h", payload, 2)[0]
-    if abs(battery_w) >= 30000 or abs(solar_w) >= 30000:
-        return False
-    # Bytes 16–17 are boolean flags (gridValid, bsensorValid)
-    if len(payload) >= 18:
-        if payload[16] not in (0, 1) or payload[17] not in (0, 1):
-            return False
-    return True
+    return _has_reasonable_power_flow_values(payload)
 
 
 def parse_power_flow(payload: bytes) -> dict | None:
@@ -577,6 +601,8 @@ def parse_power_flow(payload: bytes) -> dict | None:
         Dict with decoded power flow values, or *None* if invalid.
     """
     if payload is None or len(payload) < 16:
+        return None
+    if not _is_power_flow_payload(payload):
         return None
 
     # Protocol values are in units of 100 W (hectowatts).

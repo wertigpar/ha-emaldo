@@ -40,6 +40,13 @@ from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 
 
+def _uid_base(coordinator: Any) -> str:
+    """Return stable UID base (legacy for primary, device-scoped for fan-out)."""
+    if getattr(coordinator, "_legacy_uid_mode", False):
+        return coordinator.home_id
+    return coordinator.device_id or coordinator.home_id
+
+
 def _latest_nonzero(d: dict | None) -> list | None:
     """Return the latest time-series entry with nonzero values."""
     if not isinstance(d, dict):
@@ -420,70 +427,78 @@ async def async_setup_entry(
 ) -> None:
     """Set up Emaldo sensors from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    coordinator: EmaldoCoordinator = data["power"]
-    realtime_coordinator = data["realtime"]
-    schedule_coordinator: EmaldoScheduleCoordinator = data["schedule"]
+    entities: list[SensorEntity] = []
 
-    entities: list[SensorEntity] = [
-        EmaldoSensor(coordinator, description)
-        for description in REST_SENSOR_DESCRIPTIONS
-    ]
+    for item in data.get("devices") or [data]:
+        coordinator: EmaldoCoordinator = item["power"]
+        realtime_coordinator: EmaldoRealtimeCoordinator = item["realtime"]
+        schedule_coordinator: EmaldoScheduleCoordinator = item["schedule"]
 
-    # Real-time power sensors come from the E2E coordinator
-    entities.extend(
-        EmaldoSensor(realtime_coordinator, description)
-        for description in REALTIME_SENSOR_DESCRIPTIONS
-    )
-
-    # Solar PV and EV charger sensors — created only for models that support them
-    model = coordinator.device_model or ""
-    if model not in PV_UNSUPPORTED_MODELS:
         entities.extend(
-            EmaldoSensor(realtime_coordinator, desc)
-            for desc in PV_REALTIME_DESCRIPTIONS
-        )
-        # Per-string solar energy (from the slow REST mppt-v2 series)
-        entities.extend(
-            EmaldoSensor(coordinator, desc)
-            for desc in PV_STRING_ENERGY_DESCRIPTIONS
-        )
-    if model not in EV_UNSUPPORTED_MODELS:
-        entities.extend(
-            EmaldoSensor(realtime_coordinator, desc)
-            for desc in EV_REALTIME_DESCRIPTIONS
+            EmaldoSensor(coordinator, description)
+            for description in REST_SENSOR_DESCRIPTIONS
         )
 
-    # Diagnostic: realtime connection status
-    entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
-    entities.append(EmaldoBalancingStateSensor(realtime_coordinator))
+        # Real-time power sensors come from the E2E coordinator
+        entities.extend(
+            EmaldoSensor(realtime_coordinator, description)
+            for description in REALTIME_SENSOR_DESCRIPTIONS
+        )
 
-    entities.append(EmaldoPlanSourceSensor(schedule_coordinator))
-    entities.append(EmaldoActiveModeSensor(schedule_coordinator))
-    entities.append(EmaldoScheduleChartSensor(schedule_coordinator))
+        # Solar PV and EV charger sensors — created only for models that support them
+        model = coordinator.device_model or ""
+        if model not in PV_UNSUPPORTED_MODELS:
+            entities.extend(
+                EmaldoSensor(realtime_coordinator, desc)
+                for desc in PV_REALTIME_DESCRIPTIONS
+            )
+            # Per-string solar energy (from the slow REST mppt-v2 series)
+            entities.extend(
+                EmaldoSensor(coordinator, desc)
+                for desc in PV_STRING_ENERGY_DESCRIPTIONS
+            )
+        if model not in EV_UNSUPPORTED_MODELS:
+            entities.extend(
+                EmaldoSensor(realtime_coordinator, desc)
+                for desc in EV_REALTIME_DESCRIPTIONS
+            )
+
+        # Diagnostic: realtime connection status
+        entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
+        entities.append(EmaldoBalancingStateSensor(realtime_coordinator))
+
+        entities.append(EmaldoPlanSourceSensor(schedule_coordinator))
+        entities.append(EmaldoActiveModeSensor(schedule_coordinator))
+        entities.append(EmaldoScheduleChartSensor(schedule_coordinator))
     async_add_entities(entities)
 
     # Per-module battery sensors — discovered dynamically when realtime data arrives.
-    _registered_module_serials: set[str] = set()
+    for item in data.get("devices") or [data]:
+        realtime_coordinator: EmaldoRealtimeCoordinator = item["realtime"]
+        _registered_module_serials: set[str] = set()
 
-    def _maybe_add_battery_modules() -> None:
-        modules = (realtime_coordinator.data or {}).get("battery_modules") or []
-        new_entities: list[SensorEntity] = []
-        for num, module in enumerate(modules, start=1):
-            serial = module.get("serial") or ""
-            if not serial or serial in _registered_module_serials:
-                continue
-            _registered_module_serials.add(serial)
-            for metric in ("soc", "soh", "bms_temp_c", "voltage_v", "serial"):
-                new_entities.append(
-                    EmaldoBatteryModuleSensor(realtime_coordinator, serial, num, metric)
-                )
-        if new_entities:
-            async_add_entities(new_entities)
+        def _maybe_add_battery_modules(
+            realtime: EmaldoRealtimeCoordinator = realtime_coordinator,
+            registered: set[str] = _registered_module_serials,
+        ) -> None:
+            modules = (realtime.data or {}).get("battery_modules") or []
+            new_entities: list[SensorEntity] = []
+            for num, module in enumerate(modules, start=1):
+                serial = module.get("serial") or ""
+                if not serial or serial in registered:
+                    continue
+                registered.add(serial)
+                for metric in ("soc", "soh", "bms_temp_c", "voltage_v", "serial"):
+                    new_entities.append(
+                        EmaldoBatteryModuleSensor(realtime, serial, num, metric)
+                    )
+            if new_entities:
+                async_add_entities(new_entities)
 
-    entry.async_on_unload(
-        realtime_coordinator.async_add_listener(_maybe_add_battery_modules)
-    )
-    _maybe_add_battery_modules()  # Handle case where data is already available
+        entry.async_on_unload(
+            realtime_coordinator.async_add_listener(_maybe_add_battery_modules)
+        )
+        _maybe_add_battery_modules()  # Handle case where data is already available
 
 
 class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
@@ -500,7 +515,7 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.home_id}_{description.key}"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_{description.key}"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -569,7 +584,7 @@ class EmaldoPlanSourceSensor(
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_plan_source"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_plan_source"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -610,7 +625,7 @@ class EmaldoActiveModeSensor(
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_active_mode"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_active_mode"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -697,7 +712,7 @@ class EmaldoScheduleChartSensor(
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_schedule_chart"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_schedule_chart"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -834,7 +849,7 @@ class EmaldoBalancingStateSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], S
 
     def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_balancing_state"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_balancing_state"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -864,7 +879,7 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
     def __init__(self, coordinator) -> None:
         """Initialize the diagnostic sensor."""
         self._coordinator = coordinator
-        self._attr_unique_id = f"{coordinator.home_id}_realtime_status"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_realtime_status"
 
     async def async_added_to_hass(self) -> None:
         """Register for coordinator updates."""
@@ -942,7 +957,7 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
         super().__init__(coordinator)
         self._serial = serial
         self._metric = metric
-        self._attr_unique_id = f"{coordinator.home_id}_module_{serial}_{metric}"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_module_{serial}_{metric}"
 
         if metric == "soc":
             self._attr_name = f"Battery Module {module_num} SoC"

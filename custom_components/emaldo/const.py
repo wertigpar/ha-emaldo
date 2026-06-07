@@ -3,6 +3,9 @@
 DOMAIN = "emaldo"
 
 CONF_HOME_ID = "home_id"
+CONF_DEVICE_ID = "device_id"
+CONF_DEVICE_MODEL = "device_model"
+CONF_DEVICE_NAME = "device_name"
 CONF_APP_ID = "app_id"
 CONF_APP_SECRET = "app_secret"
 CONF_APP_VERSION = "app_version"

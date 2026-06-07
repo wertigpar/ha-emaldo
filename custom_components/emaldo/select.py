@@ -20,6 +20,13 @@ from .coordinator import EmaldoCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _uid_base(coordinator: EmaldoCoordinator) -> str:
+    """Return stable UID base (legacy for primary, device-scoped for fan-out)."""
+    if getattr(coordinator, "_legacy_uid_mode", False):
+        return coordinator.home_id
+    return coordinator.device_id or coordinator.home_id
+
 # EV mode option keys and display names
 EV_MODE_OPTIONS: dict[str, int] = {
     "lowest_price": 1,
@@ -38,13 +45,13 @@ async def async_setup_entry(
 ) -> None:
     """Set up Emaldo select entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    power_coordinator: EmaldoCoordinator = data["power"]
-
     entities: list[SelectEntity] = []
-
-    model = power_coordinator.device_model or ""
-    if model not in EV_UNSUPPORTED_MODELS:
-        entities.append(EmaldoEVChargeModeSelect(power_coordinator))
+    device_sets = data.get("devices") or [data]
+    for item in device_sets:
+        power_coordinator: EmaldoCoordinator = item["power"]
+        model = power_coordinator.device_model or ""
+        if model not in EV_UNSUPPORTED_MODELS:
+            entities.append(EmaldoEVChargeModeSelect(power_coordinator))
 
     async_add_entities(entities)
 
@@ -59,7 +66,7 @@ class EmaldoEVChargeModeSelect(CoordinatorEntity[EmaldoCoordinator], SelectEntit
 
     def __init__(self, coordinator: EmaldoCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_ev_charge_mode"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_ev_charge_mode"
 
     @property
     def device_info(self) -> DeviceInfo:

@@ -68,7 +68,6 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._entry = entry
         self._parent = parent
-        self._client: None = None  # unused; kept for type safety
         self._device_id: str | None = None
         self._model: str | None = None
         self._device_name: str | None = None
@@ -108,7 +107,7 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _reset_client(self) -> None:
         """Invalidate the shared client so both coordinators re-authenticate."""
-        self._parent._client = None
+        self._parent._reset_client()
 
     # -- Data fetching --
 
