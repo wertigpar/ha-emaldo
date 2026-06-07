@@ -17,23 +17,33 @@ def rc4_crypt(key: bytes, data: bytes) -> bytes:
     return cipher.encrypt(data)
 
 
-def encrypt_field(plaintext: str) -> str:
-    """Encrypt a string field for API requests: RC4 → hex."""
+def encrypt_field_with_secret(secret: bytes, plaintext: str) -> str:
+    """Encrypt plaintext using an explicit app secret: RC4 -> hex."""
     raw = plaintext.encode("utf-8")
-    encrypted = rc4_crypt(get_app_secret(), raw)
+    encrypted = rc4_crypt(secret, raw)
     return encrypted.hex()
 
 
-def decrypt_response(hex_str: str) -> str:
-    """Decrypt an API response field: hex → RC4 → Snappy decompress."""
+def encrypt_field(plaintext: str) -> str:
+    """Encrypt a string field for API requests: RC4 → hex."""
+    return encrypt_field_with_secret(get_app_secret(), plaintext)
+
+
+def decrypt_response_with_secret(secret: bytes, hex_str: str) -> str:
+    """Decrypt API response using an explicit app secret."""
     raw = bytes.fromhex(hex_str)
-    decrypted = rc4_crypt(get_app_secret(), raw)
+    decrypted = rc4_crypt(secret, raw)
     try:
         decompressed = bytes(cramjam.snappy.decompress_raw(decrypted))
         return decompressed.decode("utf-8")
     except Exception:
         # Some responses may not be Snappy-compressed
         return decrypted.decode("utf-8")
+
+
+def decrypt_response(hex_str: str) -> str:
+    """Decrypt an API response field: hex → RC4 → Snappy decompress."""
+    return decrypt_response_with_secret(get_app_secret(), hex_str)
 
 
 def make_gmtime() -> int:

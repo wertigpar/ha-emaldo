@@ -8,6 +8,7 @@
           "email": "Email",
           "password": "Password",
           "home_id": "Home ID (leave empty to auto-detect)",
+          "device_id": "Device ID (optional, pin to a specific battery)",
           "app_id": "App ID",
           "app_secret": "App Secret",
           "app_version": "App Version"
@@ -25,6 +26,7 @@
           "email": "Email",
           "password": "Password",
           "home_id": "Home ID (leave empty to re-detect)",
+          "device_id": "Device ID (optional, pin to a specific battery)",
           "app_id": "App ID",
           "app_secret": "App Secret",
           "app_version": "App Version"
@@ -39,7 +41,8 @@
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Unable to connect to Emaldo API.",
-      "no_devices": "No battery devices found in the specified home."
+      "no_devices": "No battery devices found in the specified home.",
+      "invalid_device": "The specified device ID was not found in the selected home."
     },
     "abort": {
       "already_configured": "This account is already configured.",

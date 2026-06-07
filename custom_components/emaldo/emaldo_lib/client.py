@@ -35,9 +35,14 @@ from .const import (
     DP_HOST,
     SLOT_NO_OVERRIDE,
     get_app_id,
+    get_app_secret,
     get_default_app_version,
 )
-from .crypto import decrypt_response, encrypt_field, make_gmtime
+from .crypto import (
+    decrypt_response_with_secret,
+    encrypt_field_with_secret,
+    make_gmtime,
+)
 from .exceptions import (
     EmaldoAPIError,
     EmaldoAuthError,
@@ -94,9 +99,18 @@ class EmaldoClient:
         self,
         session: dict | None = None,
         *,
+        app_id: str = None,
+        app_secret: str | bytes | None = None,
         app_version: str = None,
     ):
         self._session: dict = session or {}
+        self._app_id = app_id if app_id is not None else get_app_id()
+        resolved_secret = app_secret if app_secret is not None else get_app_secret()
+        self._app_secret = (
+            resolved_secret.encode("utf-8")
+            if isinstance(resolved_secret, str)
+            else resolved_secret
+        )
         self._app_version = app_version if app_version is not None else get_default_app_version()
         self._http = requests.Session()
         # Retry only on transient HTTP errors (502/503/504), not on
@@ -184,21 +198,23 @@ class EmaldoClient:
             EmaldoAPIError: API returned a non-success status.
         """
         base, host = self._get_base_url(path)
-        url = f"{base}{path}{get_app_id()}"
+        url = f"{base}{path}{self._app_id}"
 
         form_data: dict[str, str] = {}
 
         if json_data is not None:
             json_data["gmtime"] = make_gmtime()
             json_str = json.dumps(json_data, separators=(",", ":"))
-            form_data["json"] = encrypt_field(json_str)
+            form_data["json"] = encrypt_field_with_secret(self._app_secret, json_str)
 
         if need_token:
             token = self._session.get("token", "")
             if not token:
                 raise EmaldoAuthError("Not logged in. Call login() first.")
             token_with_ts = f"{token}_{make_gmtime()}"
-            form_data["token"] = encrypt_field(token_with_ts)
+            form_data["token"] = encrypt_field_with_secret(
+                self._app_secret, token_with_ts
+            )
 
         form_data["gm"] = "1"
 
@@ -246,7 +262,9 @@ class EmaldoClient:
         result_hex = resp_json.get("Result", "")
         if result_hex and isinstance(result_hex, str):
             try:
-                decrypted = decrypt_response(result_hex)
+                decrypted = decrypt_response_with_secret(
+                    self._app_secret, result_hex
+                )
                 resp_json["Result"] = json.loads(decrypted)
             except Exception as exc:
                 resp_json["Result"] = f"[Decryption failed: {exc}]"

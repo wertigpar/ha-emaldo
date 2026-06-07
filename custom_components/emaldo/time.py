@@ -15,6 +15,13 @@ from .const import DOMAIN
 from .coordinator import EmaldoCoordinator
 
 
+def _uid_base(coordinator: EmaldoCoordinator) -> str:
+    """Return stable UID base (legacy for primary, device-scoped for fan-out)."""
+    if getattr(coordinator, "_legacy_uid_mode", False):
+        return coordinator.home_id
+    return coordinator.device_id or coordinator.home_id
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -22,12 +29,17 @@ async def async_setup_entry(
 ) -> None:
     """Set up Emaldo time entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    coordinator: EmaldoCoordinator = data["power"]
+    entities: list[TimeEntity] = []
+    for item in data.get("devices") or [data]:
+        coordinator: EmaldoCoordinator = item["power"]
+        entities.extend(
+            [
+                EmaldoEmergencyChargeStart(coordinator),
+                EmaldoEmergencyChargeEnd(coordinator),
+            ]
+        )
 
-    async_add_entities([
-        EmaldoEmergencyChargeStart(coordinator),
-        EmaldoEmergencyChargeEnd(coordinator),
-    ])
+    async_add_entities(entities)
 
 
 class _EmaldoEmergencyChargeTimeBase(
@@ -83,7 +95,7 @@ class EmaldoEmergencyChargeStart(_EmaldoEmergencyChargeTimeBase):
 
     def __init__(self, coordinator: EmaldoCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_emergency_charge_start"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_emergency_charge_start"
 
 
 class EmaldoEmergencyChargeEnd(_EmaldoEmergencyChargeTimeBase):
@@ -104,4 +116,4 @@ class EmaldoEmergencyChargeEnd(_EmaldoEmergencyChargeTimeBase):
 
     def __init__(self, coordinator: EmaldoCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_emergency_charge_end"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_emergency_charge_end"

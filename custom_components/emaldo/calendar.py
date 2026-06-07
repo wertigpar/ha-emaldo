@@ -26,17 +26,26 @@ from .schedule_coordinator import EmaldoScheduleCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 
+def _uid_base(coordinator: EmaldoScheduleCoordinator) -> str:
+    """Return stable UID base (legacy for primary, device-scoped for fan-out)."""
+    if getattr(coordinator, "_legacy_uid_mode", False):
+        return coordinator.home_id
+    return coordinator.device_id or coordinator.home_id
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Emaldo calendar from a config entry."""
-    schedule_coordinator: EmaldoScheduleCoordinator = hass.data[DOMAIN][
-        entry.entry_id
-    ]["schedule"]
+    data = hass.data[DOMAIN][entry.entry_id]
+    entities: list[CalendarEntity] = []
+    for item in data.get("devices") or [data]:
+        schedule_coordinator: EmaldoScheduleCoordinator = item["schedule"]
+        entities.append(EmaldoBatteryScheduleCalendar(schedule_coordinator))
 
-    async_add_entities([EmaldoBatteryScheduleCalendar(schedule_coordinator)])
+    async_add_entities(entities)
 
 
 def _get_tz(data: dict[str, Any]) -> Any:
@@ -166,7 +175,7 @@ class EmaldoBatteryScheduleCalendar(
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.home_id}_battery_schedule"
+        self._attr_unique_id = f"{_uid_base(coordinator)}_battery_schedule"
 
     @property
     def device_info(self) -> DeviceInfo:

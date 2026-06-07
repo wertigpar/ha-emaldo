@@ -51,6 +51,7 @@ SCHEMA_SET_BATTERY_RANGE = vol.Schema(
         vol.Required("smart_pct"): vol.All(int, vol.Range(min=0, max=100)),
         vol.Required("emergency_pct"): vol.All(int, vol.Range(min=0, max=100)),
         vol.Optional("enable", default=True): cv.boolean,
+        vol.Optional("device_id"): cv.string,
     }
 )
 
@@ -65,6 +66,7 @@ SCHEMA_SET_SLOT_RANGE = vol.Schema(
         vol.Optional("low_marker", default=DEFAULT_MARKER_LOW): vol.All(
             int, vol.Range(min=1, max=100)
         ),
+        vol.Optional("device_id"): cv.string,
     }
 )
 
@@ -80,6 +82,7 @@ SCHEMA_APPLY_BULK_SCHEDULE = vol.Schema(
         vol.Optional("low_marker", default=DEFAULT_MARKER_LOW): vol.All(
             int, vol.Range(min=1, max=100)
         ),
+        vol.Optional("device_id"): cv.string,
     }
 )
 
@@ -94,6 +97,7 @@ SCHEMA_SET_EV_SCHEDULE = vol.Schema(
             [vol.All(int, vol.Range(min=0, max=23))],
         ),
         vol.Optional("sync", default=False): cv.boolean,
+        vol.Optional("device_id"): cv.string,
     }
 )
 
@@ -102,6 +106,7 @@ SCHEMA_BACKFILL_SOLAR = vol.Schema(
         vol.Optional("days", default=30): vol.All(
             int, vol.Range(min=1, max=90)
         ),
+        vol.Optional("device_id"): cv.string,
     }
 )
 
@@ -116,6 +121,13 @@ SCHEMA_RESET_TO_INTERNAL = vol.Schema(
         vol.Optional("low_marker", default=DEFAULT_MARKER_LOW): vol.All(
             int, vol.Range(min=1, max=100)
         ),
+        vol.Optional("device_id"): cv.string,
+    }
+)
+
+SCHEMA_REFRESH_SCHEDULE = vol.Schema(
+    {
+        vol.Optional("device_id"): cv.string,
     }
 )
 
@@ -136,13 +148,48 @@ def _time_to_slot(time_val) -> int:
     return (h * 60 + m) // 15
 
 
-def _get_coordinator_and_client(hass: HomeAssistant):
-    """Get the first available schedule coordinator and its client."""
+def _iter_device_sets(entry_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return device coordinator sets for one config entry."""
+    return entry_data.get("devices") or [entry_data]
+
+
+def _get_target_set(
+    hass: HomeAssistant,
+    *,
+    coordinator_key: str,
+    device_id: str | None,
+) -> dict[str, Any]:
+    """Return selected device set or the primary set when device_id is omitted."""
     entries = hass.data.get(DOMAIN, {})
     if not entries:
         raise ValueError("No Emaldo integration configured")
-    entry_data = next(iter(entries.values()))
-    schedule_coord = entry_data["schedule"]
+
+    if not device_id:
+        entry_data = next(iter(entries.values()))
+        return _iter_device_sets(entry_data)[0]
+
+    for entry_data in entries.values():
+        for item in _iter_device_sets(entry_data):
+            coord = item[coordinator_key]
+            if getattr(coord, "device_id", None) == device_id:
+                return item
+
+    raise ValueError(f"No Emaldo device found for device_id={device_id!r}")
+
+
+def _get_coordinator_and_client(
+    hass: HomeAssistant,
+    *,
+    coordinator_key: str = "schedule",
+    device_id: str | None = None,
+):
+    """Get selected coordinator and an authenticated client."""
+    target_set = _get_target_set(
+        hass,
+        coordinator_key=coordinator_key,
+        device_id=device_id,
+    )
+    schedule_coord = target_set[coordinator_key]
     try:
         client = schedule_coord._ensure_client()
     except Exception:
@@ -154,6 +201,7 @@ def _get_coordinator_and_client(hass: HomeAssistant):
 
 async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle the set_slot_range service call."""
+    device_id = call.data.get("device_id")
     start_slot = _time_to_slot(call.data["start_time"])
     end_slot = _time_to_slot(call.data["end_time"])
     action = call.data["action"]
@@ -166,7 +214,9 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
     def _do_override():
         for attempt in range(2):
             try:
-                coord, client = _get_coordinator_and_client(hass)
+                coord, client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id
+                )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
                 current = client.get_overrides(hid, did, model)
@@ -199,15 +249,23 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
     await hass.async_add_executor_job(_do_override)
 
     # Refresh schedule data
-    entries = hass.data.get(DOMAIN, {})
-    for entry_data in entries.values():
-        await entry_data["schedule"].async_request_refresh()
+    if device_id:
+        target_set = _get_target_set(
+            hass, coordinator_key="schedule", device_id=device_id
+        )
+        await target_set["schedule"].async_request_refresh()
+    else:
+        entries = hass.data.get(DOMAIN, {})
+        for entry_data in entries.values():
+            for item in _iter_device_sets(entry_data):
+                await item["schedule"].async_request_refresh()
 
 
 async def async_handle_apply_bulk_schedule(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
     """Handle the apply_bulk_schedule service call."""
+    device_id = call.data.get("device_id")
     slot_values = call.data["slots"]
     high = call.data["high_marker"]
     low = call.data["low_marker"]
@@ -215,7 +273,9 @@ async def async_handle_apply_bulk_schedule(
     def _do_bulk():
         for attempt in range(2):
             try:
-                coord, client = _get_coordinator_and_client(hass)
+                coord, client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id
+                )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
                 ok = client.set_override(
@@ -239,16 +299,23 @@ async def async_handle_apply_bulk_schedule(
     await hass.async_add_executor_job(_do_bulk)
 
     # Refresh schedule data after applying overrides
-    entries = hass.data.get(DOMAIN, {})
-    for entry_data in entries.values():
-        coord = entry_data["schedule"]
-        await coord.async_request_refresh()
+    if device_id:
+        target_set = _get_target_set(
+            hass, coordinator_key="schedule", device_id=device_id
+        )
+        await target_set["schedule"].async_request_refresh()
+    else:
+        entries = hass.data.get(DOMAIN, {})
+        for entry_data in entries.values():
+            for item in _iter_device_sets(entry_data):
+                await item["schedule"].async_request_refresh()
 
 
 async def async_handle_reset_to_internal(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
     """Handle the reset_to_internal service call."""
+    device_id = call.data.get("device_id")
     reset_all = call.data.get("all", False)
     start_time = call.data.get("start_time")
     end_time = call.data.get("end_time")
@@ -261,7 +328,9 @@ async def async_handle_reset_to_internal(
     def _do_reset():
         for attempt in range(2):
             try:
-                coord, client = _get_coordinator_and_client(hass)
+                coord, client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id
+                )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
                 if reset_all:
@@ -303,21 +372,36 @@ async def async_handle_reset_to_internal(
 
     await hass.async_add_executor_job(_do_reset)
 
-    entries = hass.data.get(DOMAIN, {})
-    for entry_data in entries.values():
-        coord = entry_data["schedule"]
-        await coord.async_request_refresh()
+    if device_id:
+        target_set = _get_target_set(
+            hass, coordinator_key="schedule", device_id=device_id
+        )
+        await target_set["schedule"].async_request_refresh()
+    else:
+        entries = hass.data.get(DOMAIN, {})
+        for entry_data in entries.values():
+            for item in _iter_device_sets(entry_data):
+                await item["schedule"].async_request_refresh()
 
 
 async def async_handle_refresh_schedule(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
     """Handle the refresh_schedule service call."""
+    device_id = call.data.get("device_id")
+    if device_id:
+        target_set = _get_target_set(
+            hass, coordinator_key="schedule", device_id=device_id
+        )
+        _LOGGER.info("Manual schedule refresh requested for device_id=%s", device_id)
+        await target_set["schedule"].async_request_refresh()
+        return
+
     entries = hass.data.get(DOMAIN, {})
     for entry_data in entries.values():
-        coord = entry_data["schedule"]
-        _LOGGER.info("Manual schedule refresh requested")
-        await coord.async_request_refresh()
+        for item in _iter_device_sets(entry_data):
+            _LOGGER.info("Manual schedule refresh requested")
+            await item["schedule"].async_request_refresh()
 
 
 async def async_handle_set_ev_schedule(
@@ -338,6 +422,7 @@ async def async_handle_set_ev_schedule(
     weekday_hours = call.data.get("weekdays", [])
     weekend_hours = call.data.get("weekend", [])
     sync = call.data.get("sync", False)
+    device_id = call.data.get("device_id")
 
     weekdays = [0] * 24
     for h in weekday_hours:
@@ -347,14 +432,11 @@ async def async_handle_set_ev_schedule(
         weekend[h] = 1
 
     def _do_set():
-        entries = hass.data.get(DOMAIN, {})
-        if not entries:
-            raise ValueError("No Emaldo integration configured")
-        entry_data = next(iter(entries.values()))
-        power_coord = entry_data["power"]
+        power_coord, client = _get_coordinator_and_client(
+            hass, coordinator_key="power", device_id=device_id
+        )
         for attempt in range(2):
             try:
-                client = power_coord._ensure_client()  # noqa: SLF001
                 creds = client.e2e_login(
                     power_coord.home_id,
                     power_coord._device_id,  # noqa: SLF001
@@ -367,7 +449,7 @@ async def async_handle_set_ev_schedule(
             except EmaldoAuthError:
                 if attempt == 0:
                     _LOGGER.debug("Session expired, re-authenticating")
-                    power_coord._client = None  # noqa: SLF001
+                    power_coord._reset_client()  # noqa: SLF001
                 else:
                     raise
 
@@ -382,9 +464,16 @@ async def async_handle_set_ev_schedule(
 
     # Refresh the slow coordinator so the new schedule is reflected in
     # the select / number / sensor entities.
-    entries = hass.data.get(DOMAIN, {})
-    for entry_data in entries.values():
-        await entry_data["power"].async_request_refresh()
+    if device_id:
+        target_set = _get_target_set(
+            hass, coordinator_key="power", device_id=device_id
+        )
+        await target_set["power"].async_request_refresh()
+    else:
+        entries = hass.data.get(DOMAIN, {})
+        for entry_data in entries.values():
+            for item in _iter_device_sets(entry_data):
+                await item["power"].async_request_refresh()
 
 
 async def async_handle_backfill_solar(
@@ -407,6 +496,7 @@ async def async_handle_backfill_solar(
     from homeassistant.components.recorder import get_instance
 
     days = call.data.get("days", 30)
+    device_id = call.data.get("device_id")
     statistic_id = f"{DOMAIN}:solar_energy_backfill"
 
     # Find cutoff: earliest date the live solar_energy_today sensor
@@ -462,11 +552,9 @@ async def async_handle_backfill_solar(
         )
 
     # Get client
-    entries = hass.data.get(DOMAIN, {})
-    if not entries:
-        raise ValueError("No Emaldo integration configured")
-    entry_data = next(iter(entries.values()))
-    power_coord = entry_data["power"]
+    power_coord, _ = _get_coordinator_and_client(
+        hass, coordinator_key="power", device_id=device_id
+    )
 
     today = datetime.now().date()
 
@@ -587,13 +675,16 @@ async def async_handle_set_battery_range(
     smart = call.data["smart_pct"]
     emergency = call.data["emergency_pct"]
     enable = call.data.get("enable", True)
+    device_id = call.data.get("device_id")
     if smart < emergency:
         raise vol.Invalid("smart_pct must be >= emergency_pct")
 
     def _do_write():
         for attempt in range(2):
             try:
-                coord, client = _get_coordinator_and_client(hass)
+                coord, client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id
+                )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
                 ok = client.set_battery_range(
                     hid, did, model,
@@ -614,10 +705,16 @@ async def async_handle_set_battery_range(
 
     await hass.async_add_executor_job(_do_write)
 
-    entries = hass.data.get(DOMAIN, {})
-    for entry_data in entries.values():
-        coord = entry_data["schedule"]
-        await coord.async_request_refresh()
+    if device_id:
+        target_set = _get_target_set(
+            hass, coordinator_key="schedule", device_id=device_id
+        )
+        await target_set["schedule"].async_request_refresh()
+    else:
+        entries = hass.data.get(DOMAIN, {})
+        for entry_data in entries.values():
+            for item in _iter_device_sets(entry_data):
+                await item["schedule"].async_request_refresh()
 
 
 def async_register_services(hass: HomeAssistant) -> None:
@@ -668,6 +765,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_REFRESH_SCHEDULE,
         handle_refresh_schedule,
+        schema=SCHEMA_REFRESH_SCHEDULE,
     )
     hass.services.async_register(
         DOMAIN,
