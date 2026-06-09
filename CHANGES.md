@@ -1,5 +1,15 @@
 # Changes
 
+## 1.0.0-beta10b
+
+### Fixed
+- **Dual config-entry setups (two batteries, same account):** the primary
+  coordinator no longer unconditionally forces legacy `home_id`-based unique
+  IDs. Legacy mode is now detected per config entry by checking whether
+  `{home_id}_battery_soc` already exists in that entry's entity registry, so
+  two entries sharing the same `home_id` no longer generate identical unique
+  IDs that leave one battery's entities unavailable (#26).
+
 ## 1.0.0-beta10
 
 ### Fixed
