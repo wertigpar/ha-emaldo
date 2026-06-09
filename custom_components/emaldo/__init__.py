@@ -5,6 +5,7 @@ from __future__ import annotations
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     DOMAIN,
@@ -81,10 +82,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         coordinator_sets: list[dict[str, object]] = []
 
+        # Detect whether this config entry was originally set up with the legacy
+        # home_id-based unique ID scheme. Multiple config entries can share the
+        # same home_id (e.g. two batteries on one account), so legacy mode must
+        # be scoped to the entry's own entity registry — not assumed True.
+        ent_reg = er.async_get(hass)
+        home_id = entry.data[CONF_HOME_ID]
+        existing_uids = {
+            e.unique_id
+            for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+        }
+        has_legacy_uids = f"{home_id}_battery_soc" in existing_uids
+
         for i, device in enumerate(devices_to_setup):
             if i == 0:
                 power = power_coordinator
-                setattr(power, "_legacy_uid_mode", True)
+                setattr(power, "_legacy_uid_mode", has_legacy_uids)
             else:
                 power = EmaldoCoordinator(
                     hass,
