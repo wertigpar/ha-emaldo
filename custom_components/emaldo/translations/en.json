@@ -83,7 +83,21 @@
       "active_mode": { "name": "Active mode" },
       "schedule_chart": { "name": "Schedule chart" },
       "balancing_state": { "name": "Balancing state" },
-      "realtime_connection": { "name": "Realtime connection" }
+      "realtime_connection": { "name": "Realtime connection" },
+      "total_energy": { "name": "Total energy" },
+      "battery_module_model": { "name": "Battery Module {module} Model" },
+      "battery_module_soc": { "name": "Battery Module {module} SoC" },
+      "battery_module_current": { "name": "Battery Module {module} Current" },
+      "battery_module_health": { "name": "Battery Module {module} Health" },
+      "battery_module_cycles": { "name": "Battery Module {module} Cycles" },
+      "battery_module_stored_energy": { "name": "Battery Module {module} Stored energy" },
+      "battery_module_max_capacity": { "name": "Battery Module {module} Maximum capacity" },
+      "battery_module_temperature": { "name": "Battery Module {module} Temperature" },
+      "battery_module_cell_a_temp": { "name": "Battery Module {module} Cell A temperature" },
+      "battery_module_cell_b_temp": { "name": "Battery Module {module} Cell B temperature" },
+      "battery_module_nominal_capacity": { "name": "Battery Module {module} Nominal capacity" },
+      "battery_module_voltage": { "name": "Battery Module {module} Voltage" },
+      "battery_module_serial": { "name": "Battery Module {module} Serial" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Third-party PV" },

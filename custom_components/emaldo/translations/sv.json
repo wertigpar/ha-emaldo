@@ -80,7 +80,21 @@
       "active_mode": { "name": "Aktivt läge" },
       "schedule_chart": { "name": "Schemadiagram" },
       "balancing_state": { "name": "Frekvensreglering" },
-      "realtime_connection": { "name": "Realtidsanslutning" }
+      "realtime_connection": { "name": "Realtidsanslutning" },
+      "total_energy": { "name": "Total energi" },
+      "battery_module_model": { "name": "Batterimodul {module} Modell" },
+      "battery_module_soc": { "name": "Batterimodul {module} SoC" },
+      "battery_module_current": { "name": "Batterimodul {module} Ström" },
+      "battery_module_health": { "name": "Batterimodul {module} Hälsa" },
+      "battery_module_cycles": { "name": "Batterimodul {module} Cykler" },
+      "battery_module_stored_energy": { "name": "Batterimodul {module} Lagrad energi" },
+      "battery_module_max_capacity": { "name": "Batterimodul {module} Maximal kapacitet" },
+      "battery_module_temperature": { "name": "Batterimodul {module} Temperatur" },
+      "battery_module_cell_a_temp": { "name": "Batterimodul {module} Cell A temperatur" },
+      "battery_module_cell_b_temp": { "name": "Batterimodul {module} Cell B temperatur" },
+      "battery_module_nominal_capacity": { "name": "Batterimodul {module} Nominell kapacitet" },
+      "battery_module_voltage": { "name": "Batterimodul {module} Spänning" },
+      "battery_module_serial": { "name": "Batterimodul {module} Serienummer" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Tredjeparts solpanel" },

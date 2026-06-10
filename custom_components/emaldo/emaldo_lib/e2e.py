@@ -432,8 +432,8 @@ def parse_battery_data(payload: bytes) -> dict | None:
     10-13   4     current_ma                 LE int32 signed milliamps
                                              (negative = discharging)
     14-15   2     soc                        LE uint16 percent
-    16-17   2     current_energy_wh          LE uint16 Wh
-    18-19   2     full_energy_wh             LE uint16 Wh
+    16-17   2     current_energy_wh_raw      LE uint16 in 0.5 Wh ticks
+    18-19   2     full_energy_wh_raw         LE uint16 in 0.5 Wh ticks
     20-21   2     cycle_count                LE uint16
     22-23   2     soh                        LE uint16 percent
     24      1     id_info_len                length N₁ (usually 0)
@@ -466,8 +466,11 @@ def parse_battery_data(payload: bytes) -> dict | None:
     voltage_mv = struct.unpack_from("<H", payload, 8)[0]
     current_ma = struct.unpack_from("<i", payload, 10)[0]
     soc = struct.unpack_from("<H", payload, 14)[0]
-    current_energy_wh = struct.unpack_from("<H", payload, 16)[0]
-    full_energy_wh = struct.unpack_from("<H", payload, 18)[0]
+    # Battery energy fields are encoded in 0.5 Wh ticks.
+    current_energy_raw = struct.unpack_from("<H", payload, 16)[0]
+    full_energy_raw = struct.unpack_from("<H", payload, 18)[0]
+    current_energy_wh = int(round(current_energy_raw * 0.5))
+    full_energy_wh = int(round(full_energy_raw * 0.5))
     cycle_count = struct.unpack_from("<H", payload, 20)[0]
     soh = struct.unpack_from("<H", payload, 22)[0]
 
