@@ -16,6 +16,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
+    UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
@@ -466,6 +467,7 @@ async def async_setup_entry(
         # Diagnostic: realtime connection status
         entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
         entities.append(EmaldoBalancingStateSensor(realtime_coordinator))
+        entities.append(EmaldoBatteryTotalEnergySensor(realtime_coordinator))
 
         entities.append(EmaldoPlanSourceSensor(schedule_coordinator))
         entities.append(EmaldoActiveModeSensor(schedule_coordinator))
@@ -488,7 +490,7 @@ async def async_setup_entry(
                 if not serial or serial in registered:
                     continue
                 registered.add(serial)
-                for metric in ("soc", "soh", "bms_temp_c", "voltage_v", "serial"):
+                for metric in _BATTERY_MODULE_METRIC_CONFIG:
                     new_entities.append(
                         EmaldoBatteryModuleSensor(realtime, serial, num, metric)
                     )
@@ -941,6 +943,101 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
         }
 
 
+# Per-module battery metric definitions: translation_key, unit, device_class,
+# state_class, icon, and diagnostic flag. Drives both entity creation and the
+# displayed order. Insertion order defines the on-screen sensor order.
+_BATTERY_MODULE_METRIC_CONFIG: dict[str, dict[str, Any]] = {
+    "model": {
+        "translation_key": "battery_module_model",
+        "icon": "mdi:information-outline",
+        "diagnostic": True,
+    },
+    "soc": {
+        "translation_key": "battery_module_soc",
+        "unit": PERCENTAGE,
+        "device_class": SensorDeviceClass.BATTERY,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "icon": "mdi:battery",
+    },
+    "current_a": {
+        "translation_key": "battery_module_current",
+        "unit": UnitOfElectricCurrent.AMPERE,
+        "device_class": SensorDeviceClass.CURRENT,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
+    },
+    "soh": {
+        "translation_key": "battery_module_health",
+        "unit": PERCENTAGE,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "icon": "mdi:battery-heart",
+        "diagnostic": True,
+    },
+    "cycle_count": {
+        "translation_key": "battery_module_cycles",
+        "state_class": SensorStateClass.TOTAL_INCREASING,
+        "icon": "mdi:counter",
+        "diagnostic": True,
+    },
+    "current_energy_wh": {
+        "translation_key": "battery_module_stored_energy",
+        "unit": UnitOfEnergy.WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY_STORAGE,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
+    },
+    "full_energy_wh": {
+        "translation_key": "battery_module_max_capacity",
+        "unit": UnitOfEnergy.WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY_STORAGE,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
+    },
+    "bms_temp_c": {
+        "translation_key": "battery_module_temperature",
+        "unit": UnitOfTemperature.CELSIUS,
+        "device_class": SensorDeviceClass.TEMPERATURE,
+        "state_class": SensorStateClass.MEASUREMENT,
+    },
+    "electrode_a_temp_c": {
+        "translation_key": "battery_module_cell_a_temp",
+        "unit": UnitOfTemperature.CELSIUS,
+        "device_class": SensorDeviceClass.TEMPERATURE,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
+    },
+    "electrode_b_temp_c": {
+        "translation_key": "battery_module_cell_b_temp",
+        "unit": UnitOfTemperature.CELSIUS,
+        "device_class": SensorDeviceClass.TEMPERATURE,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
+    },
+    "capacity": {
+        "translation_key": "battery_module_nominal_capacity",
+        "unit": UnitOfEnergy.WATT_HOUR,
+        "device_class": SensorDeviceClass.ENERGY_STORAGE,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
+    },
+    "voltage_v": {
+        "translation_key": "battery_module_voltage",
+        "unit": UnitOfElectricPotential.VOLT,
+        "device_class": SensorDeviceClass.VOLTAGE,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
+    },
+    "serial": {
+        "translation_key": "battery_module_serial",
+        "icon": "mdi:identifier",
+        "diagnostic": True,
+    },
+}
+
+# Metrics whose decoded value is a string rather than a number.
+_BATTERY_MODULE_STRING_METRICS = {"model", "serial"}
+
+
 class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity):
     """A sensor for one metric of one physical battery module."""
 
@@ -958,33 +1055,19 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
         self._serial = serial
         self._metric = metric
         self._attr_unique_id = f"{_uid_base(coordinator)}_module_{serial}_{metric}"
+        self._attr_translation_placeholders = {"module": str(module_num)}
 
-        if metric == "soc":
-            self._attr_name = f"Battery Module {module_num} SoC"
-            self._attr_native_unit_of_measurement = PERCENTAGE
-            self._attr_device_class = SensorDeviceClass.BATTERY
-            self._attr_state_class = SensorStateClass.MEASUREMENT
-            self._attr_icon = "mdi:battery"
-        elif metric == "soh":
-            self._attr_name = f"Battery Module {module_num} Health"
-            self._attr_native_unit_of_measurement = PERCENTAGE
-            self._attr_state_class = SensorStateClass.MEASUREMENT
-            self._attr_icon = "mdi:battery-heart"
-            self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        elif metric == "bms_temp_c":
-            self._attr_name = f"Battery Module {module_num} Temperature"
-            self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-            self._attr_device_class = SensorDeviceClass.TEMPERATURE
-            self._attr_state_class = SensorStateClass.MEASUREMENT
-        elif metric == "voltage_v":
-            self._attr_name = f"Battery Module {module_num} Voltage"
-            self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
-            self._attr_device_class = SensorDeviceClass.VOLTAGE
-            self._attr_state_class = SensorStateClass.MEASUREMENT
-            self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        elif metric == "serial":
-            self._attr_name = f"Battery Module {module_num} Serial"
-            self._attr_icon = "mdi:identifier"
+        cfg = _BATTERY_MODULE_METRIC_CONFIG[metric]
+        self._attr_translation_key = cfg["translation_key"]
+        if "unit" in cfg:
+            self._attr_native_unit_of_measurement = cfg["unit"]
+        if "device_class" in cfg:
+            self._attr_device_class = cfg["device_class"]
+        if "state_class" in cfg:
+            self._attr_state_class = cfg["state_class"]
+        if "icon" in cfg:
+            self._attr_icon = cfg["icon"]
+        if cfg.get("diagnostic"):
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
@@ -1007,7 +1090,11 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
                 if self._metric == "serial":
                     return self._serial or None
                 val = m.get(self._metric)
-                return float(val) if val is not None else None
+                if val is None:
+                    return None
+                if self._metric in _BATTERY_MODULE_STRING_METRICS:
+                    return str(val) or None
+                return float(val)
         return None
 
     @property
@@ -1022,4 +1109,63 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
                     attrs["battery_soc"] = int(soc)
                 return attrs
         return {"serial_number": self._serial}
+
+
+class EmaldoBatteryTotalEnergySensor(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity
+):
+    """Total energy currently stored across all battery modules.
+
+    Sums each module's stored energy (``current_energy_wh``) to mirror the
+    CLI ``battery-detail`` "Total Energy" summary line. The combined maximum
+    capacity is exposed as an attribute.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "total_energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY_STORAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-high"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialize the total energy sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{_uid_base(coordinator)}_total_energy"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the summed stored energy (Wh) across all modules."""
+        modules = (self.coordinator.data or {}).get("battery_modules") or []
+        total = 0
+        found = False
+        for m in modules:
+            val = m.get("current_energy_wh")
+            if val is not None:
+                total += val
+                found = True
+        return total if found else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose the combined maximum capacity and module count."""
+        modules = (self.coordinator.data or {}).get("battery_modules") or []
+        if not modules:
+            return None
+        max_capacity = sum(m.get("full_energy_wh") or 0 for m in modules)
+        return {
+            "maximum_capacity_wh": max_capacity,
+            "module_count": len(modules),
+        }
 

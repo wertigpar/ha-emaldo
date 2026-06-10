@@ -80,7 +80,21 @@
       "active_mode": { "name": "Aktiivinen tila" },
       "schedule_chart": { "name": "Aikataulukaavio" },
       "balancing_state": { "name": "Taajuussäätötila" },
-      "realtime_connection": { "name": "Reaaliaikayhteys" }
+      "realtime_connection": { "name": "Reaaliaikayhteys" },
+      "total_energy": { "name": "Kokonaisenergia" },
+      "battery_module_model": { "name": "Akkumoduuli {module} Malli" },
+      "battery_module_soc": { "name": "Akkumoduuli {module} SoC" },
+      "battery_module_current": { "name": "Akkumoduuli {module} Virta" },
+      "battery_module_health": { "name": "Akkumoduuli {module} Kunto" },
+      "battery_module_cycles": { "name": "Akkumoduuli {module} Syklit" },
+      "battery_module_stored_energy": { "name": "Akkumoduuli {module} Varastoitu energia" },
+      "battery_module_max_capacity": { "name": "Akkumoduuli {module} Enimmäiskapasiteetti" },
+      "battery_module_temperature": { "name": "Akkumoduuli {module} Lämpötila" },
+      "battery_module_cell_a_temp": { "name": "Akkumoduuli {module} Kenno A lämpötila" },
+      "battery_module_cell_b_temp": { "name": "Akkumoduuli {module} Kenno B lämpötila" },
+      "battery_module_nominal_capacity": { "name": "Akkumoduuli {module} Nimelliskapasiteetti" },
+      "battery_module_voltage": { "name": "Akkumoduuli {module} Jännite" },
+      "battery_module_serial": { "name": "Akkumoduuli {module} Sarjanumero" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Kolmannen osapuolen aurinkopaneeli" },

@@ -5,3 +5,4 @@ __pycache__/
 *.log
 TODO.md
 tests/
+*Zone.Identifier

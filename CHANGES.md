@@ -1,5 +1,24 @@
 # Changes
 
+## 1.0.0-beta11
+
+### Added
+- **Total Energy sensor:** new realtime sensor summing the stored energy of
+  all battery modules (mirrors the CLI `battery-detail` "Total Energy" line),
+  with combined maximum capacity exposed as an attribute.
+- **Expanded battery cell diagnostics:** per-module sensors now also cover
+  Model, Current, Cycles, Stored Energy, Maximum Capacity, Cell A/Cell B
+  temperatures and Nominal Capacity, in addition to the existing SoC, SoH,
+  Temperature, Voltage and Serial.
+
+### Fixed
+- **Battery energy scaling:** module stored energy and maximum capacity are now
+  decoded from 0.5 Wh ticks, correcting previously halved Wh readings.
+
+### Changed
+- Translations updated (en, da, fi, nb, sv) for the new Total Energy and battery
+  module diagnostic sensors.
+
 ## 1.0.0-beta10b
 
 ### Fixed
