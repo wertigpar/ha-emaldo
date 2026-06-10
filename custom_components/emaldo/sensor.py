@@ -166,18 +166,21 @@ def _solar_string_energy_today(data: dict[str, Any], column: int) -> float | Non
 
 
 def _solar_energy_today(data: dict[str, Any]) -> float | None:
-    """Total solar energy produced today (sum of the MPPT string columns).
+    """Total solar energy produced today (kWh).
 
-    The mppt-v2 series carries the three per-string columns *and* a
-    pre-summed total column plus a state column. Summing only the per-string
-    columns (1-3) yields the true production without double-counting the
-    total/state columns.
+    The mppt-v2 row layout is ``[minute_offset, string1_W, string2_W,
+    string3_W, pv_total_W, state]``. The device reports the true total in the
+    pre-summed ``pv_total_W`` column (index 4); models without internal MPPT
+    (everything except Power Core) leave the per-string columns at zero but
+    still populate this total. We therefore read column 4 — falling back to
+    column 1 for legacy single-channel rows — to mirror the CLI ``solar``
+    command instead of summing the (often-zero) per-string columns (#29).
     """
     entries = _solar_series_entries(data)
     if not entries:
         return None
     total = sum(
-        sum(e[c] for c in _MPPT_STRING_COLUMNS if len(e) > c)
+        (e[4] if len(e) >= 5 else (e[1] if len(e) >= 2 else 0))
         for e in entries
     )
     return round(total * 5 / 60 / 1000, 3)
@@ -299,7 +302,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         translation_key="battery_charged_today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_battery_charged_today,
     ),
     EmaldoSensorEntityDescription(
@@ -307,7 +310,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         translation_key="battery_discharged_today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_battery_discharged_today,
     ),
     EmaldoSensorEntityDescription(
@@ -316,7 +319,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:solar-power",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_solar_energy_today,
     ),
     EmaldoSensorEntityDescription(
@@ -325,7 +328,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:transmission-tower-import",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_grid_import_today,
     ),
     EmaldoSensorEntityDescription(
@@ -334,7 +337,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:transmission-tower-export",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_grid_export_today,
     ),
     EmaldoSensorEntityDescription(
@@ -343,7 +346,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         icon="mdi:home-lightning-bolt",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_load_energy_today,
     ),
 )
@@ -357,7 +360,7 @@ PV_STRING_ENERGY_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = tuple
         icon="mdi:solar-power-variant",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=(lambda d, col=col: _solar_string_energy_today(d, col)),
     )
     for n, col in enumerate(_MPPT_STRING_COLUMNS, start=1)
