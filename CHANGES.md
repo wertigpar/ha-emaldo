@@ -1,5 +1,32 @@
 # Changes
 
+## 1.0.0-beta11c
+
+### Changed
+- **Daily energy sensors now use `total_increasing` state class:**
+  `battery_charged_today`, `battery_discharged_today`, `solar_energy_today`
+  (and per-string), `grid_import_today`, `grid_export_today` and
+  `load_energy_today` switched from `total` (with `last_reset` at local
+  midnight) to `total_increasing`. This is the recommended Home Assistant
+  contract for meters that climb during the day and reset to zero, and it lets
+  downstream cost integrations (e.g. Dynamic Energy Cost) natively ignore the
+  midnight reset instead of registering a large negative delta (#31).
+  - For a non-resetting lifetime total, use Home Assistant's built-in
+    **Utility Meter** helper pointed at the relevant daily sensor with the
+    reset cycle set to "No reset".
+  - Note: Home Assistant may show a one-time "state class changed" repair
+    notice for these entities after upgrading; this is expected.
+
+## 1.0.0-beta11b
+
+### Fixed
+- **Solar energy today on non-Power-Core models:** the `Solar energy today`
+  sensor now reads the device's pre-summed `pv_total_W` column (falling back
+  to the legacy single-channel column) instead of summing the per-string MPPT
+  columns. Models without internal MPPT leave the per-string columns at zero,
+  which previously made the sensor report `0.00 kWh`; it now matches the CLI
+  `solar` command's "Total" value (#29).
+
 ## 1.0.0-beta11
 
 ### Added
