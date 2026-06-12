@@ -1,5 +1,21 @@
 # Changes
 
+## 1.0.0-beta11d
+
+### Fixed
+- **Daily energy sensors reverted to `total` state class with midnight reset:**
+  `battery_charged_today`, `battery_discharged_today`, `solar_energy_today`
+  (and per-string), `grid_import_today`, `grid_export_today` and
+  `load_energy_today` switched back from `total_increasing` to `total` with
+  `last_reset` set to local midnight. The Emaldo API recomputes today's energy
+  totals from scratch on every poll (summing 5-minute power rows), so minor
+  rounding-boundary fluctuations (e.g. 7.80 → 7.79 kWh) caused HA recorder
+  warnings about the `total_increasing` contract being violated. Using `total`
+  with a `last_reset` attribute is the semantically correct class for
+  daily-reset derived accumulators and suppresses these warnings (#32).
+  - Note: Home Assistant may show a one-time "state class changed" repair
+    notice for these entities after upgrading; this is expected.
+
 ## 1.0.0-beta11c
 
 ### Changed
