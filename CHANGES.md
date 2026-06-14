@@ -1,5 +1,22 @@
 # Changes
 
+## 1.0.0-beta11e
+
+### Fixed
+- **Solar energy today now combines all solar sources:** `solar_energy_today`
+  now sums internal MPPT string channels (1-3) plus the third-party PV channel
+  when available. This makes totals correct for internal-only, external-only,
+  and mixed installations (#35).
+- **Backfill solar aggregation aligned with live sensor semantics:**
+  `backfill_solar` now uses explicit solar columns (string1+string2+string3+
+  third-party) instead of summing all row columns, avoiding accidental
+  double-counting or inclusion of non-power columns.
+
+### Added
+- **Third-party solar energy today sensor:** new
+  `thirdparty_solar_energy_today` daily kWh sensor exposing only external PV
+  contribution from the mppt-v2 series.
+
 ## 1.0.0-beta11d
 
 ### Fixed

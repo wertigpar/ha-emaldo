@@ -132,6 +132,21 @@ SCHEMA_REFRESH_SCHEDULE = vol.Schema(
 )
 
 
+def _solar_row_total_w(entry: list[Any]) -> float:
+        """Return total solar power (W) for one mppt-v2 row.
+
+        Expected modern shape:
+            [minute_offset, string1_W, string2_W, string3_W, third_party_W, state]
+        Legacy fallback:
+            [minute_offset, total_or_single_channel_W]
+        """
+        if len(entry) >= 5:
+                return entry[1] + entry[2] + entry[3] + entry[4]
+        if len(entry) >= 2:
+                return entry[1]
+        return 0
+
+
 def _time_to_slot(time_val) -> int:
     """Convert time to slot index (0-95). Accepts HH:MM string or datetime.time."""
     import datetime
@@ -584,7 +599,7 @@ async def async_handle_backfill_solar(
                         "start_time": start_time,
                         "timezone": tz_name,
                     }
-                    total_w = sum(sum(e[1:]) for e in data)
+                    total_w = sum(_solar_row_total_w(e) for e in data)
                     kwh = total_w * 5 / 60 / 1000
                     _LOGGER.info(
                         "Backfill solar: %s (offset=%d), %d pts, %.1f kWh",
@@ -617,7 +632,7 @@ async def async_handle_backfill_solar(
         hourly_wh: dict[int, float] = {}
         for entry in day_entries:
             minute_offset = entry[0]
-            total_w = sum(entry[1:])
+            total_w = _solar_row_total_w(entry)
             wh = total_w * 5 / 60  # 5-min interval → Wh
             hour = minute_offset // 60
             hourly_wh[hour] = hourly_wh.get(hour, 0) + wh
