@@ -80,7 +80,8 @@ Mixed source: slow REST polling (daily totals) and fast E2E polling (realtime po
 | **Battery capacity** | kWh | Total battery capacity |
 | **Battery charged today** | kWh | Energy charged today (cumulative) |
 | **Battery discharged today** | kWh | Energy discharged today (cumulative) |
-| **Solar energy today** | kWh | Total solar production today |
+| **Solar energy today** | kWh | Total solar production today (internal strings + third-party PV) |
+| **Third-party solar energy today** | kWh | Third-party/external PV production today |
 | **Grid import today** | kWh | Total imported energy today |
 | **Grid export today** | kWh | Total exported energy today |
 | **Load energy today** | kWh | Total household consumption today |

@@ -65,6 +65,7 @@
       "battery_charged_today": { "name": "Batteri laddat idag" },
       "battery_discharged_today": { "name": "Batteri urladdat idag" },
       "solar_energy_today": { "name": "Solenergi idag" },
+      "thirdparty_solar_energy_today": { "name": "Tredjeparts solenergi idag" },
       "solar_string_1_energy_today": { "name": "Solsträng 1 energi idag" },
       "solar_string_2_energy_today": { "name": "Solsträng 2 energi idag" },
       "solar_string_3_energy_today": { "name": "Solsträng 3 energi idag" },

@@ -165,24 +165,45 @@ def _solar_string_energy_today(data: dict[str, Any], column: int) -> float | Non
     return round(total * 5 / 60 / 1000, 3)
 
 
+def _solar_row_components_w(entry: list[Any]) -> tuple[float, float]:
+        """Return (total_w, third_party_w) for one mppt-v2 row.
+
+        Expected modern row shape:
+            [minute_offset, string1_W, string2_W, string3_W, third_party_W, state]
+
+        Legacy fallback row shape:
+            [minute_offset, total_or_single_channel_W]
+        """
+        if len(entry) >= 5:
+                string_total = sum(entry[col] for col in _MPPT_STRING_COLUMNS if len(entry) > col)
+                third_party = entry[4]
+                return string_total + third_party, third_party
+        if len(entry) >= 2:
+                return entry[1], 0
+        return 0, 0
+
+
 def _solar_energy_today(data: dict[str, Any]) -> float | None:
     """Total solar energy produced today (kWh).
 
-    The mppt-v2 row layout is ``[minute_offset, string1_W, string2_W,
-    string3_W, pv_total_W, state]``. The device reports the true total in the
-    pre-summed ``pv_total_W`` column (index 4); models without internal MPPT
-    (everything except Power Core) leave the per-string columns at zero but
-    still populate this total. We therefore read column 4 — falling back to
-    column 1 for legacy single-channel rows — to mirror the CLI ``solar``
-    command instead of summing the (often-zero) per-string columns (#29).
+    The mppt-v2 payload can include both integrated MPPT strings and external
+    third-party PV input. For the true total we sum string1+string2+string3
+    plus third-party column 4, with a legacy fallback to column 1 on older
+    single-channel rows.
     """
     entries = _solar_series_entries(data)
     if not entries:
         return None
-    total = sum(
-        (e[4] if len(e) >= 5 else (e[1] if len(e) >= 2 else 0))
-        for e in entries
-    )
+    total = sum(_solar_row_components_w(e)[0] for e in entries)
+    return round(total * 5 / 60 / 1000, 3)
+
+
+def _thirdparty_solar_energy_today(data: dict[str, Any]) -> float | None:
+    """Third-party-only solar energy produced today (kWh)."""
+    entries = _solar_series_entries(data)
+    if not entries:
+        return None
+    total = sum(_solar_row_components_w(e)[1] for e in entries)
     return round(total * 5 / 60 / 1000, 3)
 
 
@@ -321,6 +342,15 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL,
         value_fn=_solar_energy_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="thirdparty_solar_energy_today",
+        translation_key="thirdparty_solar_energy_today",
+        icon="mdi:solar-power-variant",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_thirdparty_solar_energy_today,
     ),
     EmaldoSensorEntityDescription(
         key="grid_import_today",

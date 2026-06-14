@@ -68,6 +68,7 @@
       "battery_charged_today": { "name": "Battery charged today" },
       "battery_discharged_today": { "name": "Battery discharged today" },
       "solar_energy_today": { "name": "Solar energy today" },
+      "thirdparty_solar_energy_today": { "name": "Third-party solar energy today" },
       "solar_string_1_energy_today": { "name": "Solar string 1 energy today" },
       "solar_string_2_energy_today": { "name": "Solar string 2 energy today" },
       "solar_string_3_energy_today": { "name": "Solar string 3 energy today" },
