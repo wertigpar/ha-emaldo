@@ -1,5 +1,16 @@
 # Changes
 
+## 1.0.0-beta11f
+
+### Fixed
+- **Realtime sanity check no longer blocks valid power-flow updates on
+  single-inverter systems:** coordinator-side payload rejection now validates
+  only realtime channels that are actually consumed by Home Assistant entities
+  (`battery_w`, `solar_w`, `grid_w`, `dual_power_w`, `ev_w`). Unused/raw
+  channels (`ip2_w`, `op2_w`, `addition_load_w`, `other_load_w`) remain
+  available for diagnostics but no longer freeze all realtime sensors when
+  they contain outlier values (#38).
+
 ## 1.0.0-beta11e
 
 ### Fixed
