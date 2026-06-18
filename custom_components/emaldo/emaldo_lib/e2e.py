@@ -824,15 +824,10 @@ def read_battery_info(
 ) -> list[dict]:
     """Read battery cell info via E2E request (type 0x06).
 
-    Performs the full session flow (alive → heartbeat) then probes slots
-    in a tiered fashion that mirrors the physical cabinet layout:
-
-    * Tier 1 (indices 0-2):  base cabinet — always scanned fully.
-    * Tier 2 (indices 3-7):  extension cabinet 1 — only if tier 1 is full.
-    * Tier 3 (indices 8-12): extension cabinet 2 — only if tier 2 is full.
-
-    Empty slots (short/no reply) within a tier do not cause early exit;
-    only consecutive *timeouts* abort the scan (each timeout is expensive).
+    Performs the full session flow (alive → heartbeat) then probes all known
+    cabinet slot indices. Empty slots return short replies cheaply, so they do
+    not stop discovery; only consecutive *timeouts* abort the scan because
+    each timeout costs the full socket timeout period.
 
     Returns:
         List of battery-info dicts (one per module), possibly empty.
@@ -887,16 +882,10 @@ def read_battery_info(
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
 
-        # Tiered cabinet scan:
-        #   Tier 1 — first cabinet:   always scan all 3 slots (indices 0-2)
-        #   Tier 2 — ext. cabinet 1:  scan 5 slots (3-7) only if tier 1 was full
-        #   Tier 3 — ext. cabinet 2:  scan 5 slots (8-12) only if tier 2 was full
-        #
-        # Within each tier every slot is always probed — short/empty responses
-        # are cheap (device replies instantly) so an empty slot 0 must not
-        # prevent discovering a battery in slot 1 or 2.
-        # Only consecutive *timeouts* (no response at all) abort the scan
-        # early, because each timeout costs the full socket timeout period.
+        # Scan all known cabinet indices. HP5000 systems can report empty slots
+        # at low indices while valid modules live later in the range, so short
+        # empty replies must not stop discovery. True timeouts are still used
+        # as the expensive failure signal and abort after two in a row.
         TIERS = [(0, 3), (3, 5), (8, 5)]
 
         for tier_start, tier_size in TIERS:
@@ -940,11 +929,6 @@ def read_battery_info(
                     seen_serials.add(info["serial"])
                     batteries.append(info)
                     found_in_tier += 1
-
-            # Only continue to the next tier (extension cabinet) if the
-            # current tier was completely full — a gap means no extension.
-            if found_in_tier < tier_size:
-                break
 
         return batteries
     finally:
@@ -3163,14 +3147,9 @@ class PersistentE2ESession:
     def read_battery_info(self) -> list[dict]:
         """Read per-module battery info (type 0x06) over the existing session.
 
-        Probes slots in a tiered fashion matching the physical cabinet layout:
-
-        * Tier 1 (indices 0-2):  base cabinet — always scanned fully.
-        * Tier 2 (indices 3-7):  extension cabinet 1 — only if tier 1 is full.
-        * Tier 3 (indices 8-12): extension cabinet 2 — only if tier 2 is full.
-
-        Empty slots (short reply) within a tier do not cause early exit;
-        only consecutive *timeouts* abort the scan.
+        Probes all known cabinet slot indices. Empty slots return short replies
+        cheaply, so they do not stop discovery; only consecutive *timeouts*
+        abort the scan because each timeout costs the full socket timeout.
 
         Returns:
             List of battery-info dicts (one per module), possibly empty.
@@ -3283,19 +3262,11 @@ class PersistentE2ESession:
                                 )
                             )
 
-                    # Only continue to extension cabinet if current tier was full.
                     if self._log:
                         self._log(
                             f"BatteryInfo tier complete: indices={tier_start}-{tier_start + tier_size - 1} "
                             f"found={found_in_tier}/{tier_size}"
                         )
-                    if found_in_tier < tier_size:
-                        if self._log:
-                            self._log(
-                                "BatteryInfo scan stopping because tier was not full; "
-                                f"modules={len(batteries)} serials={list(seen_serials)}"
-                            )
-                        break
             finally:
                 self._sock.settimeout(prev_timeout)
 
