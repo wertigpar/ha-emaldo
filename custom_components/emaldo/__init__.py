@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -22,6 +24,8 @@ from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 from .shared_client import async_acquire_shared_client, async_release_shared_client
 from .services import async_register_services, async_unregister_services
+
+_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.SWITCH,
@@ -46,6 +50,12 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Emaldo from a config entry."""
+    _LOGGER.debug(
+        "Setting up Emaldo config entry: entry_id=%s home_id=%s pinned_device_id=%s",
+        entry.entry_id,
+        entry.data.get(CONF_HOME_ID),
+        entry.data.get(CONF_DEVICE_ID),
+    )
     shared_client = async_acquire_shared_client(hass, entry)
     try:
         power_coordinator = EmaldoCoordinator(hass, entry, shared_client)
@@ -79,6 +89,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     }
                 )
                 seen_ids.add(did)
+
+            _LOGGER.debug(
+                "Emaldo config entry discovered %d device coordinator set(s): %s",
+                len(devices_to_setup),
+                [device.get("id") for device in devices_to_setup],
+            )
 
         coordinator_sets: list[dict[str, object]] = []
 

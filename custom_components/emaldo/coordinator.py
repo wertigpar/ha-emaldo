@@ -867,13 +867,32 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if self._battery_modules_poll_counter >= 60:
             self._battery_modules_poll_counter = 0
             try:
+                cached_count = len(self._battery_modules)
+                _LOGGER.debug(
+                    "Battery module info poll starting: device_id=%s model=%s cached_modules=%d",
+                    self.device_id,
+                    self.device_model,
+                    cached_count,
+                )
                 modules = await self.hass.async_add_executor_job(
                     self._session.read_battery_info
                 )
+                returned_count = len(modules or [])
+                returned_serials = [m.get("serial") for m in modules or []]
+                _LOGGER.debug(
+                    "Battery module info poll returned %d modules: serials=%s",
+                    returned_count,
+                    returned_serials,
+                )
                 if modules:
                     self._battery_modules = modules
+                else:
+                    _LOGGER.debug(
+                        "Battery module info poll returned no modules; retaining cached_modules=%d",
+                        cached_count,
+                    )
             except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Battery module info read failed: %s", err)
+                _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
 
         data["battery_modules"] = self._battery_modules
 

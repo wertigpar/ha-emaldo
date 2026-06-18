@@ -3191,11 +3191,22 @@ class PersistentE2ESession:
 
             prev_timeout = self._sock.gettimeout()
             self._sock.settimeout(max(prev_timeout, 3.0))
+            if self._log:
+                self._log(
+                    "BatteryInfo scan start: tiers=%s timeout=%.1fs"
+                    % (TIERS, self._sock.gettimeout() or 0.0)
+                )
             try:
                 for tier_start, tier_size in TIERS:
                     found_in_tier = 0
                     consecutive_timeouts = 0
+                    if self._log:
+                        self._log(
+                            f"BatteryInfo tier start: indices={tier_start}-{tier_start + tier_size - 1}"
+                        )
                     for idx in range(tier_start, tier_start + tier_size):
+                        if self._log:
+                            self._log(f"BatteryInfo(idx={idx}): probing")
                         req_pkt = build_subscription_packet(
                             self._creds, 0x06, self._session_nonce,
                             payload=bytes([idx]),
@@ -3205,11 +3216,23 @@ class PersistentE2ESession:
                         if resp is None:
                             # True timeout — device not responding.
                             consecutive_timeouts += 1
+                            if self._log:
+                                self._log(
+                                    f"BatteryInfo(idx={idx}): timeout "
+                                    f"(consecutive={consecutive_timeouts})"
+                                )
                             if consecutive_timeouts >= 2:
+                                if self._log:
+                                    self._log(
+                                        "BatteryInfo scan aborting after consecutive timeouts; "
+                                        f"modules={len(batteries)} serials={list(seen_serials)}"
+                                    )
                                 return batteries
                             continue
 
                         consecutive_timeouts = 0
+                        if self._log:
+                            self._log(f"BatteryInfo(idx={idx}): response {len(resp)}B")
 
                         # Short reply — empty slot; continue within tier.
                         if len(resp) < 250:
@@ -3226,19 +3249,60 @@ class PersistentE2ESession:
                                     self._log(f"BatteryInfo(idx={idx}) follow-up: {len(extra)}B")
                                 info = self._try_parse_battery(extra)
                             except socket.timeout:
-                                pass
+                                if self._log:
+                                    self._log(f"BatteryInfo(idx={idx}) follow-up: timeout")
 
-                        if info and info["serial"] not in seen_serials:
-                            seen_serials.add(info["serial"])
-                            batteries.append(info)
-                            found_in_tier += 1
+                        if info is None:
+                            if self._log:
+                                self._log(f"BatteryInfo(idx={idx}): parse failed")
+                            continue
+
+                        serial = info.get("serial") or ""
+                        if serial in seen_serials:
+                            if self._log:
+                                self._log(
+                                    f"BatteryInfo(idx={idx}): duplicate serial {serial!r}; skipped"
+                                )
+                            continue
+
+                        seen_serials.add(serial)
+                        batteries.append(info)
+                        found_in_tier += 1
+                        if self._log:
+                            self._log(
+                                "BatteryInfo(idx=%s): parsed serial=%r model=%r "
+                                "payload_index=%s cabinet_index=%s cabinet_position=%s soc=%s"
+                                % (
+                                    idx,
+                                    serial,
+                                    info.get("model"),
+                                    info.get("index"),
+                                    info.get("cabinet_index"),
+                                    info.get("cabinet_position"),
+                                    info.get("soc"),
+                                )
+                            )
 
                     # Only continue to extension cabinet if current tier was full.
+                    if self._log:
+                        self._log(
+                            f"BatteryInfo tier complete: indices={tier_start}-{tier_start + tier_size - 1} "
+                            f"found={found_in_tier}/{tier_size}"
+                        )
                     if found_in_tier < tier_size:
+                        if self._log:
+                            self._log(
+                                "BatteryInfo scan stopping because tier was not full; "
+                                f"modules={len(batteries)} serials={list(seen_serials)}"
+                            )
                         break
             finally:
                 self._sock.settimeout(prev_timeout)
 
+            if self._log:
+                self._log(
+                    f"BatteryInfo scan complete: modules={len(batteries)} serials={list(seen_serials)}"
+                )
             return batteries
 
     def _try_parse_battery(self, resp: bytes) -> dict | None:

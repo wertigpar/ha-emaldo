@@ -1,5 +1,21 @@
 # Changes
 
+## 1.0.0-beta11g
+
+### Added
+- **Battery module discovery debug logging:** added detailed debug-level
+  tracing around E2E battery-info scans and coordinator module polling to help
+  diagnose missing HP5000/Power Core module sensors without changing discovery
+  behavior. Logs now show probed indices, response lengths, timeouts, parse
+  results, duplicate serial skips, tier stop reasons, returned module counts
+  and cached-module retention decisions (#23, #37).
+
+### Fixed
+- **Debug logging capture:** declared the integration logger namespace in the
+  manifest and added setup-time debug marker lines so Home Assistant's
+  "Enable debug logging" action has immediate `custom_components.emaldo`
+  output to capture before the slower battery module discovery poll runs.
+
 ## 1.0.0-beta11f
 
 ### Fixed
