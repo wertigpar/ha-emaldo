@@ -1,14 +1,22 @@
 # Changes
 
+## 1.0.0-beta11h
+
+### Fixed
+- **HP5000 battery module discovery:** battery-info scans no longer stop when
+  the first cabinet index tier returns only short empty-slot replies. The scan
+  now continues across all known module indices (0-12) and still aborts only on
+  repeated true timeouts, allowing systems whose valid modules start at later
+  indices to create their per-module sensors (#23).
+
 ## 1.0.0-beta11g
 
 ### Added
 - **Battery module discovery debug logging:** added detailed debug-level
   tracing around E2E battery-info scans and coordinator module polling to help
-  diagnose missing HP5000/Power Core module sensors without changing discovery
-  behavior. Logs now show probed indices, response lengths, timeouts, parse
-  results, duplicate serial skips, tier stop reasons, returned module counts
-  and cached-module retention decisions (#23, #37).
+  diagnose missing HP5000/Power Core module sensors. Logs now show probed
+  indices, response lengths, timeouts, parse results, duplicate serial skips,
+  returned module counts and cached-module retention decisions (#23, #37).
 
 ### Fixed
 - **Debug logging capture:** declared the integration logger namespace in the
