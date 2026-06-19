@@ -39,6 +39,7 @@ from .emaldo_lib.e2e import (
     _SELLING_PROTECTION_SET_TYPE,
     _VIRTUALPOWERPLANT_SET_TYPE,
     _build_vpp_payload,
+    read_battery_info as _standalone_read_battery_info,
 )
 
 from .const import (
@@ -401,8 +402,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     Uses :class:`PersistentE2ESession` to keep a UDP socket open across polls,
     reducing latency from ~500ms to ~85ms per read. A background task sends
-    keepalive messages every 15 seconds to prevent the relay server from
-    dropping the session.
+    keepalive messages every 7 seconds to prevent the relay server from
+    dropping the session (relay TTL ~10 s).
     """
 
     config_entry: ConfigEntry
@@ -435,6 +436,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._empty_reads: int = 0
         self._consecutive_read_errors: int = 0
         self._consecutive_reconnects: int = 0
+        self._episode_drops: int = 0
         self._regulate_frequency: dict | None = None
         self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
         self._battery_modules_poll_counter: int = 59  # trigger on first successful poll
@@ -653,6 +655,28 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         session = self._ensure_session()
         return session.read_manual_selling()
 
+    def _read_battery_info_standalone(self) -> list[dict]:
+        """Read per-module battery info on a throwaway one-shot E2E session.
+
+        The 0x06 scan probes up to 13 cabinet slots, each with its own
+        request/response round trip.  Running it on the persistent realtime
+        socket would hold the session lock for tens of seconds, starving the
+        keepalive task (7 s) and letting the relay drop the realtime session
+        (#37).  Opening a dedicated socket that is torn down immediately after
+        the scan keeps the realtime session healthy.
+        """
+        client = self._parent._ensure_client()  # noqa: SLF001 - intended
+        home_id = self._parent.home_id
+        device_id = self._parent._device_id  # noqa: SLF001
+        model = self._parent._model  # noqa: SLF001
+        if device_id is None or model is None:
+            return self._battery_modules
+        creds = client.e2e_login(home_id, device_id, model)
+        return _standalone_read_battery_info(
+            creds,
+            log=lambda msg: _LOGGER.debug("[E2E battery] %s", msg),
+        )
+
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
     #: After this many consecutive reconnect cycles with no recovery, switch from
@@ -713,29 +737,30 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             if self._empty_reads >= self._MAX_EMPTY_READS:
                 self.stats_reconnects += 1
                 self._consecutive_reconnects += 1
+                self._episode_drops += 1
                 self.stats_last_reconnect = _time.time()
                 if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
                     # Session expiry is normal relay behaviour — always INFO unless persistent
                     _LOGGER.info(
                         "E2E power flow: %d consecutive empty reads, reconnecting "
-                        "(total drops: %d, reconnects: %d since start)",
+                        "(episode drops: %d, reconnects: %d since start)",
                         self._empty_reads,
-                        self.stats_empty_reads,
+                        self._episode_drops,
                         self.stats_reconnects,
                     )
                 elif self._consecutive_reconnects == self._WARN_RECONNECT_THRESHOLD + 1:
                     _LOGGER.warning(
                         "E2E power flow: persistent connection failure after %d reconnect "
-                        "cycles — suppressing further reconnect warnings (total drops: %d). "
+                        "cycles — suppressing further reconnect warnings (episode drops: %d). "
                         "Check device/relay connectivity.",
                         self._consecutive_reconnects - 1,
-                        self.stats_empty_reads,
+                        self._episode_drops,
                     )
                 else:
                     _LOGGER.debug(
                         "E2E power flow: empty reads, reconnecting "
-                        "(total drops: %d, reconnects: %d since start)",
-                        self.stats_empty_reads,
+                        "(episode drops: %d, reconnects: %d since start)",
+                        self._episode_drops,
                         self.stats_reconnects,
                     )
                 await self._close_session()
@@ -751,7 +776,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         invalid_channels = get_invalid_realtime_power_channels(data)
         if invalid_channels:
             self._empty_reads += 1
-            self.stats_empty_reads += 1
             self.stats_last_failure = _time.time()
             _LOGGER.warning(
                 "E2E power flow rejected by sanity filter (channels=%s, abs_max_w=%d) "
@@ -768,12 +792,17 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return self.data
 
         self._empty_reads = 0
-        if self._consecutive_reconnects > self._WARN_RECONNECT_THRESHOLD:
+        if self._consecutive_reconnects > 0:
             _LOGGER.info(
-                "E2E power flow recovered after %d reconnect cycles",
+                "E2E power flow recovered after %d reconnect cycles (episode drops: %d)",
                 self._consecutive_reconnects,
+                self._episode_drops,
             )
         self._consecutive_reconnects = 0
+        # A clean read ends the current failure episode: reset the per-episode
+        # drop tally so warning messages report only the next outage's drops.
+        # stats_empty_reads stays monotonic for the diagnostic sensor.
+        self._episode_drops = 0
         if self._consecutive_read_errors >= self._MAX_EMPTY_READS:
             _LOGGER.info(
                 "E2E power flow recovered after %d consecutive errors",
@@ -862,7 +891,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     data[_k] = self.data[_k]
 
         # Poll per-module battery info every 60 successful reads (~10 min).
-        # Uses the existing persistent session to avoid a competing UDP socket.
+        # Runs on a dedicated one-shot E2E session, NOT the persistent realtime
+        # socket: the 0x06 scan probes up to 13 cabinet slots and would hold
+        # the realtime session lock for tens of seconds, starving the keepalive
+        # task and letting the relay drop the realtime session (#37).
         self._battery_modules_poll_counter += 1
         if self._battery_modules_poll_counter >= 60:
             self._battery_modules_poll_counter = 0
@@ -875,7 +907,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     cached_count,
                 )
                 modules = await self.hass.async_add_executor_job(
-                    self._session.read_battery_info
+                    self._read_battery_info_standalone
                 )
                 returned_count = len(modules or [])
                 returned_serials = [m.get("serial") for m in modules or []]

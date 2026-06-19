@@ -2719,11 +2719,11 @@ class PersistentE2ESession:
     session alive with periodic keepalives. Subsequent action calls reuse the
     same socket and complete in a single request/response round trip.
 
-    The session expires on the relay server after a few minutes without
+    The session expires on the relay server after ~10 seconds without
     keepalive (status 21204). Call :meth:`keepalive` periodically (every
-    ~15 seconds) from a background thread or asyncio task to prevent this.
-    The session automatically re-runs the handshake on :meth:`read_power_flow`
-    if a 21204 error is detected.
+    ~7 seconds) from a background thread or asyncio task to prevent this.
+    The session automatically re-handshakes in place on :meth:`read_power_flow`
+    and :meth:`keepalive` if a 21204 error is detected.
 
     Typical usage (synchronous)::
 
@@ -2751,18 +2751,25 @@ class PersistentE2ESession:
 
         def _keepalive_loop():
             while not session.closed:
-                time.sleep(15)
+                time.sleep(7)
                 session.keepalive()
 
         threading.Thread(target=_keepalive_loop, daemon=True).start()
     """
 
-    #: Keepalive interval in seconds. The relay server times out idle sessions
-    #: after ~3 minutes; 15 seconds provides a generous safety margin.
-    DEFAULT_KEEPALIVE_INTERVAL = 15
+    #: Keepalive interval in seconds.  The relay server times out idle
+    #: sessions after ~10 s; the coordinator's ``KEEPALIVE_INTERVAL``
+    #: (7 s) must stay below that to prevent premature expiry.  This class
+    #: constant is the documented reference for standalone usage.
+    DEFAULT_KEEPALIVE_INTERVAL = 7
 
     #: Status code returned when the relay has dropped the session.
     SESSION_EXPIRED_STATUS = 21204
+
+    #: Backoff (seconds) before re-handshaking after a 21204 (session expired).
+    #: The relay rejects re-handshakes made immediately after expiry, so wait
+    #: briefly before rebuilding the session.
+    RECONNECT_BACKOFF_SECONDS = 2.0
 
     def __init__(
         self,
@@ -2833,6 +2840,11 @@ class PersistentE2ESession:
     def keepalive(self) -> bool:
         """Send a fresh alive+heartbeat to keep the session alive.
 
+        If the relay reports the session as expired (21204) the session is
+        re-handshaked in place so the next read lands on a live session
+        instead of returning *None*.  This avoids the coordinator tearing the
+        whole session down every few polls when the relay TTL is short.
+
         Returns:
             True on success, False if the session has been dropped or the
             socket is closed.
@@ -2854,10 +2866,14 @@ class PersistentE2ESession:
                 )
                 wake = build_wake_packet(self._creds, self._session_nonce)
                 heartbeat = build_heartbeat_packet(self._creds, self._session_nonce)
-                self._send_raw(home_alive, "Keepalive(home_alive)")
+                resp = self._send_raw(home_alive, "Keepalive(home_alive)")
                 self._send_raw(dev_alive, "Keepalive(dev_alive)")
                 self._send_raw(wake, "Keepalive(wake)")
                 self._send_raw(heartbeat, "Keepalive(heartbeat)")
+                # If the relay reports the previous session as expired,
+                # rebuild it now so the next power-flow read succeeds.
+                if resp is not None and self._is_session_expired(resp):
+                    self._reconnect_after_expiry()
                 return True
             except Exception as err:  # noqa: BLE001 - best-effort keepalive
                 if self._log:
@@ -2868,59 +2884,70 @@ class PersistentE2ESession:
         """Read realtime power flow (0x30) over the existing session.
 
         Returns the power flow dict, or *None* if data is not available
-        (session expired, timeout, or unparseable).  The caller is responsible
-        for closing and re-establishing the session after repeated *None* returns;
-        immediate internal reconnects are deliberately avoided because the relay
-        rejects reconnection attempts made within a few seconds of session expiry.
+        (session expired, timeout, or unparseable).  On a 21204 (session
+        expired) the session is re-handshaked in place with a short backoff
+        and the request is retried once, so a short relay TTL no longer forces
+        the coordinator to tear the whole session down every few polls.
         """
         with self._lock:
             if self._sock is None or self._closed:
                 raise EmaldoE2EError("Session is not connected")
 
-            power_pkt = build_subscription_packet(
-                self._creds, 0x30, self._session_nonce, payload=bytes([0x01]),
-            )
-            resp = self._send_raw(power_pkt, "PowerFlow(0x30)")
-            if resp is None:
-                return None
+            return self._read_power_flow_locked(reconnect_on_expiry=True)
 
-            # Session expired — caller must wait before reconnecting.
-            if self._is_session_expired(resp):
-                if self._log:
-                    self._log("Session expired")
-                return None
+    def _read_power_flow_locked(self, *, reconnect_on_expiry: bool) -> dict | None:
+        """Power-flow read body.  Caller must hold ``self._lock``.
 
-            result = self._try_parse_power_flow(resp)
-            if result is not None:
-                return result
-
-            # First response may be a subscription ACK; drain a few more packets
-            # with a short timeout so we don't stall the caller.
-            # Also passively cache any 0x45 regulate-frequency pushes.
-            prev_timeout = self._sock.gettimeout()
-            self._sock.settimeout(0.5)
-            try:
-                for _ in range(5):
-                    try:
-                        more_resp, _ = self._sock.recvfrom(4096)
-                    except socket.timeout:
-                        break
-                    if self._is_session_expired(more_resp):
-                        if self._log:
-                            self._log("Session expired mid-drain")
-                        break
-                    result = self._try_parse_power_flow(more_resp)
-                    if result is not None:
-                        return result
-                    rf = self._try_parse_regulate_frequency(more_resp)
-                    if rf is not None:
-                        self._regulate_frequency_cache = rf
-                        if self._log:
-                            self._log(f"Passive 0x45 push captured: {rf}")
-            finally:
-                self._sock.settimeout(prev_timeout)
-
+        When *reconnect_on_expiry* is *True* (first attempt), a 21204 response
+        triggers an in-place re-handshake and one retry of the request.  The
+        retry passes *reconnect_on_expiry=False* so we never recurse further.
+        """
+        power_pkt = build_subscription_packet(
+            self._creds, 0x30, self._session_nonce, payload=bytes([0x01]),
+        )
+        resp = self._send_raw(power_pkt, "PowerFlow(0x30)")
+        if resp is None:
             return None
+
+        # Session expired — reconnect in place and retry once.
+        if self._is_session_expired(resp):
+            if self._log:
+                self._log("Session expired on power-flow read")
+            if reconnect_on_expiry and self._reconnect_after_expiry():
+                return self._read_power_flow_locked(reconnect_on_expiry=False)
+            return None
+
+        result = self._try_parse_power_flow(resp)
+        if result is not None:
+            return result
+
+        # First response may be a subscription ACK; drain a few more packets
+        # with a short timeout so we don't stall the caller.
+        # Also passively cache any 0x45 regulate-frequency pushes.
+        prev_timeout = self._sock.gettimeout()
+        self._sock.settimeout(0.5)
+        try:
+            for _ in range(5):
+                try:
+                    more_resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if self._is_session_expired(more_resp):
+                    if self._log:
+                        self._log("Session expired mid-drain")
+                    break
+                result = self._try_parse_power_flow(more_resp)
+                if result is not None:
+                    return result
+                rf = self._try_parse_regulate_frequency(more_resp)
+                if rf is not None:
+                    self._regulate_frequency_cache = rf
+                    if self._log:
+                        self._log(f"Passive 0x45 push captured: {rf}")
+        finally:
+            self._sock.settimeout(prev_timeout)
+
+        return None
 
     def read_regulate_frequency_state(self) -> dict | None:
         """Read FCR/mFRR frequency regulation state (0x45) over the existing session.
@@ -3336,7 +3363,11 @@ class PersistentE2ESession:
             return None
 
     def _reconnect(self) -> None:
-        """Close and re-open the session (used on 21204 or timeout)."""
+        """Close and re-open the session socket and re-run the handshake.
+
+        Raises whatever ``_do_handshake`` raises on failure (caller decides
+        whether to suppress).  Generates a fresh session nonce.
+        """
         if self._sock is not None:
             try:
                 self._sock.close()
@@ -3349,6 +3380,29 @@ class PersistentE2ESession:
         self._sock.settimeout(self._timeout)
         self._session_nonce = generate_nonce()
         self._do_handshake()
+
+    def _reconnect_after_expiry(self) -> bool:
+        """Re-handshake after a 21204 (session expired), honoring backoff.
+
+        Returns *True* if the new handshake completed, *False* if it failed
+        or the session has been closed concurrently.  Must be called while
+        already holding ``self._lock``.
+        """
+        if self._closed:
+            return False
+        if self._log:
+            self._log(
+                f"Session expired (21204) — reconnecting after "
+                f"{self.RECONNECT_BACKOFF_SECONDS:.1f}s backoff"
+            )
+        time.sleep(self.RECONNECT_BACKOFF_SECONDS)
+        try:
+            self._reconnect()
+            return True
+        except Exception as err:  # noqa: BLE001 - best-effort reconnect
+            if self._log:
+                self._log(f"Reconnect failed: {err}")
+            return False
 
     @classmethod
     def _is_session_expired(cls, resp: bytes) -> bool:

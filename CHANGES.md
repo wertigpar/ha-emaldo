@@ -1,5 +1,50 @@
 # Changes
 
+## 1.0.0-beta11i
+
+### Fixed
+- **Persistent E2E connection failures (#37):** the realtime power-flow layer
+  no longer tears the whole UDP session down every few polls when the relay
+  reports the session as expired (status 21204). The persistent session now
+  re-handshakes in place — with a short backoff — and retries the read, so a
+  short or aggressive relay TTL no longer escalates into the
+  "persistent connection failure after 3 reconnect cycles" warning that
+  accumulated thousands of drops.
+  - `PersistentE2ESession.keepalive` now detects the 21204 status returned by
+    the relay and rebuilds the session before the next read, rather than
+    silently letting the session go dead.
+  - `PersistentE2ESession.read_power_flow` reconnects on 21204 and retries the
+    0x30 request once, instead of returning `None` and waiting for the
+    coordinator to fully recreate the session (3 REST calls + handshake) on
+    the next cycle.
+- **Battery-info scan no longer starves the realtime keepalive:** the periodic
+  per-module battery scan now runs on a dedicated one-shot E2E session instead
+  of the persistent realtime socket. The 0x06 scan probes up to 13 cabinet
+  slots and previously held the realtime session lock for tens of seconds,
+  starving the 7 s keepalive task and letting the relay drop the realtime
+  session — a direct contributor to the #37 reconnect storm.
+- **Recovery logging stuck high:** `_consecutive_reconnects` is now reset as
+  soon as a clean read lands, so the recovery INFO message fires reliably
+  (previously it was gated on a threshold higher than the reset condition and
+  could stay suppressed after connectivity returned).
+- **Misleading "total drops" counter:** warning/recovery messages now report a
+  per-episode drop tally (`episode drops`) that resets when a clean read
+  succeeds. The monotonic lifetime `stats_empty_reads` is preserved unchanged
+  for the diagnostics sensor. Sanity-filtered reads no longer count toward the
+  drop/reconnect tallies.
+
+### Changed
+- **Keepalive cadence/TTL documentation reconciled:** the `PersistentE2ESession`
+  docstrings and `DEFAULT_KEEPALIVE_INTERVAL` no longer contradict each other
+  and the coordinator constant (`KEEPALIVE_INTERVAL = 7`, relay TTL ~10 s).
+  All references now consistently document a ~10 s relay TTL with a 7 s
+  keepalive cadence, which must stay below the read interval.
+
+### Notes
+- The trigger for #37 was a relay/firmware-side change that started dropping
+  E2E sessions faster around 2026-06-16/17; this release makes the
+  integration resilient to a short relay TTL instead of depending on it.
+
 ## 1.0.0-beta11h
 
 ### Fixed
