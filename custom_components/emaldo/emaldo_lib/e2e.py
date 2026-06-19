@@ -2840,14 +2840,18 @@ class PersistentE2ESession:
     def keepalive(self) -> bool:
         """Send a fresh alive+heartbeat to keep the session alive.
 
-        If the relay reports the session as expired (21204) the session is
-        re-handshaked in place so the next read lands on a live session
-        instead of returning *None*.  This avoids the coordinator tearing the
-        whole session down every few polls when the relay TTL is short.
+        This must stay fast and non-blocking: the keepalive task is created
+        via ``async_create_task`` and tracked by Home Assistant's bootstrap as
+        a pending startup task, so it must not perform long operations such as
+        ``time.sleep`` or a full re-handshake.  Recovery from a 21204 (session
+        expired) is therefore handled by :meth:`read_power_flow`, which runs on
+        a dedicated poll, not here.
 
         Returns:
-            True on success, False if the session has been dropped or the
-            socket is closed.
+            True if the keepalive packets were sent, False if the session has
+            been dropped/expired (21204) or the socket is closed.  Returning
+            False on 21204 lets the coordinator's keepalive loop tear the dead
+            session down so :meth:`read_power_flow` rebuilds it next poll.
         """
         with self._lock:
             if self._sock is None or self._closed:
@@ -2870,10 +2874,14 @@ class PersistentE2ESession:
                 self._send_raw(dev_alive, "Keepalive(dev_alive)")
                 self._send_raw(wake, "Keepalive(wake)")
                 self._send_raw(heartbeat, "Keepalive(heartbeat)")
-                # If the relay reports the previous session as expired,
-                # rebuild it now so the next power-flow read succeeds.
+                # If the relay reports the session as expired, do NOT reconnect
+                # here (would block the startup-tracked keepalive task).  Signal
+                # failure so the loop tears the session down; read_power_flow
+                # will rebuild it on the next poll.
                 if resp is not None and self._is_session_expired(resp):
-                    self._reconnect_after_expiry()
+                    if self._log:
+                        self._log("Keepalive saw 21204 — session expired")
+                    return False
                 return True
             except Exception as err:  # noqa: BLE001 - best-effort keepalive
                 if self._log:
