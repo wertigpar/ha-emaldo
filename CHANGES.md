@@ -10,9 +10,12 @@
   short or aggressive relay TTL no longer escalates into the
   "persistent connection failure after 3 reconnect cycles" warning that
   accumulated thousands of drops.
-  - `PersistentE2ESession.keepalive` now detects the 21204 status returned by
-    the relay and rebuilds the session before the next read, rather than
-    silently letting the session go dead.
+  - `PersistentE2ESession.keepalive` returns `False` immediately when the
+    relay replies with status 21204 (session expired) — keeping the keepalive
+    task fast and non-blocking so it never stalls the HA bootstrap watchdog.
+    The existing `fail_count >= 2 → close session` path in the keepalive loop
+    tears down the dead socket, and the next `read_power_flow` call rebuilds
+    the session in place with a short backoff.
   - `PersistentE2ESession.read_power_flow` reconnects on 21204 and retries the
     0x30 request once, instead of returning `None` and waiting for the
     coordinator to fully recreate the session (3 REST calls + handshake) on
