@@ -1,5 +1,18 @@
 # Changes
 
+## 1.0.0-beta11j
+
+### Fixed
+- **Battery module sensors missing on HP5000 systems (#23):** the battery-info
+  scan (E2E type 0x06) used a hardcoded 250-byte minimum response size to skip
+  empty cabinet slots.  HP5000 firmware returns valid battery responses at
+  ~243 bytes, which fell below the threshold and were silently discarded as
+  "empty slots".  The magic-size filter has been replaced with a protocol-aware
+  approach: only responses shorter than 50 bytes (below the AES framing
+  overhead) are skipped without decryption; everything else is passed to the
+  existing decrypt → `HEADER_BATTERY` check → `parse_battery_data` pipeline so
+  the protocol header decides validity, not a device-model-dependent size.
+
 ## 1.0.0-beta11i
 
 ### Fixed

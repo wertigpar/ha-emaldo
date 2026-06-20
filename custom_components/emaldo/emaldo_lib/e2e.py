@@ -909,21 +909,29 @@ def read_battery_info(
 
                 consecutive_timeouts = 0
 
-                if len(resp_raw) < 250:
-                    # Short reply — empty slot; continue to next slot in tier.
+                # Responses shorter than the AES framing overhead (~50 B)
+                # cannot possibly contain a valid encrypted payload, so skip
+                # them as clearly empty or corrupt.  Everything ≥ 50 B is
+                # handed to decrypt + parse so the protocol header check
+                # (HEADER_BATTERY) decides, not a magic size threshold.
+                # Previous threshold of 250 was too aggressive for HP5000
+                # firmware whose valid responses are ~243 B (#23).
+                if len(resp_raw) < 50:
                     if log:
-                        log(f"Battery(idx={idx}): short reply {len(resp_raw)}B — empty slot")
+                        log(f"Battery(idx={idx}): too-short reply {len(resp_raw)}B — skipped")
                     continue
 
                 info = _try_parse_battery(resp_raw)
                 if info is None:
+                    # First packet may be a subscription ACK — try one more.
                     try:
                         resp2, _ = sock.recvfrom(4096)
                         if log:
-                            log(f"  follow-up: {len(resp2)}B")
+                            log(f"Battery(idx={idx}) follow-up: {len(resp2)}B")
                         info = _try_parse_battery(resp2)
                     except socket.timeout:
-                        pass
+                        if log:
+                            log(f"Battery(idx={idx}) follow-up: timeout")
 
                 if info and info["serial"] not in seen_serials:
                     seen_serials.add(info["serial"])
@@ -3248,10 +3256,13 @@ class PersistentE2ESession:
                         if self._log:
                             self._log(f"BatteryInfo(idx={idx}): response {len(resp)}B")
 
-                        # Short reply — empty slot; continue within tier.
-                        if len(resp) < 250:
+                        # Responses shorter than the AES framing overhead (~50 B)
+                        # cannot contain a valid encrypted payload — skip them.
+                        # Previously used 250 B which silently discarded valid
+                        # HP5000 battery responses (~243 B, #23).
+                        if len(resp) < 50:
                             if self._log:
-                                self._log(f"BatteryInfo(idx={idx}): short {len(resp)}B — empty slot")
+                                self._log(f"BatteryInfo(idx={idx}): too-short {len(resp)}B — skipped")
                             continue
 
                         info = self._try_parse_battery(resp)
