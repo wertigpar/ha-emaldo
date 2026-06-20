@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     DOMAIN,
@@ -129,16 +131,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             realtime = EmaldoRealtimeCoordinator(hass, entry, power)
             setattr(realtime, "_legacy_uid_mode", getattr(power, "_legacy_uid_mode", False))
-            # Best-effort first refresh — if E2E fails, keep the integration
-            # working with the slower REST power data.
-            try:
-                await realtime.async_config_entry_first_refresh()
-            except Exception:  # noqa: BLE001
-                pass
+            # Start the realtime coordinator in the background. Its E2E UDP
+            # handshake can block for several seconds (or retry) and must not
+            # delay HA bootstrap. Failures are non-fatal — sensors fall back to
+            # the slower REST power data until the next successful refresh.
+            entry.async_create_background_task(
+                hass,
+                _background_first_refresh(realtime, "realtime"),
+                f"{DOMAIN}_realtime_first_refresh",
+            )
 
             schedule = EmaldoScheduleCoordinator(hass, entry, power)
             setattr(schedule, "_legacy_uid_mode", getattr(power, "_legacy_uid_mode", False))
-            await schedule.async_config_entry_first_refresh()
+            # Schedule first refresh is also best-effort; the E2E override read
+            # in particular can stall. Start it in the background and set up
+            # the time-based listeners immediately so scheduling works.
+            entry.async_create_background_task(
+                hass,
+                _background_first_refresh(schedule, "schedule"),
+                f"{DOMAIN}_schedule_first_refresh",
+            )
             schedule.async_setup_listeners()
 
             coordinator_sets.append(
@@ -167,6 +179,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     async_register_services(hass)
     return True
+
+
+async def _background_first_refresh(
+    coordinator: DataUpdateCoordinator[Any],
+    name: str,
+) -> None:
+    """Run a coordinator's first refresh without blocking config entry setup.
+
+    Exceptions are swallowed so a transient E2E/REST failure during startup
+    does not fail the whole integration setup.
+    """
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("%s first refresh failed in background", name, exc_info=True)
 
 
 async def _async_options_updated(

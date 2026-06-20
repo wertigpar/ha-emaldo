@@ -968,7 +968,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         fail_count, self.stats_keepalive_failures,
                     )
                     if fail_count >= 2:
-                        _LOGGER.warning(
+                        # Two consecutive keepalive failures just mean the
+                        # relay session has expired; closing and letting the
+                        # next poll re-handshake is the designed recovery path.
+                        _LOGGER.info(
                             "Keepalive failed twice, closing session for reconnect"
                         )
                         await self._close_session()

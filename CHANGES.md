@@ -12,6 +12,16 @@
   overhead) are skipped without decryption; everything else is passed to the
   existing decrypt → `HEADER_BATTERY` check → `parse_battery_data` pipeline so
   the protocol header decides validity, not a device-model-dependent size.
+- **Bootstrap setup timeout waiting for Emaldo:** `async_setup_entry` no longer
+  awaits the realtime or schedule coordinator first refreshes on the startup
+  path. Both coordinators are started as config-entry background tasks, so the
+  E2E UDP handshake and override reads cannot block HA bootstrap for tens of
+  seconds. The primary REST power coordinator is still awaited so core sensors
+  are ready before platforms are forwarded.
+- **Spurious "Keepalive failed twice" warning:** closing the E2E session after
+  two consecutive keepalive failures is the designed self-healing path (the
+  next `read_power_flow` re-handshakes in place). This message is now logged at
+  INFO instead of WARNING so it is not reported as an integration problem.
 
 ## 1.0.0-beta11i
 
