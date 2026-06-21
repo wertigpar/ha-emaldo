@@ -95,7 +95,8 @@
       "battery_module_cell_b_temp": { "name": "Akkumoduuli {module} Kenno B lämpötila" },
       "battery_module_nominal_capacity": { "name": "Akkumoduuli {module} Nimelliskapasiteetti" },
       "battery_module_voltage": { "name": "Akkumoduuli {module} Jännite" },
-      "battery_module_serial": { "name": "Akkumoduuli {module} Sarjanumero" }
+      "battery_module_serial": { "name": "Akkumoduuli {module} Sarjanumero" },
+      "battery_module_position": { "name": "Akkumoduuli {module} Sijainti" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Kolmannen osapuolen aurinkopaneeli" },

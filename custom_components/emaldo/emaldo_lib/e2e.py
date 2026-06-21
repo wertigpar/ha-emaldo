@@ -6,6 +6,7 @@ The protocol uses AES-256-CBC encryption over UDP.
 """
 
 import json
+import logging
 import random
 import socket
 import string
@@ -26,6 +27,8 @@ from .const import (
     get_app_id,
 )
 from .exceptions import EmaldoE2EError
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +421,11 @@ def parse_override_state(payload: bytes) -> dict | None:
 def parse_battery_data(payload: bytes) -> dict | None:
     """Parse a type 0x06 battery-info response payload.
 
+    The decrypted payload starts with the 2-byte battery signature
+    (``0x03 0x00``) which the HP5000 firmware also uses as ``state_flags``.
+    Fixed battery fields follow, then length-prefixed strings, and finally
+    the trailing cabinet/position/index/capacity fields.
+
     Payload layout (≥80 bytes, variable due to length-prefixed strings):
 
     ======  ====  =========================  ================================
@@ -442,23 +450,34 @@ def parse_battery_data(payload: bytes) -> dict | None:
     …       N₂    version                    ASCII model string
     +1      1     barcode_len                length N₃
     …       N₃    barcode                    ASCII serial number
-    +1      1     index                      battery instance index
     +1      1     cabinet_index              cabinet slot index
     +1      1     cabinet_position_index     position within cabinet
+    +1      1     index                      battery instance index
     +2      2     capacity                   LE uint16
     ======  ====  =========================  ================================
 
     Returns:
         Dict with decoded fields, or *None* if payload is invalid.
     """
-    if payload is None or len(payload) < 26:
+    if payload is None:
+        _LOGGER.debug("parse_battery_data: payload is None")
+        return None
+    if len(payload) < 26:
+        _LOGGER.debug("parse_battery_data: payload too short (%d bytes)", len(payload))
         return None
     if payload[0] != HEADER_BATTERY[0] or payload[1] != HEADER_BATTERY[1]:
+        _LOGGER.debug(
+            "parse_battery_data: wrong start marker (got 0x%02x 0x%02x, want 0x%02x 0x%02x)",
+            payload[0], payload[1], HEADER_BATTERY[0], HEADER_BATTERY[1],
+        )
         return None
+    _LOGGER.debug("parse_battery_data: raw payload length %d", len(payload))
 
     def _deci_kelvin_to_c(raw: int) -> float:
         return round(raw / 10.0 - 273.15, 1)
 
+    # Fixed fields.  The first two bytes pass the HEADER_BATTERY check but are
+    # also interpreted as state_flags by the HP5000 firmware.
     state_flags = struct.unpack_from("<H", payload, 0)[0]
     bms_temp_raw = struct.unpack_from("<H", payload, 2)[0]
     electrode_a_raw = struct.unpack_from("<H", payload, 4)[0]
@@ -479,23 +498,40 @@ def parse_battery_data(payload: bytes) -> dict | None:
     id_info_len = payload[pos]; pos += 1
     id_info = payload[pos : pos + id_info_len].decode("ascii", errors="replace") if id_info_len else ""
     pos += id_info_len
+    _LOGGER.debug(
+        "parse_battery_data: id_info_len=%d pos=%d payload_len=%d",
+        id_info_len, pos, len(payload),
+    )
 
     if pos >= len(payload):
+        _LOGGER.debug("parse_battery_data: abort after id_info (pos=%d >= len=%d)", pos, len(payload))
         return None
     version_len = payload[pos]; pos += 1
     model = payload[pos : pos + version_len].decode("ascii", errors="replace") if version_len else ""
     pos += version_len
+    _LOGGER.debug(
+        "parse_battery_data: version_len=%d pos=%d payload_len=%d",
+        version_len, pos, len(payload),
+    )
 
     if pos >= len(payload):
+        _LOGGER.debug("parse_battery_data: abort after version (pos=%d >= len=%d)", pos, len(payload))
         return None
     barcode_len = payload[pos]; pos += 1
     serial = payload[pos : pos + barcode_len].decode("ascii", errors="replace") if barcode_len else ""
     pos += barcode_len
+    _LOGGER.debug(
+        "parse_battery_data: barcode_len=%d pos=%d payload_len=%d",
+        barcode_len, pos, len(payload),
+    )
 
-    # Trailing fixed fields
-    index = payload[pos] if pos < len(payload) else 0; pos += 1
+    # Trailing fixed fields follow the variable-length strings directly.
+    # Verified layout on HP5000: after barcode comes cabinet_index (1 byte),
+    # cabinet_position (1 byte), battery instance index (1 byte), then
+    # capacity (2 bytes LE).
     cabinet_index = payload[pos] if pos < len(payload) else 0; pos += 1
     cabinet_position = payload[pos] if pos < len(payload) else 0; pos += 1
+    index = payload[pos] if pos < len(payload) else 0; pos += 1
     capacity = struct.unpack_from("<H", payload, pos)[0] if pos + 2 <= len(payload) else 0
 
     return {
@@ -935,6 +971,7 @@ def read_battery_info(
 
                 if info and info["serial"] not in seen_serials:
                     seen_serials.add(info["serial"])
+                    info["scan_index"] = idx
                     batteries.append(info)
                     found_in_tier += 1
 
@@ -3291,6 +3328,7 @@ class PersistentE2ESession:
                             continue
 
                         seen_serials.add(serial)
+                        info["scan_index"] = idx
                         batteries.append(info)
                         found_in_tier += 1
                         if self._log:

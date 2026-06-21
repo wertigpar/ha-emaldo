@@ -441,6 +441,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
         self._battery_modules_poll_counter: int = 59  # trigger on first successful poll
         self._battery_modules: list[dict] = []
+        # Modules keyed by scan slot index so each physical cabinet slot keeps
+        # a stable HA sensor even when modules respond in different orders or
+        # some slots are temporarily silent (#23).
+        self._battery_module_slots: dict[int, dict] = {}
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
@@ -918,6 +922,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 if modules:
                     self._battery_modules = modules
+                    # Map each responding module to its physical scan slot so
+                    # sensors stay tied to cabinet positions, not to serials or
+                    # response order (#23).
+                    for m in modules:
+                        slot = m.get("scan_index")
+                        if slot is not None:
+                            self._battery_module_slots[slot] = m
                 else:
                     _LOGGER.debug(
                         "Battery module info poll returned no modules; retaining cached_modules=%d",
@@ -927,6 +938,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
 
         data["battery_modules"] = self._battery_modules
+        data["battery_module_slots"] = self._battery_module_slots
 
         return data
 

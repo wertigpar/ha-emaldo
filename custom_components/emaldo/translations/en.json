@@ -98,7 +98,8 @@
       "battery_module_cell_b_temp": { "name": "Battery Module {module} Cell B temperature" },
       "battery_module_nominal_capacity": { "name": "Battery Module {module} Nominal capacity" },
       "battery_module_voltage": { "name": "Battery Module {module} Voltage" },
-      "battery_module_serial": { "name": "Battery Module {module} Serial" }
+      "battery_module_serial": { "name": "Battery Module {module} Serial" },
+      "battery_module_position": { "name": "Battery Module {module} Position" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Third-party PV" },

@@ -507,25 +507,27 @@ async def async_setup_entry(
         entities.append(EmaldoScheduleChartSensor(schedule_coordinator))
     async_add_entities(entities)
 
-    # Per-module battery sensors — discovered dynamically when realtime data arrives.
+    # Per-module battery sensors — one sensor per physical cabinet slot.
+    # Sensors are keyed by scan slot index, not serial, so a module that is
+    # temporarily silent or responds in a different order does not create new
+    # entities or shift "Module N" labels (#23).
     for item in data.get("devices") or [data]:
         realtime_coordinator: EmaldoRealtimeCoordinator = item["realtime"]
-        _registered_module_serials: set[str] = set()
+        _registered_module_slots: set[int] = set()
 
         def _maybe_add_battery_modules(
             realtime: EmaldoRealtimeCoordinator = realtime_coordinator,
-            registered: set[str] = _registered_module_serials,
+            registered: set[int] = _registered_module_slots,
         ) -> None:
-            modules = (realtime.data or {}).get("battery_modules") or []
+            slots = (realtime.data or {}).get("battery_module_slots") or {}
             new_entities: list[SensorEntity] = []
-            for num, module in enumerate(modules, start=1):
-                serial = module.get("serial") or ""
-                if not serial or serial in registered:
+            for slot_index in sorted(slots):
+                if slot_index in registered:
                     continue
-                registered.add(serial)
+                registered.add(slot_index)
                 for metric in _BATTERY_MODULE_METRIC_CONFIG:
                     new_entities.append(
-                        EmaldoBatteryModuleSensor(realtime, serial, num, metric)
+                        EmaldoBatteryModuleSensor(realtime, slot_index, metric)
                     )
             if new_entities:
                 async_add_entities(new_entities)
@@ -1065,30 +1067,34 @@ _BATTERY_MODULE_METRIC_CONFIG: dict[str, dict[str, Any]] = {
         "icon": "mdi:identifier",
         "diagnostic": True,
     },
+    "position": {
+        "translation_key": "battery_module_position",
+        "icon": "mdi:grid",
+        "diagnostic": True,
+    },
 }
 
 # Metrics whose decoded value is a string rather than a number.
-_BATTERY_MODULE_STRING_METRICS = {"model", "serial"}
+_BATTERY_MODULE_STRING_METRICS = {"model", "serial", "position"}
 
 
 class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity):
-    """A sensor for one metric of one physical battery module."""
+    """A sensor for one metric of one physical battery module slot."""
 
     _attr_has_entity_name = True
 
     def __init__(
         self,
         coordinator: EmaldoRealtimeCoordinator,
-        serial: str,
-        module_num: int,
+        slot_index: int,
         metric: str,
     ) -> None:
-        """Initialize a per-module battery sensor."""
+        """Initialize a per-slot battery sensor."""
         super().__init__(coordinator)
-        self._serial = serial
+        self._slot_index = slot_index
         self._metric = metric
-        self._attr_unique_id = f"{_uid_base(coordinator)}_module_{serial}_{metric}"
-        self._attr_translation_placeholders = {"module": str(module_num)}
+        self._attr_unique_id = f"{_uid_base(coordinator)}_module_slot_{slot_index}_{metric}"
+        self._attr_translation_placeholders = {"module": str(slot_index + 1)}
 
         cfg = _BATTERY_MODULE_METRIC_CONFIG[metric]
         self._attr_translation_key = cfg["translation_key"]
@@ -1114,34 +1120,45 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
             model=c.device_model,
         )
 
+    def _module_for_slot(self) -> dict | None:
+        """Return the module currently occupying this slot, if any."""
+        slots = (self.coordinator.data or {}).get("battery_module_slots") or {}
+        return slots.get(self._slot_index)
+
     @property
     def native_value(self) -> float | str | None:
-        """Return the metric value for this module."""
-        modules = (self.coordinator.data or {}).get("battery_modules") or []
-        for m in modules:
-            if m.get("serial") == self._serial:
-                if self._metric == "serial":
-                    return self._serial or None
-                val = m.get(self._metric)
-                if val is None:
-                    return None
-                if self._metric in _BATTERY_MODULE_STRING_METRICS:
-                    return str(val) or None
-                return float(val)
-        return None
+        """Return the metric value for the module in this slot."""
+        module = self._module_for_slot()
+        if module is None:
+            return None
+        if self._metric == "serial":
+            return module.get("serial") or None
+        if self._metric == "position":
+            cabinet = module.get("cabinet_index")
+            cabinet_pos = module.get("cabinet_position")
+            if cabinet is None or cabinet_pos is None:
+                return None
+            return f"Cabinet {int(cabinet) + 1}, Module {int(cabinet_pos) + 1}"
+        val = module.get(self._metric)
+        if val is None:
+            return None
+        if self._metric in _BATTERY_MODULE_STRING_METRICS:
+            return str(val) or None
+        return float(val)
 
     @property
     def extra_state_attributes(self) -> dict:
         """Return serial number and SoC for diagnostics."""
-        modules = (self.coordinator.data or {}).get("battery_modules") or []
-        for m in modules:
-            if m.get("serial") == self._serial:
-                attrs: dict = {"serial_number": self._serial}
-                soc = m.get("soc")
-                if soc is not None:
-                    attrs["battery_soc"] = int(soc)
-                return attrs
-        return {"serial_number": self._serial}
+        module = self._module_for_slot()
+        attrs: dict = {"slot_index": self._slot_index}
+        if module is not None:
+            serial = module.get("serial")
+            if serial:
+                attrs["serial_number"] = serial
+            soc = module.get("soc")
+            if soc is not None:
+                attrs["battery_soc"] = int(soc)
+        return attrs
 
 
 class EmaldoBatteryTotalEnergySensor(

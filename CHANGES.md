@@ -1,5 +1,27 @@
 # Changes
 
+## 1.0.0-beta12a
+
+### Fixed
+- **Battery module sensors map to physical slots instead of serials (#23):**
+  HP5000 systems return per-module battery info unreliably — not all modules
+  answer every poll, and the responding modules come back in varying order.
+  The previous serial-based sensor keys caused sensors to flip to
+  `unavailable` and made "Module N" labels drift across polls.
+  - Battery module sensors are now keyed by the **scan slot index** (physical
+    cabinet position) rather than the module serial number.
+  - Each cabinet slot gets one stable sensor per metric; the sensor value
+    reflects whichever module currently occupies that slot.
+  - The module serial number is exposed as a state attribute instead of being
+    part of the unique ID.
+  - `parse_battery_data` / `read_battery_info` now carry the scan slot index
+    through to the coordinator, and the coordinator stores modules in a
+    `battery_module_slots` dict keyed by that index.
+  - Fixed the standalone `read_battery_info` helper (used by the coordinator's
+    dedicated battery scan) so it also tags each module with `scan_index`.
+    Previously only the persistent-session method added the field, leaving the
+    slot-based sensor lookup empty.
+
 ## 1.0.0-beta11j
 
 ### Fixed

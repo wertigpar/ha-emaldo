@@ -95,7 +95,8 @@
       "battery_module_cell_b_temp": { "name": "Batterimodul {module} Celle B temperatur" },
       "battery_module_nominal_capacity": { "name": "Batterimodul {module} Nominel kapacitet" },
       "battery_module_voltage": { "name": "Batterimodul {module} Spænding" },
-      "battery_module_serial": { "name": "Batterimodul {module} Serienummer" }
+      "battery_module_serial": { "name": "Batterimodul {module} Serienummer" },
+      "battery_module_position": { "name": "Batterimodul {module} Placering" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Tredjeparts solpanel" },
