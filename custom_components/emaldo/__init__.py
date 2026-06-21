@@ -190,10 +190,25 @@ async def _background_first_refresh(
     Exceptions are swallowed so a transient E2E/REST failure during startup
     does not fail the whole integration setup.
     """
+    _LOGGER.debug(
+        "EMALDO_DEBUG[background_first_refresh_start] name=%s "
+        "last_update_success=%s",
+        name,
+        getattr(coordinator, "last_update_success", "n/a"),
+    )
     try:
         await coordinator.async_config_entry_first_refresh()
     except Exception:  # noqa: BLE001
-        _LOGGER.debug("%s first refresh failed in background", name, exc_info=True)
+        _LOGGER.debug(
+            "%s first refresh failed in background", name, exc_info=True
+        )
+    _LOGGER.debug(
+        "EMALDO_DEBUG[background_first_refresh_done] name=%s "
+        "last_update_success=%s data_is_none=%s",
+        name,
+        getattr(coordinator, "last_update_success", "n/a"),
+        coordinator.data is None,
+    )
 
 
 async def _async_options_updated(

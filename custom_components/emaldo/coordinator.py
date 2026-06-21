@@ -441,6 +441,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
         self._battery_modules_poll_counter: int = 59  # trigger on first successful poll
         self._battery_modules: list[dict] = []
+        # Currently-running battery module scan task (if any). The 0x06 scan
+        # probes up to 13 cabinet slots and can take tens of seconds; running
+        # it in the background keeps `_async_update_data` from blocking, so the
+        # first power-flow reading reaches sensors immediately.
+        self._battery_scan_task: asyncio.Task | None = None
         # Modules keyed by scan slot index so each physical cabinet slot keeps
         # a stable HA sensor even when modules respond in different orders or
         # some slots are temporarily silent (#23).
@@ -456,6 +461,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_last_reconnect: float | None = None
         # Diagnostic info collected by executor thread, logged from main thread
         self._e2e_diag: str = "(not yet called)"
+        #: Set to ``True`` once the very first successful E2E read completes.
+        #: Entities use this to suppress state writes during the initial
+        #: handshake/reconnect phase, preventing a flash of "unavailable" over
+        #: previously restored sensor values on HA restart.
+        self._successful_first_refresh: bool = False
 
     # -- Proxy properties so sensors can share one class across coordinators --
 
@@ -476,7 +486,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return self._parent.device_name
 
     async def async_shutdown(self) -> None:
-        """Cancel keepalive and close the UDP session."""
+        """Cancel keepalive, battery scan and close the UDP session."""
         if self._keepalive_task is not None:
             self._keepalive_task.cancel()
             try:
@@ -484,6 +494,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             except (asyncio.CancelledError, Exception):
                 pass
             self._keepalive_task = None
+        if self._battery_scan_task is not None:
+            self._battery_scan_task.cancel()
+            try:
+                await self._battery_scan_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._battery_scan_task = None
         if self._session is not None:
             await self.hass.async_add_executor_job(self._session.close)
             self._invalidate_session_ref()
@@ -697,6 +714,15 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         import time as _time
         self.stats_total_polls += 1
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "EMALDO_DEBUG[realtime_poll_start] poll #%d first_successful_refresh=%s "
+                "data_is_none=%s last_update_success=%s",
+                self.stats_total_polls,
+                self._successful_first_refresh,
+                self.data is None,
+                self.last_update_success,
+            )
 
         try:
             data = await self.hass.async_add_executor_job(self._read_power_flow)
@@ -815,6 +841,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._consecutive_read_errors = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
+        was_first = not self._successful_first_refresh
+        self._successful_first_refresh = True
+        if was_first:
+            _LOGGER.info(
+                "EMALDO_DEBUG[first_successful_refresh] realtime coordinator got its "
+                "first valid E2E read — entities will now start writing state"
+            )
 
         # Poll balancing state every 6th successful read (~60s) using the same session.
         # This avoids opening a competing UDP socket from the slow coordinator.
@@ -899,48 +932,77 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # socket: the 0x06 scan probes up to 13 cabinet slots and would hold
         # the realtime session lock for tens of seconds, starving the keepalive
         # task and letting the relay drop the realtime session (#37).
+        #
+        # The scan is dispatched as a BACKGROUND task rather than awaited here,
+        # because a cold-start scan can take ~50 s and would otherwise delay
+        # the first power-flow reading from reaching sensors (the coordinator
+        # cannot notify listeners until `_async_update_data` returns). The scan
+        # updates `_battery_modules`/`_battery_module_slots` and notifies
+        # listeners itself once it finishes.
         self._battery_modules_poll_counter += 1
         if self._battery_modules_poll_counter >= 60:
             self._battery_modules_poll_counter = 0
-            try:
-                cached_count = len(self._battery_modules)
-                _LOGGER.debug(
-                    "Battery module info poll starting: device_id=%s model=%s cached_modules=%d",
-                    self.device_id,
-                    self.device_model,
-                    cached_count,
+            # Don't start a new scan while one is already running.
+            if self._battery_scan_task is None or self._battery_scan_task.done():
+                self._battery_scan_task = self.hass.async_create_task(
+                    self._async_scan_battery_modules(),
+                    name=f"{DOMAIN}_battery_scan",
                 )
-                modules = await self.hass.async_add_executor_job(
-                    self._read_battery_info_standalone
-                )
-                returned_count = len(modules or [])
-                returned_serials = [m.get("serial") for m in modules or []]
-                _LOGGER.debug(
-                    "Battery module info poll returned %d modules: serials=%s",
-                    returned_count,
-                    returned_serials,
-                )
-                if modules:
-                    self._battery_modules = modules
-                    # Map each responding module to its physical scan slot so
-                    # sensors stay tied to cabinet positions, not to serials or
-                    # response order (#23).
-                    for m in modules:
-                        slot = m.get("scan_index")
-                        if slot is not None:
-                            self._battery_module_slots[slot] = m
-                else:
-                    _LOGGER.debug(
-                        "Battery module info poll returned no modules; retaining cached_modules=%d",
-                        cached_count,
-                    )
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
 
         data["battery_modules"] = self._battery_modules
         data["battery_module_slots"] = self._battery_module_slots
 
         return data
+
+    async def _async_scan_battery_modules(self) -> None:
+        """Run the 0x06 battery-module scan off the realtime poll path.
+
+        Updates ``_battery_modules`` / ``_battery_module_slots`` and notifies
+        listeners so the per-slot battery sensors pick up new data without
+        blocking a realtime power-flow refresh.
+        """
+        try:
+            cached_count = len(self._battery_modules)
+            _LOGGER.debug(
+                "Battery module info poll starting: device_id=%s model=%s cached_modules=%d",
+                self.device_id,
+                self.device_model,
+                cached_count,
+            )
+            modules = await self.hass.async_add_executor_job(
+                self._read_battery_info_standalone
+            )
+            returned_count = len(modules or [])
+            returned_serials = [m.get("serial") for m in modules or []]
+            _LOGGER.debug(
+                "Battery module info poll returned %d modules: serials=%s",
+                returned_count,
+                returned_serials,
+            )
+            if modules:
+                self._battery_modules = modules
+                # Map each responding module to its physical scan slot so
+                # sensors stay tied to cabinet positions, not to serials or
+                # response order (#23).
+                for m in modules:
+                    slot = m.get("scan_index")
+                    if slot is not None:
+                        self._battery_module_slots[slot] = m
+                # Propagate to the coordinator's current data dict so the
+                # immediate listener notification below reflects the new
+                # modules (otherwise per-slot sensors would lag one poll).
+                if isinstance(self.data, dict):
+                    self.data["battery_modules"] = self._battery_modules
+                    self.data["battery_module_slots"] = self._battery_module_slots
+            else:
+                _LOGGER.debug(
+                    "Battery module info poll returned no modules; retaining cached_modules=%d",
+                    cached_count,
+                )
+            # Notify listeners so battery-module sensors reflect the new data.
+            self.async_update_listeners()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
 
     @property
     def regulate_frequency(self) -> dict | None:

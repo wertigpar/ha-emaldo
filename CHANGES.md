@@ -1,5 +1,42 @@
 # Changes
 
+## 1.0.0-beta12b
+
+### Fixed
+- **Realtime sensors flash to `unknown` on HA restart, then recover after 30–60 s:**
+  two root causes were identified via instrumented debug logs:
+  1. **Initial state write during `async_add_entities`:** When HA loads the
+     sensor platform it calls `async_write_ha_state()` on every entity
+     (including realtime sensors whose coordinator has no data yet —
+     `data is None`). This initial write is **not** routed through
+     `_handle_coordinator_update`, so a guard there alone is insufficient.
+     The entity's `native_value` returns `None`, which HA displays as
+     "unavailable", overwriting the value that was just restored from the
+     previous session's state.
+     - All realtime coordinator entity classes (`EmaldoSensor`,
+       `EmaldoBalancingStateSensor`, `EmaldoBatteryTotalEnergySensor`,
+       `EmaldoBatteryModuleSensor`) now override `async_write_ha_state()`
+       to suppress the write until `EmaldoRealtimeCoordinator` records its
+       first successful E2E read (`_successful_first_refresh` flag). This
+       guards **both** the initial setup write and coordinator-driven
+       updates through a single choke point.
+  2. **Battery module scan blocks the first power-flow delivery for ~54 s:**
+     The 0x06 battery-module scan (probing up to 13 cabinet slots with 5 s
+     timeouts each) ran synchronously inside `_async_update_data`. On cold
+     start the poll counter is set to trigger the scan on the first
+     successful read, so even though valid power-flow data was received
+     within ~4 s, the coordinator could not notify listeners until the
+     scan finished ~54 s later.
+     - The battery module scan now runs in a **background task**
+       (`_async_scan_battery_modules`), so `_async_update_data` returns
+       power-flow data immediately. The scan updates
+       `_battery_modules` / `_battery_module_slots` and calls
+       `async_update_listeners()` when done.
+  - Steady-state behaviour (transient failures keeping last known values) is
+    unchanged.
+  - Recovery time after HA restart is now dominated by the E2E handshake
+    alone (~4–10 s), instead of handshake + battery scan (~58 s).
+
 ## 1.0.0-beta12a
 
 ### Fixed
