@@ -1,5 +1,35 @@
 # Changes
 
+## 1.0.0-beta12c
+
+### Fixed
+- **Transient cloud network drops no longer force Emaldo sensors unavailable:**
+  intermittent HTTPS disconnects (for example `Remote end closed connection
+  without response` / `Max retries exceeded`) in the slow REST poll path now
+  use a more resilient recovery flow.
+  - On `EmaldoConnectionError`, the coordinator now retries once with a
+    freshly reset shared client/session.
+  - If the retry also fails and a prior successful payload exists, the
+    coordinator keeps the previous data instead of raising `UpdateFailed` for
+    that cycle.
+  - This prevents brief upstream/network blips from propagating as temporary
+    entity unavailability and downstream "SoC could not be read" errors in
+    dependent automations/integrations.
+  - Long-running outages are still surfaced via throttled warning/error logs,
+    and normal updates resume automatically when connectivity recovers.
+- **Transient E2E override read failures no longer raise a misleading warning:**
+  when the schedule coordinator's override-only retry path hits short-lived
+  E2E issues (for example relay session expiry / status `21204`), it now uses
+  the same targeted handling as the main override fetch.
+  - Session-expired retries now invalidate cached E2E credentials before the
+    next retry so the following attempt can perform a clean E2E re-login.
+  - Timeout/protocol/generic E2E retry failures are treated as benign
+    transient misses and do not escalate the whole coordinator state.
+  - If schedule data is otherwise healthy, exhausted override retries are now
+    logged at `INFO` instead of `WARNING`, because the integration continues
+    serving the last known override/schedule state until the next successful
+    poll.
+
 ## 1.0.0-beta12b
 
 ### Fixed

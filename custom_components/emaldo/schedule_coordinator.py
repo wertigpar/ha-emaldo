@@ -252,9 +252,24 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _fetch_e2e_only(self) -> dict | None:
         """Try to fetch E2E overrides without touching REST schedule."""
         client = self._ensure_client()
-        return client.get_overrides(
-            self.home_id, self._device_id, self._model
-        )
+        try:
+            return client.get_overrides(
+                self.home_id, self._device_id, self._model
+            )
+        except EmaldoE2ESessionExpired as err:
+            _LOGGER.info(
+                "E2E session expired during override retry, invalidating (%s)", err
+            )
+            client.invalidate_e2e_session(
+                self.home_id, self._device_id, self._model
+            )
+        except EmaldoE2ETimeout as err:
+            _LOGGER.info("E2E override retry timed out, skipping (%s)", err)
+        except EmaldoE2EProtocolError as err:
+            _LOGGER.info("E2E override retry protocol error, skipping (%s)", err)
+        except EmaldoE2EError as err:
+            _LOGGER.info("E2E override retry failed, skipping (%s)", err)
+        return None
 
     @callback
     def _e2e_retry_callback(self, _now: datetime) -> None:
@@ -294,11 +309,13 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 # If overrides were previously fetched, this is a benign
                 # transient failure that self-heals on the next poll and the
-                # last-known overrides are retained — log at INFO. Only warn
-                # when overrides were never available at all.
-                if self.data is not None and self.data.get("overrides") is not None:
+                # last-known overrides are retained — log at INFO. Also keep
+                # this at INFO when the schedule coordinator otherwise has
+                # valid data; missing overrides alone are not enough to mark
+                # the integration unhealthy.
+                if self.data is not None:
                     _LOGGER.info(
-                        "E2E retries exhausted; keeping last-known overrides"
+                        "E2E retries exhausted; overrides still unavailable, will retry on next schedule poll"
                     )
                 else:
                     _LOGGER.warning(

@@ -97,6 +97,9 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._dual_power_fail_count: int = 0
         self._dual_power_fail_since: float | None = None
         self._dual_power_last_log: float = 0.0
+        self._rest_fail_count: int = 0
+        self._rest_fail_since: float | None = None
+        self._rest_last_log: float = 0.0
 
     @property
     def home_id(self) -> str:
@@ -153,6 +156,53 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return client
 
+    def _on_rest_recovered(self) -> None:
+        """Reset REST failure counters and log recovery after outages."""
+        if self._rest_fail_count > 0:
+            _LOGGER.info(
+                "REST data fetch recovered after %d consecutive connection failure(s)",
+                self._rest_fail_count,
+            )
+        self._rest_fail_count = 0
+        self._rest_fail_since = None
+        self._rest_last_log = 0.0
+
+    def _fallback_to_last_data_on_rest_failure(
+        self, err: EmaldoConnectionError
+    ) -> dict[str, Any] | None:
+        """Return last known data on transient REST failures when available."""
+        if self.data is None:
+            return None
+
+        import time as _time
+        now = _time.time()
+        if self._rest_fail_count == 0:
+            self._rest_fail_since = now
+        self._rest_fail_count += 1
+
+        fail_dur = now - (self._rest_fail_since or now)
+        if self._rest_fail_count == 1:
+            _LOGGER.warning(
+                "REST fetch failed (%s); keeping previous data",
+                err,
+            )
+            self._rest_last_log = now
+        elif fail_dur >= 3600 and now - self._rest_last_log >= 3600:
+            _LOGGER.error(
+                "REST fetch has failed for >%.0fh; keeping previous data (latest: %s)",
+                fail_dur / 3600,
+                err,
+            )
+            self._rest_last_log = now
+        elif now - self._rest_last_log >= 600:
+            _LOGGER.warning(
+                "REST fetch still failing (%d consecutive); keeping previous data",
+                self._rest_fail_count,
+            )
+            self._rest_last_log = now
+
+        return self.data
+
     async def _async_persist_device_binding(self) -> None:
         """Persist resolved device binding into config entry data."""
         if not self._persist_device_binding:
@@ -176,6 +226,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch battery + power data from the REST API."""
+        client: EmaldoClient | None = None
         for attempt in range(2):
             try:
                 client = await self.hass.async_add_executor_job(self._ensure_client)
@@ -194,9 +245,23 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 raise UpdateFailed("Authentication failed after retry") from None
             except EmaldoConnectionError as err:
+                if attempt == 0:
+                    _LOGGER.debug(
+                        "REST connection error on attempt %d/2, retrying once: %s",
+                        attempt + 1,
+                        err,
+                    )
+                    # Recreate Session/connection pool in case a stale socket caused the drop.
+                    self._reset_client()
+                    await asyncio.sleep(1)
+                    continue
+                if (fallback := self._fallback_to_last_data_on_rest_failure(err)) is not None:
+                    return fallback
                 raise UpdateFailed(f"Connection error: {err}") from err
             except Exception as err:
                 raise UpdateFailed(f"Error fetching Emaldo data: {err}") from err
+
+        self._on_rest_recovered()
 
         # Solar MPPT stats — best-effort, not all devices have solar
         solar = None
