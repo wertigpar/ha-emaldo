@@ -521,6 +521,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_empty_reads: int = 0
         self.stats_reconnects: int = 0
         self.stats_keepalive_failures: int = 0
+        self.stats_reconnect_probes: int = 0
+        self.stats_reconnects_avoided: int = 0
         self.stats_last_success: float | None = None
         self.stats_last_failure: float | None = None
         self.stats_last_reconnect: float | None = None
@@ -757,17 +759,67 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         model = self._parent._model  # noqa: SLF001
         if device_id is None or model is None:
             return self._battery_modules
-        creds = client.e2e_login(home_id, device_id, model)
-        return _standalone_read_battery_info(
-            creds,
-            log=lambda msg: _LOGGER.debug("[E2E battery] %s", msg),
-        )
+
+        import time as _time
+        for attempt in range(2):
+            try:
+                creds = client.e2e_login(home_id, device_id, model)
+                return _standalone_read_battery_info(
+                    creds,
+                    log=lambda msg: _LOGGER.debug("[E2E battery] %s", msg),
+                )
+            except EmaldoAuthError:
+                # Token/session may have expired between polls.
+                self._parent._reset_client()  # noqa: SLF001
+                if attempt == 0:
+                    continue
+                raise
+            except EmaldoConnectionError:
+                # Short cloud/API disconnect — rebuild client once and retry.
+                self._parent._reset_client()  # noqa: SLF001
+                if attempt == 0:
+                    _time.sleep(1)
+                    continue
+                raise
+
+        return self._battery_modules
 
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
     #: After this many consecutive reconnect cycles with no recovery, switch from
     #: WARNING to DEBUG to avoid flooding the log during persistent failures.
     _WARN_RECONNECT_THRESHOLD = 3
+
+    async def _async_final_probe_before_reconnect(self) -> dict[str, Any] | None:
+        """Perform one last direct power-flow read before tearing down session.
+
+        Some relays occasionally miss one poll burst and immediately recover on
+        the next request. A final probe reduces unnecessary reconnect churn.
+        """
+        self.stats_reconnect_probes += 1
+        try:
+            data = await self.hass.async_add_executor_job(self._read_power_flow)
+            _LOGGER.debug("[E2E diag] final-probe %s", self._e2e_diag)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("E2E final probe before reconnect failed: %s", err)
+            return None
+        if data is None:
+            return None
+        invalid_channels = get_invalid_realtime_power_channels(data)
+        if invalid_channels:
+            _LOGGER.warning(
+                "E2E final probe rejected by sanity filter (channels=%s, abs_max_w=%d)",
+                ",".join(invalid_channels),
+                REALTIME_POWER_ABS_MAX_W,
+            )
+            return None
+        self.stats_reconnects_avoided += 1
+        _LOGGER.info(
+            "E2E final probe succeeded after empty reads; keeping session "
+            "(reconnects avoided: %d)",
+            self.stats_reconnects_avoided,
+        )
+        return data
 
     async def _async_update_data(self) -> dict[str, Any] | None:
         """Fetch realtime power flow via the persistent E2E session.
@@ -830,37 +882,42 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.stats_empty_reads += 1
             self.stats_last_failure = _time.time()
             if self._empty_reads >= self._MAX_EMPTY_READS:
-                self.stats_reconnects += 1
-                self._consecutive_reconnects += 1
-                self._episode_drops += 1
-                self.stats_last_reconnect = _time.time()
-                if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
-                    # Session expiry is normal relay behaviour — always INFO unless persistent
-                    _LOGGER.info(
-                        "E2E power flow: %d consecutive empty reads, reconnecting "
-                        "(episode drops: %d, reconnects: %d since start)",
-                        self._empty_reads,
-                        self._episode_drops,
-                        self.stats_reconnects,
-                    )
-                elif self._consecutive_reconnects == self._WARN_RECONNECT_THRESHOLD + 1:
-                    _LOGGER.warning(
-                        "E2E power flow: persistent connection failure after %d reconnect "
-                        "cycles — suppressing further reconnect warnings (episode drops: %d). "
-                        "Check device/relay connectivity.",
-                        self._consecutive_reconnects - 1,
-                        self._episode_drops,
-                    )
+                if (probe_data := await self._async_final_probe_before_reconnect()) is not None:
+                    data = probe_data
+                    self._empty_reads = 0
                 else:
-                    _LOGGER.debug(
-                        "E2E power flow: empty reads, reconnecting "
-                        "(episode drops: %d, reconnects: %d since start)",
-                        self._episode_drops,
-                        self.stats_reconnects,
-                    )
-                await self._close_session()
-                self._empty_reads = 0
-                return self.data  # keep last known values visible
+                    self.stats_reconnects += 1
+                    self._consecutive_reconnects += 1
+                    self._episode_drops += 1
+                    self.stats_last_reconnect = _time.time()
+                    if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
+                        # Session expiry is normal relay behaviour — always INFO unless persistent
+                        _LOGGER.info(
+                            "E2E power flow: %d consecutive empty reads, reconnecting "
+                            "(episode drops: %d, reconnects: %d since start)",
+                            self._empty_reads,
+                            self._episode_drops,
+                            self.stats_reconnects,
+                        )
+                    elif self._consecutive_reconnects == self._WARN_RECONNECT_THRESHOLD + 1:
+                        _LOGGER.warning(
+                            "E2E power flow: persistent connection failure after %d reconnect "
+                            "cycles — suppressing further reconnect warnings (episode drops: %d). "
+                            "Check device/relay connectivity.",
+                            self._consecutive_reconnects - 1,
+                            self._episode_drops,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "E2E power flow: empty reads, reconnecting "
+                            "(episode drops: %d, reconnects: %d since start)",
+                            self._episode_drops,
+                            self.stats_reconnects,
+                        )
+                    await self._close_session()
+                    self._empty_reads = 0
+                    return self.data  # keep last known values visible
+                # fall through and process recovered probe_data as a normal success
             # Keep previous data visible to sensors
             _LOGGER.info(
                 "E2E power flow empty read %d/%d, keeping previous values",
@@ -1066,6 +1123,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
             # Notify listeners so battery-module sensors reflect the new data.
             self.async_update_listeners()
+        except EmaldoConnectionError as err:
+            # Expected transient cloud/API failure path; keep cached modules.
+            _LOGGER.debug(
+                "Battery module info poll skipped due to transient connection error; "
+                "retaining cached modules: %s",
+                err,
+            )
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
 

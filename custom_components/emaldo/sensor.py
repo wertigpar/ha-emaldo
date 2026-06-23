@@ -108,7 +108,7 @@ def _battery_charged_today(data: dict[str, Any]) -> float | None:
         return None
     entries = bat_data.get("data", [])
     if not entries:
-        return None
+        return 0.0
     total = sum(
         e[2] + e[3] + (e[4] if len(e) > 4 else 0)
         for e in entries
@@ -123,7 +123,7 @@ def _battery_discharged_today(data: dict[str, Any]) -> float | None:
         return None
     entries = bat_data.get("data", [])
     if not entries:
-        return None
+        return 0.0
     total = sum(e[1] for e in entries if len(e) >= 2)
     return round(total * 5 / 60 / 1000, 2)
 
@@ -134,7 +134,9 @@ def _sum_series(series: dict | None, column: int, interval_min: int = 5) -> floa
         return None
     entries = series.get("data", [])
     if not entries:
-        return None
+        # Around day rollover the API may briefly return an empty list before
+        # the first sample lands. For daily totals this represents 0 kWh.
+        return 0.0
     total = sum(e[column] for e in entries if len(e) > column)
     return round(total * interval_min / 60 / 1000, 3)
 
@@ -156,14 +158,21 @@ def _solar_series_entries(data: dict[str, Any]) -> list | None:
     series = solar_resp.get("mppt") if "mppt" in solar_resp else solar_resp
     if not isinstance(series, dict):
         return None
-    return series.get("data") or None
+    entries = series.get("data")
+    if entries is None:
+        return None
+    if isinstance(entries, list):
+        return entries
+    return None
 
 
 def _solar_string_energy_today(data: dict[str, Any], column: int) -> float | None:
     """Energy produced today by a single MPPT string (kWh)."""
     entries = _solar_series_entries(data)
-    if not entries:
+    if entries is None:
         return None
+    if not entries:
+        return 0.0
     total = sum(e[column] for e in entries if len(e) > column)
     return round(total * 5 / 60 / 1000, 3)
 
@@ -195,8 +204,10 @@ def _solar_energy_today(data: dict[str, Any]) -> float | None:
     single-channel rows.
     """
     entries = _solar_series_entries(data)
-    if not entries:
+    if entries is None:
         return None
+    if not entries:
+        return 0.0
     total = sum(_solar_row_components_w(e)[0] for e in entries)
     return round(total * 5 / 60 / 1000, 3)
 
@@ -204,8 +215,10 @@ def _solar_energy_today(data: dict[str, Any]) -> float | None:
 def _thirdparty_solar_energy_today(data: dict[str, Any]) -> float | None:
     """Third-party-only solar energy produced today (kWh)."""
     entries = _solar_series_entries(data)
-    if not entries:
+    if entries is None:
         return None
+    if not entries:
+        return 0.0
     total = sum(_solar_row_components_w(e)[1] for e in entries)
     return round(total * 5 / 60 / 1000, 3)
 
@@ -565,6 +578,7 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{_uid_base(coordinator)}_{description.key}"
+        self._last_valid_native_value: float | None = None
 
     def _debug_trace_state_write(self, source: str) -> None:
         """Log diagnostic info about a state write attempt.
@@ -644,7 +658,18 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
         """Return the sensor value."""
         if self.coordinator.data is None:
             return None
-        return self.entity_description.value_fn(self.coordinator.data)
+        value = self.entity_description.value_fn(self.coordinator.data)
+        if value is not None:
+            self._last_valid_native_value = value
+            return value
+        if (
+            isinstance(self.coordinator, EmaldoCoordinator)
+            and self.entity_description.state_class != SensorStateClass.TOTAL
+            and self.coordinator.last_update_success
+            and self._last_valid_native_value is not None
+        ):
+            return self._last_valid_native_value
+        return None
 
     @property
     def last_reset(self) -> datetime | None:
@@ -1053,6 +1078,8 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "success_rate_pct": success_rate,
             "empty_reads": c.stats_empty_reads,
             "reconnects": c.stats_reconnects,
+            "reconnect_probes": c.stats_reconnect_probes,
+            "reconnects_avoided": c.stats_reconnects_avoided,
             "keepalive_failures": c.stats_keepalive_failures,
             "last_success": _to_iso(c.stats_last_success),
             "last_failure": _to_iso(c.stats_last_failure),

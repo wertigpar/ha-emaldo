@@ -116,14 +116,24 @@ class EmaldoClient:
         # Retry only on transient HTTP errors (502/503/504), not on
         # read timeouts or connection failures — those block the executor
         # thread for up to total*timeout seconds if retried.
-        retry = Retry(
-            total=3,
-            backoff_factor=0.5,
-            status_forcelist=[502, 503, 504],
-            allowed_methods=["POST", "GET"],
-            read=0,
-            connect=0,
-        )
+        retry_kwargs = {
+            "total": 3,
+            "backoff_factor": 0.5,
+            "status_forcelist": [502, 503, 504],
+            "allowed_methods": ["POST", "GET"],
+            "read": 0,
+            "connect": 0,
+            # Do not retry opaque transport/protocol errors (including TLS EOF)
+            # here. The coordinator already performs one explicit retry with a
+            # client reset, which is easier to reason about and less noisy.
+            "other": 0,
+        }
+        try:
+            retry = Retry(**retry_kwargs)
+        except TypeError:
+            # Backward compatibility for urllib3 versions without "other".
+            retry_kwargs.pop("other", None)
+            retry = Retry(**retry_kwargs)
         adapter = HTTPAdapter(max_retries=retry)
         self._http.mount("https://", adapter)
         self._http.mount("http://", adapter)
