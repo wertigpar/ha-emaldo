@@ -1,5 +1,38 @@
 # Changes
 
+## 1.0.0-beta12d
+
+### Fixed
+- **Reduced reconnect churn during short E2E relay blips:** when realtime
+  polling reaches 3 consecutive empty reads, the coordinator now performs one
+  final immediate probe before closing the session.
+  - If that probe succeeds, the session is kept alive and reconnect is
+    avoided.
+  - New diagnostic counters were added to the realtime connection sensor:
+    `reconnect_probes` and `reconnects_avoided`.
+- **Reduced noisy SSL EOF retry warnings from underlying HTTP stack:** the
+  REST client now disables urllib3 transport-level "other" retries (with
+  backward-compatible fallback for older urllib3 builds).
+  - Transient connection handling remains explicit in the coordinator
+    (reset+single retry, then cached-data fallback), but avoids duplicate
+    lower-level retry noise.
+- **Midnight/day-rollover REST gaps no longer emit `unknown` for daily energy sensors:**
+  when Emaldo day-series endpoints temporarily return an empty `data` list,
+  daily totals now resolve to `0.0` kWh instead of `None`.
+  - This prevents downstream Utility Meter warnings like "received invalid new
+    state ... unknown" during rollover windows.
+  - Empty MPPT/string series are now treated consistently the same way.
+- **Short partial REST payloads no longer blank non-total sensors:** for
+  non-total REST sensors (for example SoC), the entity keeps its last valid
+  value when the coordinator update succeeds but that specific field is
+  temporarily missing.
+- **Battery module background scan is now more resilient to transient cloud login drops:**
+  the standalone module scan retries one time after resetting the shared
+  client when E2E login fails with a connection error.
+  - Expected transient connection failures in this background path are now
+    logged as concise debug lines without full traceback spam, while cached
+    module data is retained.
+
 ## 1.0.0-beta12c
 
 ### Fixed
