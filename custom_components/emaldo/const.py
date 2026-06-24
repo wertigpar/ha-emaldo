@@ -15,7 +15,12 @@ DEFAULT_APP_SECRET = "FpF4Uqiio9k8p9VUSX36UZxy9wLs7ybT"
 DEFAULT_APP_VERSION = "2.8.4"
 
 DEFAULT_SCAN_INTERVAL = 60  # seconds
-REALTIME_SCAN_INTERVAL = 10  # seconds — fast E2E power flow polling
+# Fast E2E power-flow polling. Must stay below the relay's power-flow session
+# TTL so each read re-arms the next one and lands inside the live window.
+# Diagnostics show the session goes cold ~(poll_interval - 0.4)s after the last
+# read/handshake and that keepalive packets do NOT refresh it — only 0x30 reads
+# do. Polling at 5s keeps reads chained inside the ~7-8s observed TTL.
+REALTIME_SCAN_INTERVAL = 5  # seconds — fast E2E power flow polling
 KEEPALIVE_INTERVAL = 7  # seconds — UDP session keepalive (relay TTL ~10s)
 
 # Schedule polling configuration

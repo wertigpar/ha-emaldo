@@ -22,6 +22,7 @@ from .emaldo_lib import (
     EmaldoClient,
     EmaldoAuthError,
     EmaldoConnectionError,
+    EmaldoE2ESessionExpired,
     PersistentE2ESession,
 )
 from .emaldo_lib.exceptions import EmaldoE2EError
@@ -526,8 +527,41 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_last_success: float | None = None
         self.stats_last_failure: float | None = None
         self.stats_last_reconnect: float | None = None
+        self.stats_last_reconnect_reason: str | None = None
+        self.stats_reconnect_reasons: dict[str, int] = {
+            "auth_expired": 0,
+            "read_error": 0,
+            "empty_reads": 0,
+            "invalid_payload": 0,
+            "keepalive_session_expired_21204": 0,
+            "keepalive_closed": 0,
+            "keepalive_exception": 0,
+            "keepalive_other": 0,
+        }
+        self.stats_keepalive_failures_session_expired: int = 0
+        self.stats_keepalive_failures_closed: int = 0
+        self.stats_keepalive_failures_exception: int = 0
+        self.stats_keepalive_failures_other: int = 0
+        self.stats_e2e_rtt_last_ms: float | None = None
+        self.stats_e2e_rtt_min_ms: float | None = None
+        self.stats_e2e_rtt_max_ms: float | None = None
+        self.stats_e2e_rtt_total_ms: float = 0.0
+        self.stats_e2e_rtt_samples: int = 0
+        self.stats_empty_reconnect_deferrals_healthy_keepalive: int = 0
+        self.stats_powerflow_initial_timeouts: int = 0
+        self.stats_powerflow_initial_session_expired: int = 0
+        self.stats_powerflow_initial_nonmatching: int = 0
+        self.stats_powerflow_drain_packets_seen: int = 0
+        self.stats_powerflow_drain_regfreq_hits: int = 0
+        self.stats_powerflow_drain_powerflow_hits: int = 0
+        self.stats_powerflow_drain_session_expired: int = 0
+        self.stats_powerflow_drain_timeouts: int = 0
+        self.stats_powerflow_drain_exhausted: int = 0
+        self.stats_powerflow_last_diag: dict[str, int | bool] = {}
         # Diagnostic info collected by executor thread, logged from main thread
         self._e2e_diag: str = "(not yet called)"
+        self._last_keepalive_success: float | None = None
+        self._empty_reconnect_deferral_streak: int = 0
         #: Set to ``True`` once the very first successful E2E read completes.
         #: Entities use this to suppress state writes during the initial
         #: handshake/reconnect phase, preventing a flash of "unavailable" over
@@ -623,10 +657,55 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._e2e_diag = f"host={session._creds.get('host','?')} has_log={session._log is not None} closed={session.closed}"
         data = session.read_power_flow()
         self._e2e_diag += f" result={'data' if data else 'None'}"
+        diag = session.last_power_flow_diag
+        self.stats_powerflow_last_diag = diag
+        self.stats_powerflow_initial_timeouts += int(diag.get("initial_timeout", 0))
+        self.stats_powerflow_initial_session_expired += int(
+            diag.get("initial_session_expired", 0)
+        )
+        self.stats_powerflow_initial_nonmatching += int(
+            diag.get("initial_nonmatching", 0)
+        )
+        self.stats_powerflow_drain_packets_seen += int(
+            diag.get("drain_packets_seen", 0)
+        )
+        self.stats_powerflow_drain_regfreq_hits += int(
+            diag.get("drain_regfreq_hits", 0)
+        )
+        self.stats_powerflow_drain_powerflow_hits += int(
+            diag.get("drain_powerflow_hits", 0)
+        )
+        self.stats_powerflow_drain_session_expired += int(
+            diag.get("drain_session_expired", 0)
+        )
+        self.stats_powerflow_drain_timeouts += int(
+            diag.get("drain_timeout", 0)
+        )
+        self.stats_powerflow_drain_exhausted += int(
+            diag.get("drain_exhausted", 0)
+        )
+        rtt_ms = session.last_rtt_ms
+        if rtt_ms is not None:
+            self.stats_e2e_rtt_last_ms = round(rtt_ms, 1)
+            self.stats_e2e_rtt_total_ms += rtt_ms
+            self.stats_e2e_rtt_samples += 1
+            if self.stats_e2e_rtt_min_ms is None or rtt_ms < self.stats_e2e_rtt_min_ms:
+                self.stats_e2e_rtt_min_ms = rtt_ms
+            if self.stats_e2e_rtt_max_ms is None or rtt_ms > self.stats_e2e_rtt_max_ms:
+                self.stats_e2e_rtt_max_ms = rtt_ms
         if data is None and session.closed:
             # Session died mid-read — force recreation on next call
             self._invalidate_session_ref()
         return data
+
+    def _record_reconnect(self, reason: str, ts: float) -> None:
+        """Record a reconnect/reset event with a classified root cause."""
+        self.stats_reconnects += 1
+        self.stats_last_reconnect = ts
+        self.stats_last_reconnect_reason = reason
+        self.stats_reconnect_reasons[reason] = (
+            self.stats_reconnect_reasons.get(reason, 0) + 1
+        )
 
     def _write_thirdparty_pv(self, enabled: bool) -> None:
         """Send SET_THIRDPARTYPV_ON (0x41) via the existing persistent session.
@@ -789,6 +868,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     #: After this many consecutive reconnect cycles with no recovery, switch from
     #: WARNING to DEBUG to avoid flooding the log during persistent failures.
     _WARN_RECONNECT_THRESHOLD = 3
+    #: Max times to defer reconnect on empty reads while keepalive remains healthy.
+    _MAX_EMPTY_RECONNECT_DEFERRALS = 3
 
     async def _async_final_probe_before_reconnect(self) -> dict[str, Any] | None:
         """Perform one last direct power-flow read before tearing down session.
@@ -852,6 +933,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._empty_reads = 0
             self._consecutive_reconnects += 1
             self.stats_last_failure = _time.time()
+            self._record_reconnect("auth_expired", self.stats_last_failure)
             _LOGGER.info("E2E auth expired, will re-login on next poll: %s", err)
             return self.data  # keep last known values visible
         except Exception as err:
@@ -859,6 +941,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._empty_reads = 0
             self._consecutive_read_errors += 1
             self.stats_last_failure = _time.time()
+            reconnect_reason = (
+                "keepalive_session_expired_21204"
+                if isinstance(err, EmaldoE2ESessionExpired)
+                else "read_error"
+            )
+            self._record_reconnect(reconnect_reason, self.stats_last_failure)
             if self._consecutive_read_errors >= self._MAX_EMPTY_READS:
                 _LOGGER.warning(
                     "E2E power flow read failed %d times consecutively: %s",
@@ -882,14 +970,35 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.stats_empty_reads += 1
             self.stats_last_failure = _time.time()
             if self._empty_reads >= self._MAX_EMPTY_READS:
+                keepalive_recently_ok = (
+                    self._last_keepalive_success is not None
+                    and (self.stats_last_failure - self._last_keepalive_success)
+                    <= (KEEPALIVE_INTERVAL * 2.5)
+                )
+                if (
+                    keepalive_recently_ok
+                    and self._consecutive_read_errors == 0
+                    and self._empty_reconnect_deferral_streak
+                    < self._MAX_EMPTY_RECONNECT_DEFERRALS
+                ):
+                    self._empty_reconnect_deferral_streak += 1
+                    self.stats_empty_reconnect_deferrals_healthy_keepalive += 1
+                    _LOGGER.info(
+                        "E2E empty reads reached reconnect threshold, but keepalive is healthy "
+                        "(%d/%d deferrals) — deferring reconnect",
+                        self._empty_reconnect_deferral_streak,
+                        self._MAX_EMPTY_RECONNECT_DEFERRALS,
+                    )
+                    return self.data
                 if (probe_data := await self._async_final_probe_before_reconnect()) is not None:
                     data = probe_data
                     self._empty_reads = 0
+                    self._empty_reconnect_deferral_streak = 0
                 else:
-                    self.stats_reconnects += 1
                     self._consecutive_reconnects += 1
                     self._episode_drops += 1
-                    self.stats_last_reconnect = _time.time()
+                    self._record_reconnect("empty_reads", _time.time())
+                    self._empty_reconnect_deferral_streak = 0
                     if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
                         # Session expiry is normal relay behaviour — always INFO unless persistent
                         _LOGGER.info(
@@ -936,9 +1045,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 REALTIME_POWER_ABS_MAX_W,
             )
             if self._empty_reads >= self._MAX_EMPTY_READS:
-                self.stats_reconnects += 1
                 self._consecutive_reconnects += 1
-                self.stats_last_reconnect = _time.time()
+                self._record_reconnect("invalid_payload", _time.time())
+                self._empty_reconnect_deferral_streak = 0
                 await self._close_session()
                 self._empty_reads = 0
             return self.data
@@ -961,6 +1070,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._consecutive_read_errors,
             )
         self._consecutive_read_errors = 0
+        self._empty_reconnect_deferral_streak = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
         was_first = not self._successful_first_refresh
@@ -1163,12 +1273,26 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     ok = False
                 if ok:
                     fail_count = 0
+                    self._last_keepalive_success = _time.time()
                 else:
                     fail_count += 1
                     self.stats_keepalive_failures += 1
+                    reason = "other"
+                    if self._session is not None:
+                        reason = self._session.last_keepalive_failure_reason or "other"
+                    if reason == "session_expired_21204":
+                        self.stats_keepalive_failures_session_expired += 1
+                    elif reason == "closed":
+                        self.stats_keepalive_failures_closed += 1
+                    elif reason == "exception":
+                        self.stats_keepalive_failures_exception += 1
+                    else:
+                        self.stats_keepalive_failures_other += 1
                     _LOGGER.info(
-                        "Keepalive fail #%d (total keepalive failures: %d)",
-                        fail_count, self.stats_keepalive_failures,
+                        "Keepalive fail #%d (total keepalive failures: %d, reason=%s)",
+                        fail_count,
+                        self.stats_keepalive_failures,
+                        reason,
                     )
                     if fail_count >= 2:
                         # Two consecutive keepalive failures just mean the
@@ -1177,6 +1301,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         _LOGGER.info(
                             "Keepalive failed twice, closing session for reconnect"
                         )
+                        reconnect_reason = (
+                            f"keepalive_{reason}"
+                            if reason in {"session_expired_21204", "closed", "exception"}
+                            else "keepalive_other"
+                        )
+                        self._record_reconnect(reconnect_reason, _time.time())
                         await self._close_session()
                         return
         except asyncio.CancelledError:

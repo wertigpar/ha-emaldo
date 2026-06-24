@@ -2816,6 +2816,18 @@ class PersistentE2ESession:
     #: briefly before rebuilding the session.
     RECONNECT_BACKOFF_SECONDS = 2.0
 
+    #: If a power-flow read still gets 21204 immediately after reconnect,
+    #: treat it as relay session propagation lag and retry once after a short
+    #: settle delay on the same fresh session.
+    POST_RECONNECT_FAST_EXPIRE_WINDOW_SECONDS = 0.30
+    POST_RECONNECT_RETRY_DELAY_SECONDS = 0.75
+
+    #: Extra packet drain budget after a power-flow request when the first
+    #: response is not the power payload itself (for example subscription ACKs
+    #: or unrelated pushes arriving first on a healthy session).
+    POWER_FLOW_DRAIN_PACKETS = 5
+    POWER_FLOW_DRAIN_TIMEOUT_SECONDS = 0.5
+
     def __init__(
         self,
         e2e_creds: dict,
@@ -2831,6 +2843,23 @@ class PersistentE2ESession:
         self._session_nonce: str | None = None
         self._closed = False
         self._regulate_frequency_cache: dict | None = None
+        self._last_rtt_ms: float | None = None
+        self._last_keepalive_failure_reason: str | None = None
+        self._last_handshake_monotonic: float | None = None
+        self._last_keepalive_monotonic: float | None = None
+        self._last_21204_monotonic: float | None = None
+        self._last_21204_stage: str | None = None
+        self._last_power_flow_diag: dict[str, int | bool] = {
+            "initial_timeout": 0,
+            "initial_session_expired": 0,
+            "initial_nonmatching": 0,
+            "drain_packets_seen": 0,
+            "drain_regfreq_hits": 0,
+            "drain_powerflow_hits": 0,
+            "drain_session_expired": 0,
+            "drain_timeout": 0,
+            "drain_exhausted": 0,
+        }
         self._lock = threading.Lock()
 
     @property
@@ -2848,6 +2877,21 @@ class PersistentE2ESession:
         """True when the session has an open socket and valid handshake."""
         return self._sock is not None and not self._closed
 
+    @property
+    def last_rtt_ms(self) -> float | None:
+        """Latest UDP request/response RTT in milliseconds."""
+        return self._last_rtt_ms
+
+    @property
+    def last_keepalive_failure_reason(self) -> str | None:
+        """Last keepalive failure reason for diagnostics."""
+        return self._last_keepalive_failure_reason
+
+    @property
+    def last_power_flow_diag(self) -> dict[str, int | bool]:
+        """Diagnostics from the latest power-flow read attempt."""
+        return dict(self._last_power_flow_diag)
+
     def connect(self) -> None:
         """Open the UDP socket and run the alive+heartbeat handshake."""
         if self._sock is not None:
@@ -2863,6 +2907,7 @@ class PersistentE2ESession:
 
     def _do_handshake(self) -> None:
         """Run alive(home) + alive(device) + wake + heartbeat."""
+        started = time.perf_counter()
         home_alive = build_alive_packet(
             sender_end_id=self._creds["home_end_id"],
             sender_group_id=self._creds["home_group_id"],
@@ -2881,6 +2926,10 @@ class PersistentE2ESession:
         self._send_raw(wake, "Wake")
         self._send_raw(heartbeat, "Heartbeat")
         time.sleep(0.2)
+        self._last_handshake_monotonic = time.perf_counter()
+        if self._log:
+            elapsed_ms = (self._last_handshake_monotonic - started) * 1000.0
+            self._log(f"Handshake complete in {elapsed_ms:.1f}ms")
 
     def keepalive(self) -> bool:
         """Send a fresh alive+heartbeat to keep the session alive.
@@ -2900,7 +2949,10 @@ class PersistentE2ESession:
         """
         with self._lock:
             if self._sock is None or self._closed:
+                self._last_keepalive_failure_reason = "closed"
                 return False
+
+            self._last_keepalive_failure_reason = None
 
             try:
                 home_alive = build_alive_packet(
@@ -2919,6 +2971,7 @@ class PersistentE2ESession:
                 self._send_raw(dev_alive, "Keepalive(dev_alive)")
                 self._send_raw(wake, "Keepalive(wake)")
                 self._send_raw(heartbeat, "Keepalive(heartbeat)")
+                self._last_keepalive_monotonic = time.perf_counter()
                 # If the relay reports the session as expired, do NOT reconnect
                 # here (would block the startup-tracked keepalive task).  Signal
                 # failure so the loop tears the session down; read_power_flow
@@ -2926,11 +2979,13 @@ class PersistentE2ESession:
                 if resp is not None and self._is_session_expired(resp):
                     if self._log:
                         self._log("Keepalive saw 21204 — session expired")
+                    self._last_keepalive_failure_reason = "session_expired_21204"
                     return False
                 return True
             except Exception as err:  # noqa: BLE001 - best-effort keepalive
                 if self._log:
                     self._log(f"Keepalive failed: {err}")
+                self._last_keepalive_failure_reason = "exception"
                 return False
 
     def read_power_flow(self) -> dict | None:
@@ -2955,50 +3010,111 @@ class PersistentE2ESession:
         triggers an in-place re-handshake and one retry of the request.  The
         retry passes *reconnect_on_expiry=False* so we never recurse further.
         """
+        self._last_power_flow_diag = {
+            "initial_timeout": 0,
+            "initial_session_expired": 0,
+            "initial_nonmatching": 0,
+            "drain_packets_seen": 0,
+            "drain_regfreq_hits": 0,
+            "drain_powerflow_hits": 0,
+            "drain_session_expired": 0,
+            "drain_timeout": 0,
+            "drain_exhausted": 0,
+        }
         power_pkt = build_subscription_packet(
             self._creds, 0x30, self._session_nonce, payload=bytes([0x01]),
         )
         resp = self._send_raw(power_pkt, "PowerFlow(0x30)")
         if resp is None:
+            self._last_power_flow_diag["initial_timeout"] = 1
             return None
 
         # Session expired — reconnect in place and retry once.
         if self._is_session_expired(resp):
+            self._last_power_flow_diag["initial_session_expired"] = 1
+            now = time.perf_counter()
+            self._last_21204_monotonic = now
+            self._last_21204_stage = "initial"
             if self._log:
-                self._log("Session expired on power-flow read")
+                handshake_age_ms = self._age_ms(self._last_handshake_monotonic, now)
+                keepalive_age_ms = self._age_ms(self._last_keepalive_monotonic, now)
+                self._log(
+                    "Session expired on power-flow read "
+                    f"(age_since_handshake={handshake_age_ms}, "
+                    f"age_since_keepalive={keepalive_age_ms})"
+                )
             if reconnect_on_expiry and self._reconnect_after_expiry():
                 return self._read_power_flow_locked(reconnect_on_expiry=False)
+            if not reconnect_on_expiry:
+                # New timing diagnostics show frequent 21204 responses ~40ms
+                # after reconnect. That likely indicates relay-side session
+                # propagation lag, so retry once after a short settle delay.
+                handshake_age_s = self._age_seconds(self._last_handshake_monotonic, now)
+                if (
+                    handshake_age_s is not None
+                    and handshake_age_s <= self.POST_RECONNECT_FAST_EXPIRE_WINDOW_SECONDS
+                ):
+                    if self._log:
+                        self._log(
+                            "Session expired immediately after reconnect "
+                            f"(age_since_handshake={handshake_age_s * 1000.0:.1f}ms) "
+                            f"— settling {self.POST_RECONNECT_RETRY_DELAY_SECONDS:.2f}s "
+                            "and retrying power-flow once"
+                        )
+                    time.sleep(self.POST_RECONNECT_RETRY_DELAY_SECONDS)
+                    settled_resp = self._send_raw(
+                        power_pkt,
+                        "PowerFlow(0x30)-post_reconnect_settle_retry",
+                    )
+                    if settled_resp is not None and not self._is_session_expired(settled_resp):
+                        settled_result = self._try_parse_power_flow(settled_resp)
+                        if settled_result is not None:
+                            if self._log:
+                                self._log("Post-reconnect settle retry succeeded")
+                            return settled_result
+            if not reconnect_on_expiry and self._log:
+                self._log("Session still expired after reconnect retry")
             return None
 
         result = self._try_parse_power_flow(resp)
         if result is not None:
             return result
+        self._last_power_flow_diag["initial_nonmatching"] = 1
 
-        # First response may be a subscription ACK; drain a few more packets
-        # with a short timeout so we don't stall the caller.
-        # Also passively cache any 0x45 regulate-frequency pushes.
+        # First response may be a subscription ACK or another interleaved push;
+        # drain a few more packets with a short timeout before declaring the
+        # read empty. Also passively cache any 0x45 regulate-frequency pushes.
         prev_timeout = self._sock.gettimeout()
-        self._sock.settimeout(0.5)
+        self._sock.settimeout(self.POWER_FLOW_DRAIN_TIMEOUT_SECONDS)
         try:
-            for _ in range(5):
+            for _ in range(self.POWER_FLOW_DRAIN_PACKETS):
                 try:
                     more_resp, _ = self._sock.recvfrom(4096)
                 except socket.timeout:
+                    self._last_power_flow_diag["drain_timeout"] = 1
                     break
+                self._last_power_flow_diag["drain_packets_seen"] += 1
                 if self._is_session_expired(more_resp):
+                    self._last_power_flow_diag["drain_session_expired"] = 1
+                    self._last_21204_monotonic = time.perf_counter()
+                    self._last_21204_stage = "drain"
                     if self._log:
                         self._log("Session expired mid-drain")
                     break
                 result = self._try_parse_power_flow(more_resp)
                 if result is not None:
+                    self._last_power_flow_diag["drain_powerflow_hits"] += 1
                     return result
                 rf = self._try_parse_regulate_frequency(more_resp)
                 if rf is not None:
+                    self._last_power_flow_diag["drain_regfreq_hits"] += 1
                     self._regulate_frequency_cache = rf
                     if self._log:
                         self._log(f"Passive 0x45 push captured: {rf}")
         finally:
             self._sock.settimeout(prev_timeout)
+
+        self._last_power_flow_diag["drain_exhausted"] = 1
 
         return None
 
@@ -3409,10 +3525,15 @@ class PersistentE2ESession:
         if self._sock is None or self._addr is None:
             return None
         self._sock.sendto(pkt, self._addr)
+        started = time.perf_counter()
         try:
             resp, _ = self._sock.recvfrom(4096)
+            self._last_rtt_ms = (time.perf_counter() - started) * 1000.0
             if self._log:
-                self._log(f"{label}: sent {len(pkt)}B → got {len(resp)}B")
+                self._log(
+                    f"{label}: sent {len(pkt)}B → got {len(resp)}B "
+                    f"(rtt={self._last_rtt_ms:.1f}ms)"
+                )
             return resp
         except socket.timeout:
             if self._log:
@@ -3447,19 +3568,40 @@ class PersistentE2ESession:
         """
         if self._closed:
             return False
+        reconnect_started = time.perf_counter()
+        expiry_age_ms = self._age_ms(self._last_21204_monotonic, reconnect_started)
         if self._log:
             self._log(
-                f"Session expired (21204) — reconnecting after "
+                "Session expired (21204) "
+                f"stage={self._last_21204_stage or 'unknown'} "
+                f"age_since_21204={expiry_age_ms} — reconnecting after "
                 f"{self.RECONNECT_BACKOFF_SECONDS:.1f}s backoff"
             )
         time.sleep(self.RECONNECT_BACKOFF_SECONDS)
         try:
             self._reconnect()
+            if self._log:
+                elapsed_ms = (time.perf_counter() - reconnect_started) * 1000.0
+                self._log(f"Reconnect after 21204 completed in {elapsed_ms:.1f}ms")
             return True
         except Exception as err:  # noqa: BLE001 - best-effort reconnect
             if self._log:
                 self._log(f"Reconnect failed: {err}")
             return False
+
+    @staticmethod
+    def _age_ms(event_ts: float | None, now_ts: float) -> str:
+        """Format age from event timestamp to ``now_ts`` for debug logs."""
+        if event_ts is None:
+            return "n/a"
+        return f"{(now_ts - event_ts) * 1000.0:.1f}ms"
+
+    @staticmethod
+    def _age_seconds(event_ts: float | None, now_ts: float) -> float | None:
+        """Return age in seconds between ``event_ts`` and ``now_ts``."""
+        if event_ts is None:
+            return None
+        return now_ts - event_ts
 
     @classmethod
     def _is_session_expired(cls, resp: bytes) -> bool:
