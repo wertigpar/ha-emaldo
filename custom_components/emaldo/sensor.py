@@ -1072,6 +1072,14 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
                 100.0 * c.stats_successful_polls / c.stats_total_polls, 1
             )
 
+        avg_rtt = None
+        if c.stats_e2e_rtt_samples > 0:
+            avg_rtt = round(c.stats_e2e_rtt_total_ms / c.stats_e2e_rtt_samples, 1)
+
+        reconnect_reasons = {
+            key: value for key, value in c.stats_reconnect_reasons.items() if value > 0
+        }
+
         return {
             "total_polls": c.stats_total_polls,
             "successful_polls": c.stats_successful_polls,
@@ -1080,7 +1088,33 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "reconnects": c.stats_reconnects,
             "reconnect_probes": c.stats_reconnect_probes,
             "reconnects_avoided": c.stats_reconnects_avoided,
+            "empty_reconnect_deferrals_healthy_keepalive": c.stats_empty_reconnect_deferrals_healthy_keepalive,
+            "last_reconnect_reason": c.stats_last_reconnect_reason,
+            "reconnect_reasons": reconnect_reasons,
             "keepalive_failures": c.stats_keepalive_failures,
+            "keepalive_failures_session_expired": c.stats_keepalive_failures_session_expired,
+            "keepalive_failures_closed": c.stats_keepalive_failures_closed,
+            "keepalive_failures_exception": c.stats_keepalive_failures_exception,
+            "keepalive_failures_other": c.stats_keepalive_failures_other,
+            "e2e_rtt_last_ms": c.stats_e2e_rtt_last_ms,
+            "e2e_rtt_avg_ms": avg_rtt,
+            "e2e_rtt_min_ms": round(c.stats_e2e_rtt_min_ms, 1)
+            if c.stats_e2e_rtt_min_ms is not None
+            else None,
+            "e2e_rtt_max_ms": round(c.stats_e2e_rtt_max_ms, 1)
+            if c.stats_e2e_rtt_max_ms is not None
+            else None,
+            "e2e_rtt_samples": c.stats_e2e_rtt_samples,
+            "powerflow_initial_timeouts": c.stats_powerflow_initial_timeouts,
+            "powerflow_initial_session_expired": c.stats_powerflow_initial_session_expired,
+            "powerflow_initial_nonmatching": c.stats_powerflow_initial_nonmatching,
+            "powerflow_drain_packets_seen": c.stats_powerflow_drain_packets_seen,
+            "powerflow_drain_regfreq_hits": c.stats_powerflow_drain_regfreq_hits,
+            "powerflow_drain_powerflow_hits": c.stats_powerflow_drain_powerflow_hits,
+            "powerflow_drain_session_expired": c.stats_powerflow_drain_session_expired,
+            "powerflow_drain_timeouts": c.stats_powerflow_drain_timeouts,
+            "powerflow_drain_exhausted": c.stats_powerflow_drain_exhausted,
+            "powerflow_last_diag": c.stats_powerflow_last_diag,
             "last_success": _to_iso(c.stats_last_success),
             "last_failure": _to_iso(c.stats_last_failure),
             "last_reconnect": _to_iso(c.stats_last_reconnect),

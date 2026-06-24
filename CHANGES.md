@@ -1,5 +1,75 @@
 # Changes
 
+## 1.0.0-beta12e
+
+### Fixed
+- **Realtime power-flow success rate (poll cadence vs. relay session window):**
+  the realtime power-flow poll interval was reduced (10 s → 8 s → 5 s) so reads
+  land inside the relay's live power-flow session window.
+  - Diagnostics showed failures occur at `age_since_handshake ≈ poll_interval`
+    (10 s poll → ~9.6 s, 8 s poll → ~7.6 s, 5 s poll → ~4.6 s) while
+    `age_since_keepalive` is uncorrelated — i.e. keepalive packets do NOT
+    refresh the power-flow data session; only 0x30 reads (or a handshake)
+    re-arm it. Polling below the window chains reads inside the live session.
+  - Success rate improved 60% → 68% → ~75% across 10 s → 8 s → 5 s.
+  - **Remaining failures are relay/device-side, not client-fixable:** logs show
+    failures arrive in ~30 s bursts every ~1-3 min where the relay returns
+    21204 even to an immediate read on a brand-new handshake (`age ≈ 44 ms`),
+    while healthy sessions otherwise live 60-240 s. This is the device rotating
+    its relay session; faster polling shortens the recovery storms (52 s → 30 s)
+    but cannot read data the relay is not serving. ~75% is the practical ceiling.
+  - During these bursts the realtime sensors retain their last successful values
+    and stay available (the coordinator returns the last reading rather than
+    raising `UpdateFailed`), so the dashboard does not flap to unavailable.
+
+### Added
+- **Realtime E2E diagnostics expanded for root-cause analysis:** the realtime
+  connection diagnostic sensor now exposes reconnect and keepalive failure
+  cause breakdown plus UDP round-trip-time (RTT) telemetry.
+  - New reconnect diagnostics include `last_reconnect_reason` and
+    `reconnect_reasons` counters (for example `empty_reads`, `read_error`,
+    `auth_expired`, keepalive-driven reconnect causes).
+  - New keepalive diagnostics split failures into
+    `keepalive_failures_session_expired`, `keepalive_failures_closed`,
+    `keepalive_failures_exception`, and `keepalive_failures_other`.
+  - New RTT diagnostics include `e2e_rtt_last_ms`, `e2e_rtt_avg_ms`,
+    `e2e_rtt_min_ms`, `e2e_rtt_max_ms`, and `e2e_rtt_samples`.
+
+- **E2E power-flow read packet diagnostics:** added granular counters to
+  distinguish whether empty reads are caused by initial timeouts, session
+  expiry on the first response, non-matching first packet, drain packet loss,
+  or drain exhaustion. These counters appear in the realtime connection
+  diagnostic sensor as ``powerflow_initial_*`` and ``powerflow_drain_*``
+  attributes.
+
+- **21204 timing diagnostics:** added debug timing context for session-expired
+  reads and reconnect attempts, including age since last handshake, age since
+  last keepalive, 21204 stage (initial/drain), and reconnect completion time.
+  This makes startup and steady-state relay expiry patterns directly visible in
+  Home Assistant debug logs.
+
+- **21204 reconnect behavior refined:** after a 21204, the session is
+  re-handshaked and power-flow read is deferred to the next scheduled poll
+  instead of issuing an immediate same-poll retry.
+  - This removes an ineffective retry path that repeatedly hit 21204 within
+    ~40 ms after reconnect and increased relay/session churn.
+- **Session close made lock-safe:** `PersistentE2ESession.close()` now acquires
+  the session lock before closing the socket, reducing keepalive race windows
+  that produced `Bad file descriptor` / `NoneType` keepalive errors.
+
+- **Empty-read reconnect deferral (Phase 2a):** when the keepalive task is
+  healthy and no read errors have occurred, defer reconnect attempts for up to
+  3 consecutive empty reads. This reduces unnecessary reconnect churn during
+  transient relay issues.
+- **Reduced unnecessary reconnects during healthy-session empty-read bursts:**
+  realtime polling now defers a limited number of reconnects when the empty
+  read threshold is reached but keepalive has been recently healthy.
+  - This mitigates reconnect churn caused by short transient read gaps while
+    preserving self-healing behaviour for real session failures.
+  - Added diagnostic counter
+    `empty_reconnect_deferrals_healthy_keepalive` to show how often this guard
+    path is used.
+
 ## 1.0.0-beta12d
 
 ### Fixed
