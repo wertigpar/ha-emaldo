@@ -271,9 +271,17 @@ class EmaldoManualSellingSwitch(
         return self.coordinator.data.get("manual_selling_on")
 
     def _current_target(self) -> int:
-        """Return the last-known target kWh so turn_on preserves it."""
+        """Return the target kWh to start selling with.
+
+        Prefers the user's intended target (set via the number entity and never
+        overwritten by coordinator polling) over the firmware-reported value, so
+        a target staged before selling starts is honoured (#42).
+        """
         if self.coordinator.data is None:
             return 1
+        intended = self.coordinator.data.get("manual_selling_intended_target")
+        if intended is not None:
+            return max(1, int(round(intended)))
         return max(1, int(round(self.coordinator.data.get("manual_selling_target_kwh") or 1)))
 
     async def async_turn_on(self, **kwargs: Any) -> None:

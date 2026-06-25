@@ -27,6 +27,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -547,11 +548,27 @@ async def async_setup_entry(
         ) -> None:
             slots = (realtime.data or {}).get("battery_module_slots") or {}
             new_entities: list[SensorEntity] = []
+            ent_reg = er.async_get(hass)
+            base = _uid_base(realtime)
             for slot_index in sorted(slots):
                 if slot_index in registered:
                     continue
                 registered.add(slot_index)
+                # Migrate pre-beta12a serial-based unique_ids to the slot-based
+                # scheme so existing entities keep their history/dashboards
+                # instead of being recreated (#43). The serial->slot mapping is
+                # only known after a live scan, which is why this runs here
+                # rather than in async_migrate_entry.
+                serial = (slots[slot_index] or {}).get("serial")
                 for metric in _BATTERY_MODULE_METRIC_CONFIG:
+                    if serial:
+                        old_uid = f"{base}_module_{serial}_{metric}"
+                        new_uid = f"{base}_module_slot_{slot_index}_{metric}"
+                        old_eid = ent_reg.async_get_entity_id("sensor", DOMAIN, old_uid)
+                        if old_eid is not None and (
+                            ent_reg.async_get_entity_id("sensor", DOMAIN, new_uid) is None
+                        ):
+                            ent_reg.async_update_entity(old_eid, new_unique_id=new_uid)
                     new_entities.append(
                         EmaldoBatteryModuleSensor(realtime, slot_index, metric)
                     )
