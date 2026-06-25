@@ -1,5 +1,11 @@
 # Changes
 
+## 1.0.0-beta13
+
+### Changed
+
+Default App Version 2.8.6
+
 ## 1.0.0-beta12f
 
 ### Changed
