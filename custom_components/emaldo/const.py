@@ -12,7 +12,7 @@ CONF_APP_VERSION = "app_version"
 
 DEFAULT_APP_ID = "CXRqKjx2MzSAkdyucR9NDyPiiQR2vQcQ"
 DEFAULT_APP_SECRET = "FpF4Uqiio9k8p9VUSX36UZxy9wLs7ybT"
-DEFAULT_APP_VERSION = "2.8.4"
+DEFAULT_APP_VERSION = "2.8.6"
 
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 # Fast E2E power-flow polling. Must stay below the relay's power-flow session
