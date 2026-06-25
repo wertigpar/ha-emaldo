@@ -959,10 +959,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
             return self.data  # keep last known values visible
 
-        # Ensure keepalive task is running
+        # Ensure keepalive task is running. Created as a config-entry
+        # background task (not hass.async_create_task) so HA's bootstrap does
+        # not wait for this long-running loop during the "Wrapping up" phase,
+        # which would otherwise delay "Home Assistant has started".
         if self._keepalive_task is None or self._keepalive_task.done():
-            self._keepalive_task = self.hass.async_create_task(
-                self._keepalive_loop(), name=f"{DOMAIN}_keepalive"
+            self._keepalive_task = self._entry.async_create_background_task(
+                self.hass, self._keepalive_loop(), name=f"{DOMAIN}_keepalive"
             )
 
         if data is None:
@@ -1176,7 +1179,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._battery_modules_poll_counter = 0
             # Don't start a new scan while one is already running.
             if self._battery_scan_task is None or self._battery_scan_task.done():
-                self._battery_scan_task = self.hass.async_create_task(
+                # Background task (not hass.async_create_task) so a cold-start
+                # scan never blocks HA bootstrap's "Wrapping up" phase.
+                self._battery_scan_task = self._entry.async_create_background_task(
+                    self.hass,
                     self._async_scan_battery_modules(),
                     name=f"{DOMAIN}_battery_scan",
                 )
