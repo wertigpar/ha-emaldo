@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -563,7 +564,37 @@ async def async_setup_entry(
         _maybe_add_battery_modules()  # Handle case where data is already available
 
 
-class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
+class _RealtimeRestoreSensor(RestoreSensor):
+    """Mixin for realtime E2E sensors that restores the previous reading.
+
+    On HA restart the E2E handshake (plus any relay reconnect) can take
+    ~15-20 s. Without a value to fall back on, these sensors would report
+    ``unavailable`` for that whole window. We restore the last persisted
+    native value and serve it until the first successful E2E read lands, so
+    the entity stays available and simply shows its previous reading during
+    the cold-start window.
+    """
+
+    _restored_native_value: Any = None
+
+    async def async_added_to_hass(self) -> None:
+        """Load the last persisted native value for the cold-start fallback."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        if last is not None and last.native_value is not None:
+            self._restored_native_value = last.native_value
+
+    def _cold_start_value(self) -> Any:
+        """Return the restored reading before the first E2E read completes."""
+        coordinator = self.coordinator
+        if isinstance(coordinator, EmaldoRealtimeCoordinator) and not getattr(
+            coordinator, "_successful_first_refresh", False
+        ):
+            return self._restored_native_value
+        return None
+
+
+class EmaldoSensor(_RealtimeRestoreSensor, CoordinatorEntity[EmaldoCoordinator]):
     """Representation of an Emaldo sensor."""
 
     entity_description: EmaldoSensorEntityDescription
@@ -579,67 +610,6 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{_uid_base(coordinator)}_{description.key}"
         self._last_valid_native_value: float | None = None
-
-    def _debug_trace_state_write(self, source: str) -> None:
-        """Log diagnostic info about a state write attempt.
-
-        Used to diagnose the cold-start "unknown" flash. Grep the log for
-        EMALDO_DEBUG to follow the sequence on HA restart.
-        """
-        rt = isinstance(self.coordinator, EmaldoRealtimeCoordinator)
-        first_ok = getattr(self.coordinator, "_successful_first_refresh", None)
-        lus = getattr(self.coordinator, "last_update_success", "n/a")
-        try:
-            nv = self.native_value
-        except Exception as err:  # noqa: BLE001
-            nv = f"<error: {err}>"
-        _LOGGER.debug(
-            "EMALDO_DEBUG[%s] entity=%s rt_coordinator=%s "
-            "first_successful_refresh=%s last_update_success=%s data_is_none=%s "
-            "available=%s native_value=%r",
-            source,
-            self.entity_id or self._attr_unique_id,
-            rt,
-            first_ok,
-            lus,
-            self.coordinator.data is None,
-            self.available,
-            nv,
-        )
-
-    def _should_suppress_realtime_write(self) -> bool:
-        """Return True if this realtime entity should skip its state write.
-
-        On HA restart the E2E handshake takes several seconds. The realtime
-        coordinator's first successful read has not happened yet, so its
-        ``data`` is ``None`` and any state we write would be ``unknown`` —
-        overwriting the previous run's value that HA just restored from
-        ``.storage``. We suppress writes (both the initial setup write and
-        coordinator-driven updates) until the first genuine E2E reading.
-        """
-        if not isinstance(self.coordinator, EmaldoRealtimeCoordinator):
-            return False
-        return not getattr(self.coordinator, "_successful_first_refresh", False)
-
-    def async_write_ha_state(self) -> None:  # type: ignore[override]
-        """Write HA state, suppressing writes during the cold-start window.
-
-        This catches BOTH the initial write performed by HA during
-        ``async_add_entities`` (which bypasses ``_handle_coordinator_update``)
-        and any subsequent coordinator-driven writes. See
-        :meth:`_should_suppress_realtime_write` for the rationale.
-        """
-        if self._should_suppress_realtime_write():
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                self._debug_trace_state_write("async_write_ha_state(SUPPRESSED)")
-            return
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            self._debug_trace_state_write("async_write_ha_state")
-        super().async_write_ha_state()
-
-    def _handle_coordinator_update(self) -> None:
-        """Forward to :meth:`async_write_ha_state` (which applies the guard)."""
-        self.async_write_ha_state()
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -657,7 +627,7 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
     def native_value(self) -> float | None:
         """Return the sensor value."""
         if self.coordinator.data is None:
-            return None
+            return self._cold_start_value()
         value = self.entity_description.value_fn(self.coordinator.data)
         if value is not None:
             self._last_valid_native_value = value
@@ -963,7 +933,9 @@ class EmaldoScheduleChartSensor(
         }
 
 
-class EmaldoBalancingStateSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity):
+class EmaldoBalancingStateSensor(
+    _RealtimeRestoreSensor, CoordinatorEntity[EmaldoRealtimeCoordinator]
+):
     """Reports the real-time grid frequency regulation (balancing) state."""
 
     _attr_has_entity_name = True
@@ -998,18 +970,8 @@ class EmaldoBalancingStateSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], S
     @property
     def native_value(self) -> str | None:
         rf = self.coordinator.regulate_frequency
-        if not isinstance(rf, dict):
-            return None
-        return rf.get("display")
-
-    def async_write_ha_state(self) -> None:  # type: ignore[override]
-        """Suppress writes until the first successful E2E refresh (cold start)."""
-        if not getattr(self.coordinator, "_successful_first_refresh", False):
-            return
-        super().async_write_ha_state()
-
-    def _handle_coordinator_update(self) -> None:
-        self.async_write_ha_state()
+        display = rf.get("display") if isinstance(rf, dict) else None
+        return display if display is not None else self._cold_start_value()
 
 
 class EmaldoRealtimeStatusSensor(SensorEntity):
@@ -1221,7 +1183,9 @@ _BATTERY_MODULE_METRIC_CONFIG: dict[str, dict[str, Any]] = {
 _BATTERY_MODULE_STRING_METRICS = {"model", "serial", "position"}
 
 
-class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity):
+class EmaldoBatteryModuleSensor(
+    _RealtimeRestoreSensor, CoordinatorEntity[EmaldoRealtimeCoordinator]
+):
     """A sensor for one metric of one physical battery module slot."""
 
     _attr_has_entity_name = True
@@ -1273,7 +1237,7 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
         """Return the metric value for the module in this slot."""
         module = self._module_for_slot()
         if module is None:
-            return None
+            return self._cold_start_value()
         if self._metric == "serial":
             return module.get("serial") or None
         if self._metric == "position":
@@ -1303,18 +1267,9 @@ class EmaldoBatteryModuleSensor(CoordinatorEntity[EmaldoRealtimeCoordinator], Se
                 attrs["battery_soc"] = int(soc)
         return attrs
 
-    def async_write_ha_state(self) -> None:  # type: ignore[override]
-        """Suppress writes until the first successful E2E refresh (cold start)."""
-        if not getattr(self.coordinator, "_successful_first_refresh", False):
-            return
-        super().async_write_ha_state()
-
-    def _handle_coordinator_update(self) -> None:
-        self.async_write_ha_state()
-
 
 class EmaldoBatteryTotalEnergySensor(
-    CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity
+    _RealtimeRestoreSensor, CoordinatorEntity[EmaldoRealtimeCoordinator]
 ):
     """Total energy currently stored across all battery modules.
 
@@ -1357,7 +1312,7 @@ class EmaldoBatteryTotalEnergySensor(
             if val is not None:
                 total += val
                 found = True
-        return total if found else None
+        return total if found else self._cold_start_value()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
@@ -1370,13 +1325,4 @@ class EmaldoBatteryTotalEnergySensor(
             "maximum_capacity_wh": max_capacity,
             "module_count": len(modules),
         }
-
-    def async_write_ha_state(self) -> None:  # type: ignore[override]
-        """Suppress writes until the first successful E2E refresh (cold start)."""
-        if not getattr(self.coordinator, "_successful_first_refresh", False):
-            return
-        super().async_write_ha_state()
-
-    def _handle_coordinator_update(self) -> None:
-        self.async_write_ha_state()
 

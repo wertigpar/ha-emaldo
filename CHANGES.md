@@ -1,5 +1,40 @@
 # Changes
 
+## 1.0.0-beta12f
+
+### Changed
+- **Non-blocking startup:** the realtime keepalive loop and the battery-module
+  scan are now started as Home Assistant config-entry background tasks instead
+  of bootstrap tasks. Home Assistant no longer waits for the E2E handshake or
+  the cabinet scan during the "Wrapping up" phase, so "Home Assistant has
+  started" appears promptly after a restart.
+- **Faster battery-module scan:**
+  - Per-probe timeout reduced to 1.5 s (the initial handshake still uses the
+    full 5 s), so probing empty cabinet slots no longer stalls for the full
+    read timeout.
+  - After the first full discovery the installed slots are cached and
+    re-scanned directly (no tier walk); a full rediscovery runs periodically
+    (every 6th scan) to pick up added or removed modules.
+  - The tier abort now stops only the current tier instead of the whole scan,
+    so a second cabinet whose modules start at a higher physical slot index is
+    still discovered even when the lower slots are empty.
+
+### Fixed
+- **Realtime/E2E sensors no longer flash "unavailable" on restart:** the
+  realtime power-flow, balancing and per-module battery sensors now restore
+  their last value (`RestoreSensor`) and serve it through the cold-start E2E
+  handshake window instead of dropping out. The previous write-suppression
+  (which left the entities stateless until the first read) has been removed.
+  - Note: a restored value is only available once a run with this build has
+    persisted state at least once, so the very first restart after updating may
+    still show no value until the first successful E2E read completes.
+- **Power-flow drain now handles non-timeout socket errors gracefully:** a
+  connection reset or concurrently closed socket during the power-flow drain
+  loop no longer propagates a raw socket traceback. The drain raises a typed
+  `EmaldoE2EError` so the coordinator tears the session down and reconnects on
+  the next poll, and the `settimeout` restore is guarded against a broken
+  socket. Added a `drain_socket_error` diagnostic counter.
+
 ## 1.0.0-beta12e
 
 ### Fixed

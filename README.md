@@ -74,6 +74,11 @@ After setup, configure schedule polling via **Configure**:
 
 Mixed source: slow REST polling (daily totals) and fast E2E polling (realtime power).
 
+> **Startup behavior:** startup is non-blocking — the integration does not delay
+> Home Assistant boot while the E2E session is established or the battery cabinet
+> is scanned. On restart the realtime (E2E) sensors restore their last known
+> value and keep it until the first successful E2E read (typically within ~30 s).
+
 | Sensor | Unit | Description |
 |---|---|---|
 | **Battery SoC** | % | Current state of charge |
