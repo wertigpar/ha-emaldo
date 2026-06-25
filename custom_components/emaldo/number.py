@@ -315,19 +315,31 @@ class EmaldoManualSellingTarget(
         """Return the current target kWh value."""
         if self.coordinator.data is None:
             return None
+        intended = self.coordinator.data.get("manual_selling_intended_target")
+        if intended is not None:
+            return float(max(1, min(100, intended)))
         val = self.coordinator.data.get("manual_selling_target_kwh")
         if val is None:
             return None
         return float(max(1, min(100, val)))
 
     async def async_set_native_value(self, value: float) -> None:
-        """Write new target kWh, preserving the current enabled state."""
+        """Stage the target kWh, only writing to firmware when selling is active.
+
+        Writing the target before a selling session starts is ignored/reset by
+        the firmware, and a subsequent coordinator poll would then overwrite the
+        requested value with the firmware default. We therefore record the
+        user's intended target locally and only push it to the firmware when a
+        session is already running; the switch sends it when selling starts (#42).
+        """
         target = int(round(value))
         enabled = bool((self.coordinator.data or {}).get("manual_selling_on", False))
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_manual_selling, enabled, target  # noqa: SLF001
-        )
+        if enabled:
+            await self.hass.async_add_executor_job(
+                self.coordinator._write_manual_selling, True, target  # noqa: SLF001
+            )
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
             updated["manual_selling_target_kwh"] = float(target)
+            updated["manual_selling_intended_target"] = float(target)
             self.coordinator.async_set_updated_data(updated)

@@ -1,5 +1,23 @@
 # Changes
 
+## 1.0.0-beta13b
+
+### Fixed
+- **Manual selling target no longer overwritten by polling (#42):** setting the
+  manual selling target now stages the user's intended value instead of writing
+  it to the firmware immediately. Previously, setting a target before enabling
+  manual selling was reset by the firmware and then overwritten by the next
+  coordinator poll, so the session could start with the wrong amount (e.g. 1 kWh
+  instead of 2 kWh). A separate `manual_selling_intended_target` is now tracked,
+  preferred by the target number and the switch's start command, and never
+  clobbered by polling until a selling session is actually active.
+- **Battery module entity history preserved across the slot-ID change (#43):**
+  the slot-based per-module `unique_id` introduced in beta12a now migrates
+  existing serial-based entities in the registry instead of orphaning them.
+  History, statistics, dashboards and automations referencing those sensors are
+  retained. The migration matches by module serial and runs once a battery scan
+  reveals the serial-to-slot mapping.
+
 ## 1.0.0-beta13
 
 ### Changed

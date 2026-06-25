@@ -1136,13 +1136,28 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                             data[_k] = self.data[_k]
 
             # Poll manual selling state alongside balancing (~60s).
-            _MS_KEYS = ("manual_selling_on", "manual_selling_target_kwh", "manual_selling_sold_kwh")
+            # ``manual_selling_intended_target`` holds the user's pending target
+            # set via the NumberEntity. Polling must never overwrite it with the
+            # firmware-reported value before a selling session actually starts,
+            # otherwise the requested amount is silently replaced (#42).
+            _MS_KEYS = (
+                "manual_selling_on",
+                "manual_selling_target_kwh",
+                "manual_selling_sold_kwh",
+                "manual_selling_intended_target",
+            )
             try:
                 ms = await self.hass.async_add_executor_job(self._read_manual_selling)
                 if ms is not None:
                     data["manual_selling_on"] = ms["enabled"]
                     data["manual_selling_target_kwh"] = ms["target_energy_kwh"]
                     data["manual_selling_sold_kwh"] = ms["sold_so_far_kwh"]
+                    # Preserve the pending intended target until a session is
+                    # active; once selling starts the firmware value is
+                    # authoritative and the intent is dropped.
+                    intended = (self.data or {}).get("manual_selling_intended_target")
+                    if intended is not None and not ms["enabled"]:
+                        data["manual_selling_intended_target"] = intended
                 elif self.data:
                     for _k in _MS_KEYS:
                         if _k in self.data:
@@ -1158,7 +1173,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             for _k in ("sell_limit_on", "sell_limit_threshold"):
                 if _k in self.data:
                     data[_k] = self.data[_k]
-            for _k in ("manual_selling_on", "manual_selling_target_kwh", "manual_selling_sold_kwh"):
+            for _k in (
+                "manual_selling_on",
+                "manual_selling_target_kwh",
+                "manual_selling_sold_kwh",
+                "manual_selling_intended_target",
+            ):
                 if _k in self.data:
                     data[_k] = self.data[_k]
 
