@@ -936,6 +936,21 @@ def read_battery_info(
         did not reply at all, or ``"empty"`` for a present-but-non-battery
         reply (short ACK or unparseable payload).
         """
+        # Drain any stale UDP datagrams (late replies from previous probes)
+        # before sending this probe.  Without draining, a slow-responding
+        # module at slot N-1 can deliver its reply during slot N's receive
+        # window, causing slot N's _probe_slot to return slot N-1's data and
+        # assign it scan_index=N — producing the cascading +1 shift reported
+        # in issue #44.
+        _cur_timeout = sock.gettimeout()
+        sock.settimeout(0)
+        while True:
+            try:
+                sock.recvfrom(4096)
+            except OSError:
+                break
+        sock.settimeout(_cur_timeout)
+
         req = build_subscription_packet(
             e2e_creds, 0x06, session_nonce,
             payload=bytes([idx]),

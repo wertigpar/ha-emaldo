@@ -1,5 +1,24 @@
 # Changes
 
+## 1.0.0-beta13c
+
+### Fixed
+- **Battery module sensors assigned to wrong slots intermittently (#44):** when a
+  module responded slowly (past `probe_timeout`), its UDP packet could sit in the
+  socket buffer and be received during the *next* slot's probe window. The next
+  slot then got the previous module's data with an incremented `scan_index`,
+  producing a cascading +1 shift (module 5 shows module 4 values, module 6 shows
+  module 5 values, …) and a phantom extra module at the end. Fixed by draining
+  any pending UDP datagrams from the socket immediately before each slot probe,
+  so late arrivals from earlier probes are discarded rather than misassigned.
+- **Power Store device badge showed Battery Module 1 SoC instead of whole-system
+  Battery SoC:** per-module `soc` sensors had `device_class=SensorDeviceClass.BATTERY`,
+  which caused Home Assistant to pick the alphabetically-first module sensor
+  (`battery_module_1_soc`) as the device badge instead of the system-wide
+  `battery_soc` sensor. Removed `device_class=BATTERY` from per-module SoC
+  sensors; the system-wide `battery_soc` is now the sole battery-class entity
+  on the device and displays correctly in the top-right of the Power Store page.
+
 ## 1.0.0-beta13b
 
 ### Fixed

@@ -1112,7 +1112,10 @@ _BATTERY_MODULE_METRIC_CONFIG: dict[str, dict[str, Any]] = {
     "soc": {
         "translation_key": "battery_module_soc",
         "unit": PERCENTAGE,
-        "device_class": SensorDeviceClass.BATTERY,
+        # No device_class=BATTERY here: the system-wide battery_soc sensor
+        # already carries that class, and HA would otherwise pick the
+        # per-module soc (alphabetically first) as the device badge instead
+        # of showing the whole Power Store SoC in the device top-right.
         "state_class": SensorStateClass.MEASUREMENT,
         "icon": "mdi:battery",
     },
