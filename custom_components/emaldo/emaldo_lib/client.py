@@ -820,6 +820,28 @@ class EmaldoClient:
         with self._e2e_lock:
             self._e2e_creds_cache.pop(key, None)
 
+    def get_e2e_credentials(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        *,
+        force_refresh: bool = False,
+    ) -> dict:
+        """Public accessor for the shared, cached E2E credentials.
+
+        All E2E consumers (the realtime stream session and the periodic REST/EV
+        reads) MUST use this rather than calling :meth:`e2e_login` directly:
+        ``e2e_login`` rotates the device ``chat_secret`` server-side, which
+        expires any other live UDP session and triggers a 21204 storm. Sharing
+        one cached credential generation keeps a single ``chat_secret`` valid
+        for all consumers (refreshed only on the TTL or an explicit
+        ``force_refresh`` after a confirmed session expiry).
+        """
+        return self._get_e2e_credentials(
+            home_id, device_id, model, force_refresh=force_refresh
+        )
+
     def _get_e2e_credentials(
         self,
         home_id: str,
@@ -829,10 +851,10 @@ class EmaldoClient:
         force_refresh: bool = False,
     ) -> dict:
         """Return cached E2E credentials, refreshing them when needed."""
-        key = self._e2e_key(home_id, device_id, model)
         now = time.monotonic()
 
         with self._e2e_lock:
+            key = self._e2e_key(home_id, device_id, model)
             entry = self._e2e_creds_cache.get(key)
             expired = (
                 entry is None

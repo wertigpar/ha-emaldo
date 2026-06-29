@@ -1059,6 +1059,31 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             key: value for key, value in c.stats_reconnect_reasons.items() if value > 0
         }
 
+        # Subscribe-and-stream counters (beta13d). Cumulative totals survive
+        # session reconnects; the live values reflect the current session only.
+        stream_attrs: dict[str, Any] = {}
+        if getattr(c, "stats_stream_resubscribes_total", 0) or getattr(
+            c, "stats_stream_frames_total", 0
+        ):
+            stream_attrs["stream_mode"] = True
+            stream_attrs["stream_frames_received"] = c.stats_stream_frames_total
+            stream_attrs["stream_resubscribes"] = c.stats_stream_resubscribes_total
+            stream_attrs["stream_reconnects"] = c.stats_stream_reconnects_total
+            stream_diag = getattr(c, "_stream_diag", None) or {}
+            stream_attrs["stream_drain_packets"] = stream_diag.get("drain_packets")
+            stream_attrs["stream_drain_unparsed"] = stream_diag.get("drain_unparsed")
+            stream_attrs["stream_last_reconnect_reason"] = stream_diag.get(
+                "last_reconnect_reason"
+            )
+            stream_attrs["stream_reconnect_reasons"] = stream_diag.get(
+                "reconnect_reasons", {}
+            )
+            session = getattr(c, "_session", None)
+            if session is not None and getattr(session, "streaming", False):
+                stream_attrs["stream_frames_received_session"] = getattr(
+                    session, "_stream_frames_received", None
+                )
+
         return {
             "total_polls": c.stats_total_polls,
             "successful_polls": c.stats_successful_polls,
@@ -1070,6 +1095,8 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "empty_reconnect_deferrals_healthy_keepalive": c.stats_empty_reconnect_deferrals_healthy_keepalive,
             "last_reconnect_reason": c.stats_last_reconnect_reason,
             "reconnect_reasons": reconnect_reasons,
+            "last_read_error": getattr(c, "stats_last_read_error", None),
+            **stream_attrs,
             "keepalive_failures": c.stats_keepalive_failures,
             "keepalive_failures_session_expired": c.stats_keepalive_failures_session_expired,
             "keepalive_failures_closed": c.stats_keepalive_failures_closed,
