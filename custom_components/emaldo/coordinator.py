@@ -52,6 +52,12 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     REALTIME_SCAN_INTERVAL,
     KEEPALIVE_INTERVAL,
+    REALTIME_STREAM_MODE,
+    RESUBSCRIBE_INTERVAL,
+    STREAM_STALE_AFTER,
+    STREAM_FRAME_GAP_RESUBSCRIBE,
+    STREAM_MIN_RESUBSCRIBE_GAP,
+    STREAM_LONG_STALL_RECONNECT,
 )
 from .realtime_sanity import (
     REALTIME_POWER_ABS_MAX_W,
@@ -345,7 +351,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         commands / both reads failed.
         """
         client = self._ensure_client()
-        creds = client.e2e_login(self.home_id, self._device_id, self._model)
+        creds = client.get_e2e_credentials(self.home_id, self._device_id, self._model)
 
         # 1) Current mode + fixed values (0x20 → 6 bytes)
         session_nonce = generate_nonce()
@@ -406,7 +412,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns True if the device acknowledged the write.
         """
         client = self._ensure_client()
-        creds = client.e2e_login(self.home_id, self._device_id, self._model)
+        creds = client.get_e2e_credentials(self.home_id, self._device_id, self._model)
         if mode in (1, 2, 3):
             return set_ev_charging_mode_smart(creds, mode)
         if mode in (EV_MODE_INSTANT_FULL, EV_MODE_INSTANT_FIXED):
@@ -526,6 +532,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_reconnects_avoided: int = 0
         self.stats_last_success: float | None = None
         self.stats_last_failure: float | None = None
+        self.stats_last_read_error: str | None = None
         self.stats_last_reconnect: float | None = None
         self.stats_last_reconnect_reason: str | None = None
         self.stats_reconnect_reasons: dict[str, int] = {
@@ -558,6 +565,15 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_powerflow_drain_timeouts: int = 0
         self.stats_powerflow_drain_exhausted: int = 0
         self.stats_powerflow_last_diag: dict[str, int | bool] = {}
+        # -- Cumulative subscribe-and-stream counters (survive reconnects) --
+        self.stats_stream_frames_total: int = 0
+        self.stats_stream_resubscribes_total: int = 0
+        self.stats_stream_reconnects_total: int = 0
+        self._last_stream_frames_seen: int = 0
+        self._last_stream_resubs_seen: int = 0
+        self._last_stream_reconnects_seen: int = 0
+        # Latest stream diagnostics snapshot (reconnect-reason breakdown etc.)
+        self._stream_diag: dict = {}
         # Diagnostic info collected by executor thread, logged from main thread
         self._e2e_diag: str = "(not yet called)"
         self._last_keepalive_success: float | None = None
@@ -610,6 +626,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Drop local references to the active E2E session and binding."""
         self._session = None
         self._session_binding = None
+        # Restart per-session stream counter tracking from zero so the next
+        # session's counters accumulate correctly into the cumulative totals.
+        self._last_stream_frames_seen = 0
+        self._last_stream_resubs_seen = 0
+        self._last_stream_reconnects_seen = 0
 
     def _ensure_session(self) -> PersistentE2ESession:
         """Create and connect the persistent E2E session if needed.
@@ -640,19 +661,59 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 binding,
             )
 
-        creds = client.e2e_login(home_id, device_id, model)
+        creds = client.get_e2e_credentials(home_id, device_id, model)
         _LOGGER.debug("E2E session host: %s", creds.get("host", "(default)"))
+        # Provider so the stream thread can pull the latest shared chat_secret
+        # on reconnect (a concurrent REST e2e_login rotates it; re-handshaking
+        # with the stale secret would 21204 forever).
+        def _creds_provider(*, force_refresh: bool = False) -> dict:
+            return client.get_e2e_credentials(
+                home_id, device_id, model, force_refresh=force_refresh
+            )
+
         self._session = PersistentE2ESession(
             creds,
             log=lambda msg: _LOGGER.debug("[E2E] %s", msg),
+            creds_provider=_creds_provider,
         )
         self._session.connect()
+        if REALTIME_STREAM_MODE:
+            # Subscribe-and-stream: a background thread owns the power-flow
+            # subscription and keepalive cadence (beta13d). The coordinator's
+            # separate keepalive loop is not started in this mode.
+            self._session.start_stream(
+                resubscribe_interval=RESUBSCRIBE_INTERVAL,
+                keepalive_interval=KEEPALIVE_INTERVAL,
+                frame_gap_resubscribe=STREAM_FRAME_GAP_RESUBSCRIBE,
+                min_resubscribe_gap=STREAM_MIN_RESUBSCRIBE_GAP,
+                stale_after=STREAM_STALE_AFTER,
+                long_stall=STREAM_LONG_STALL_RECONNECT,
+            )
         self._session_binding = binding
         return self._session
 
     def _read_power_flow(self) -> dict | None:
         """Synchronous helper that runs in the executor."""
         session = self._ensure_session()
+        if REALTIME_STREAM_MODE:
+            # Stream mode: the background receiver keeps the freshest frame
+            # cached. Just read it; the subscribe/keepalive/reconnect work is
+            # all handled by the stream thread.
+            data = session.get_latest_power_flow(max_age=STREAM_STALE_AFTER)
+            self._accumulate_stream_stats(session)
+            self._stream_diag = session.stream_diagnostics()
+            self._e2e_diag = (
+                f"stream frames={self.stats_stream_frames_total} "
+                f"resubs={self.stats_stream_resubscribes_total} "
+                f"reconnects={self.stats_stream_reconnects_total} "
+                f"pkts={self._stream_diag.get('drain_packets')} "
+                f"unparsed={self._stream_diag.get('drain_unparsed')} "
+                f"last_reason={self._stream_diag.get('last_reconnect_reason')} "
+                f"result={'data' if data else 'None'}"
+            )
+            if data is None and session.closed:
+                self._invalidate_session_ref()
+            return data
         # Collect diagnostic info — will be logged from main thread in _async_update_data
         self._e2e_diag = f"host={session._creds.get('host','?')} has_log={session._log is not None} closed={session.closed}"
         data = session.read_power_flow()
@@ -697,6 +758,27 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # Session died mid-read — force recreation on next call
             self._invalidate_session_ref()
         return data
+
+    def _accumulate_stream_stats(self, session: PersistentE2ESession) -> None:
+        """Roll per-session stream counters into cumulative coordinator totals.
+
+        The session's ``_stream_*`` counters reset to 0 whenever the session is
+        rebuilt (reconnect / rebind). Tracking the last-seen value and adding
+        deltas — or the full value after a reset — keeps the diagnostic totals
+        monotonic across the whole integration lifetime.
+        """
+        for cur, last_attr, total_attr in (
+            (session._stream_frames_received, "_last_stream_frames_seen", "stats_stream_frames_total"),  # noqa: SLF001
+            (session._stream_resubscribes, "_last_stream_resubs_seen", "stats_stream_resubscribes_total"),  # noqa: SLF001
+            (session._stream_reconnects, "_last_stream_reconnects_seen", "stats_stream_reconnects_total"),  # noqa: SLF001
+        ):
+            last = getattr(self, last_attr)
+            if cur >= last:
+                setattr(self, total_attr, getattr(self, total_attr) + (cur - last))
+            else:
+                # Counter reset (new session object) — add the new value whole.
+                setattr(self, total_attr, getattr(self, total_attr) + cur)
+            setattr(self, last_attr, cur)
 
     def _record_reconnect(self, reason: str, ts: float) -> None:
         """Record a reconnect/reset event with a classified root cause."""
@@ -842,7 +924,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         import time as _time
         for attempt in range(2):
             try:
-                creds = client.e2e_login(home_id, device_id, model)
+                creds = client.get_e2e_credentials(
+                    home_id, device_id, model, force_refresh=(attempt > 0)
+                )
                 return _standalone_read_battery_info(
                     creds,
                     log=lambda msg: _LOGGER.debug("[E2E battery] %s", msg),
@@ -941,6 +1025,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._empty_reads = 0
             self._consecutive_read_errors += 1
             self.stats_last_failure = _time.time()
+            self.stats_last_read_error = f"{type(err).__name__}: {err}"
             reconnect_reason = (
                 "keepalive_session_expired_21204"
                 if isinstance(err, EmaldoE2ESessionExpired)
@@ -963,7 +1048,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # background task (not hass.async_create_task) so HA's bootstrap does
         # not wait for this long-running loop during the "Wrapping up" phase,
         # which would otherwise delay "Home Assistant has started".
-        if self._keepalive_task is None or self._keepalive_task.done():
+        # In stream mode the persistent session's background receiver thread
+        # owns the keepalive cadence, so the asyncio loop is not needed.
+        if not REALTIME_STREAM_MODE and (
+            self._keepalive_task is None or self._keepalive_task.done()
+        ):
             self._keepalive_task = self._entry.async_create_background_task(
                 self.hass, self._keepalive_loop(), name=f"{DOMAIN}_keepalive"
             )
@@ -972,6 +1061,19 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._empty_reads += 1
             self.stats_empty_reads += 1
             self.stats_last_failure = _time.time()
+            if REALTIME_STREAM_MODE:
+                # The background stream thread owns all recovery (adaptive
+                # resubscribe, 21204 reconnect, long-stall watchdog). Tearing
+                # the session down here would force a fresh e2e_login +
+                # handshake and re-incur the device's slow stream startup,
+                # amplifying a brief frame gap into a 20-30 s outage. Keep the
+                # last values visible and let the thread self-heal in place.
+                _LOGGER.debug(
+                    "E2E stream: no fresh frame (empty #%d) — keeping last "
+                    "values, stream thread self-heals",
+                    self._empty_reads,
+                )
+                return self.data
             if self._empty_reads >= self._MAX_EMPTY_READS:
                 keepalive_recently_ok = (
                     self._last_keepalive_success is not None
@@ -1047,7 +1149,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 ",".join(invalid_channels),
                 REALTIME_POWER_ABS_MAX_W,
             )
-            if self._empty_reads >= self._MAX_EMPTY_READS:
+            if not REALTIME_STREAM_MODE and self._empty_reads >= self._MAX_EMPTY_READS:
                 self._consecutive_reconnects += 1
                 self._record_reconnect("invalid_payload", _time.time())
                 self._empty_reconnect_deferral_streak = 0

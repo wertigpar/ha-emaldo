@@ -2890,10 +2890,16 @@ class PersistentE2ESession:
         *,
         timeout: float = 5.0,
         log: Callable[..., None] | None = None,
+        creds_provider: Callable[..., dict] | None = None,
     ) -> None:
         self._creds = e2e_creds
         self._timeout = timeout
         self._log = log
+        # Optional callback returning fresh E2E credentials (latest, shared
+        # chat_secret). Called on reconnect so the stream picks up a rotated
+        # secret instead of re-handshaking with a stale one (which would 21204
+        # forever). Signature: creds_provider(*, force_refresh: bool) -> dict.
+        self._creds_provider = creds_provider
         self._sock: socket.socket | None = None
         self._addr: tuple[str, int] | None = None
         self._session_nonce: str | None = None
@@ -2918,6 +2924,40 @@ class PersistentE2ESession:
             "drain_exhausted": 0,
         }
         self._lock = threading.Lock()
+        # -- Subscribe-and-stream receiver state (beta13d) -------------------
+        self._stream_thread: threading.Thread | None = None
+        self._stream_stop = threading.Event()
+        self._latest_power_flow: dict | None = None
+        self._latest_power_flow_monotonic: float | None = None
+        self._last_subscribe_monotonic: float | None = None
+        self._stream_needs_reconnect = False
+        self._stream_resubscribe_interval = 12.0
+        self._stream_keepalive_interval = 7.0
+        self._stream_drain_timeout = 0.4
+        self._stream_poll_sleep = 0.1
+        # Adaptive resubscribe: recover a single dropped subscribe-response fast
+        # without sustaining a tight cadence (which triggers relay 21204s).
+        self._stream_frame_gap_resubscribe = 7.0
+        self._stream_min_resubscribe_gap = 5.0
+        self._stream_stale_after = 20.0
+        # Long-stall watchdog: rebuild the session in place if frames stop for
+        # this long (the only stream teardown path — the coordinator no longer
+        # reconnects on staleness in stream mode).
+        self._stream_long_stall = 45.0
+        self._stream_started_monotonic: float | None = None
+        self._stream_frames_received = 0
+        self._stream_resubscribes = 0
+        self._stream_reconnects = 0
+        # Diagnostics: what triggered each stream reconnect (so a storm can be
+        # diagnosed from the sensor attributes without debug logging).
+        self._stream_reconnect_reasons: dict[str, int] = {}
+        self._stream_last_reconnect_reason: str | None = None
+        self._stream_drain_packets = 0
+        self._stream_drain_unparsed = 0
+        # Escalating reconnect backoff (resets when a frame arrives).
+        self._stream_reconnect_streak = 0
+        self._stream_reconnect_backoff_anchor_frames = 0
+        self._stream_reconnect_backoff_max = 30.0
 
     @property
     def closed(self) -> bool:
@@ -3162,6 +3202,354 @@ class PersistentE2ESession:
         self._last_power_flow_diag["drain_exhausted"] = 1
 
         return None
+
+    # -- Subscribe-and-stream receiver (beta13d) ---------------------------- #
+
+    def start_stream(
+        self,
+        *,
+        resubscribe_interval: float = 12.0,
+        keepalive_interval: float = 7.0,
+        drain_timeout: float = 0.4,
+        poll_sleep: float = 0.1,
+        frame_gap_resubscribe: float = 7.0,
+        min_resubscribe_gap: float = 5.0,
+        stale_after: float = 20.0,
+        long_stall: float = 45.0,
+    ) -> None:
+        """Start the background power-flow stream receiver.
+
+        Subscribes once to the 0x30 power-flow stream and keeps a dedicated
+        thread draining the pushed frames, re-subscribing every
+        *resubscribe_interval* seconds and sending keepalives every
+        *keepalive_interval* seconds (matching the official app's cadence).
+
+        To recover quickly from an occasional dropped subscribe-response
+        without sustaining a tight cadence (which makes the relay return
+        21204), an *adaptive* resubscribe fires when no frame has arrived for
+        *frame_gap_resubscribe* seconds — but never closer together than
+        *min_resubscribe_gap* seconds, and only while the cached frame is still
+        within *stale_after* (beyond that the coordinator's reconnect path
+        takes over instead of hammering subscribes).
+
+        The freshest decoded frame is available via
+        :meth:`get_latest_power_flow`. This single thread owns all socket reads;
+        other request/response helpers continue to work because they hold the
+        same lock, serialising access.
+        """
+        with self._lock:
+            if self._sock is None or self._closed:
+                raise EmaldoE2EError("Session is not connected")
+            if self._stream_thread is not None and self._stream_thread.is_alive():
+                return
+            self._stream_resubscribe_interval = resubscribe_interval
+            self._stream_keepalive_interval = keepalive_interval
+            self._stream_drain_timeout = drain_timeout
+            self._stream_poll_sleep = poll_sleep
+            self._stream_frame_gap_resubscribe = frame_gap_resubscribe
+            self._stream_min_resubscribe_gap = min_resubscribe_gap
+            self._stream_stale_after = stale_after
+            self._stream_long_stall = long_stall
+            self._stream_stop.clear()
+            self._last_subscribe_monotonic = None  # subscribe immediately
+            self._last_keepalive_monotonic = time.perf_counter()
+            self._stream_started_monotonic = time.perf_counter()
+            self._stream_needs_reconnect = False
+            self._stream_thread = threading.Thread(
+                target=self._stream_loop,
+                name="emaldo-e2e-stream",
+                daemon=True,
+            )
+            self._stream_thread.start()
+        if self._log:
+            self._log(
+                f"Stream receiver started (resubscribe={resubscribe_interval}s, "
+                f"keepalive={keepalive_interval}s, "
+                f"adaptive_gap={frame_gap_resubscribe}s, "
+                f"min_gap={min_resubscribe_gap}s)"
+            )
+
+    def stop_stream(self) -> None:
+        """Signal the stream receiver to stop and join it (best effort)."""
+        self._stream_stop.set()
+        thread = self._stream_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self._stream_thread = None
+
+    @property
+    def streaming(self) -> bool:
+        """True while the background stream receiver thread is running."""
+        t = self._stream_thread
+        return t is not None and t.is_alive()
+
+    def get_latest_power_flow(self, max_age: float | None = None) -> dict | None:
+        """Return the freshest streamed power-flow frame, or *None*.
+
+        If *max_age* is given and the cached frame is older than that many
+        seconds, *None* is returned so the caller's stale/reconnect path can
+        rebuild a stalled stream.
+        """
+        with self._lock:
+            if self._latest_power_flow is None:
+                return None
+            if (
+                max_age is not None
+                and self._latest_power_flow_monotonic is not None
+                and (time.perf_counter() - self._latest_power_flow_monotonic) > max_age
+            ):
+                return None
+            return dict(self._latest_power_flow)
+
+    def _stream_loop(self) -> None:
+        """Background receiver: subscribe, drain pushes, re-subscribe, keepalive."""
+        while not self._stream_stop.is_set():
+            try:
+                with self._lock:
+                    if self._closed or self._sock is None:
+                        break
+                    if self._stream_needs_reconnect:
+                        self._stream_reconnect_locked()
+                    now = time.perf_counter()
+                    self._stream_watchdog_locked(now)
+                    self._stream_maybe_subscribe_locked(now)
+                    self._stream_maybe_keepalive_locked(now)
+                    self._stream_drain_locked()
+            except Exception as err:  # noqa: BLE001 - keep the loop alive
+                if self._log:
+                    self._log(f"Stream loop error: {err}")
+                self._stream_flag_reconnect(f"loop_exception:{type(err).__name__}")
+            self._stream_stop.wait(self._stream_poll_sleep)
+
+    def _stream_flag_reconnect(self, reason: str) -> None:
+        """Mark the stream for an in-place reconnect, recording why.
+
+        The reason counters are exposed via the diagnostic sensor so a reconnect
+        storm can be diagnosed from attributes alone (no debug logging needed).
+        """
+        if not self._stream_needs_reconnect:
+            self._stream_last_reconnect_reason = reason
+            self._stream_reconnect_reasons[reason] = (
+                self._stream_reconnect_reasons.get(reason, 0) + 1
+            )
+        self._stream_needs_reconnect = True
+
+    def stream_diagnostics(self) -> dict:
+        """Snapshot of stream counters for the diagnostic sensor."""
+        with self._lock:
+            return {
+                "frames": self._stream_frames_received,
+                "resubscribes": self._stream_resubscribes,
+                "reconnects": self._stream_reconnects,
+                "drain_packets": self._stream_drain_packets,
+                "drain_unparsed": self._stream_drain_unparsed,
+                "last_reconnect_reason": self._stream_last_reconnect_reason,
+                "reconnect_reasons": dict(self._stream_reconnect_reasons),
+            }
+
+    def _stream_watchdog_locked(self, now: float) -> None:
+        """Force an in-place reconnect if the stream has stalled for too long.
+
+        This is the *only* stream teardown path. Short gaps are recovered by
+        the adaptive resubscribe without a handshake; only a prolonged stall
+        (frames stopped, or none ever arrived after start) rebuilds the
+        session — avoiding the fresh-handshake startup penalty on every minor
+        gap that the coordinator-level reconnect used to incur.
+        """
+        if self._stream_needs_reconnect:
+            return
+        reference = (
+            self._latest_power_flow_monotonic
+            if self._latest_power_flow_monotonic is not None
+            else self._stream_started_monotonic
+        )
+        if reference is None:
+            return
+        if (now - reference) > self._stream_long_stall:
+            if self._log:
+                kind = (
+                    "no frame since start"
+                    if self._latest_power_flow_monotonic is None
+                    else "frames stopped"
+                )
+                self._log(
+                    f"Stream long-stall ({kind}, "
+                    f"{now - reference:.0f}s) — forcing in-place reconnect"
+                )
+            self._stream_flag_reconnect("long_stall")
+
+    def _stream_maybe_subscribe_locked(self, now: float) -> None:
+        """Send the 0x30 subscribe on the calm periodic schedule only.
+
+        The relay returns 21204 when 0x30 subscribes are spaced tighter than
+        ~10s, so we deliberately do NOT resubscribe adaptively to chase a
+        dropped frame — that triggered a reconnect storm (every early subscribe
+        landed inside the spacing wall, got 21204, forced a reconnect, and
+        restarted the device's ~15-20s stream-startup delay, so a frame never
+        arrived). Instead the interval stays comfortably above the wall, a
+        dropped subscribe-response is bridged by the wider stale window, and a
+        genuine outage is rebuilt by the long-stall watchdog.
+        """
+        last_sub = self._last_subscribe_monotonic
+        since_sub = float("inf") if last_sub is None else now - last_sub
+
+        # Hard rate limit — never violate the relay's ~10s spacing wall.
+        if since_sub < self._stream_min_resubscribe_gap:
+            return
+        # Periodic only: subscribe immediately after a (re)connect, then once
+        # per interval thereafter.
+        if last_sub is not None and since_sub < self._stream_resubscribe_interval:
+            return
+        if self._sock is None or self._addr is None:
+            return
+        pkt = build_subscription_packet(
+            self._creds, 0x30, self._session_nonce, payload=bytes([0x01]),
+        )
+        try:
+            self._sock.sendto(pkt, self._addr)
+        except OSError as err:
+            if self._log:
+                self._log(f"Stream subscribe send failed: {err}")
+            self._stream_flag_reconnect("subscribe_send_error")
+            return
+        self._last_subscribe_monotonic = now
+        self._stream_resubscribes += 1
+
+    def _stream_maybe_keepalive_locked(self, now: float) -> None:
+        """Send alive+wake+heartbeat (fire-and-forget) on the keepalive cadence."""
+        if (
+            self._last_keepalive_monotonic is not None
+            and (now - self._last_keepalive_monotonic) < self._stream_keepalive_interval
+        ):
+            return
+        if self._sock is None or self._addr is None:
+            return
+        try:
+            home_alive = build_alive_packet(
+                sender_end_id=self._creds["home_end_id"],
+                sender_group_id=self._creds["home_group_id"],
+                end_secret=self._creds["home_end_secret"],
+            )
+            dev_alive = build_alive_packet(
+                sender_end_id=self._creds["sender_end_id"],
+                sender_group_id=self._creds["sender_group_id"],
+                end_secret=self._creds["sender_end_secret"],
+            )
+            wake = build_wake_packet(self._creds, self._session_nonce)
+            heartbeat = build_heartbeat_packet(self._creds, self._session_nonce)
+            for pkt in (home_alive, dev_alive, wake, heartbeat):
+                self._sock.sendto(pkt, self._addr)
+        except OSError as err:
+            if self._log:
+                self._log(f"Stream keepalive send failed: {err}")
+            self._stream_flag_reconnect("keepalive_send_error")
+            return
+        self._last_keepalive_monotonic = now
+
+    def _stream_drain_locked(self, budget: int = 24) -> None:
+        """Drain currently-buffered datagrams, caching the freshest power flow."""
+        if self._sock is None:
+            return
+        prev_timeout = self._sock.gettimeout()
+        self._sock.settimeout(self._stream_drain_timeout)
+        try:
+            for _ in range(budget):
+                try:
+                    resp, _ = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                except OSError as err:
+                    if self._log:
+                        self._log(f"Stream drain socket error: {err}")
+                    self._stream_flag_reconnect("drain_socket_error")
+                    break
+                self._stream_drain_packets += 1
+                if self._is_session_expired(resp):
+                    if self._log:
+                        self._log("Stream saw 21204 — flagging reconnect")
+                    self._last_21204_monotonic = time.perf_counter()
+                    self._last_21204_stage = "stream"
+                    self._stream_flag_reconnect("session_expired_21204")
+                    break
+                pf = self._try_parse_power_flow(resp)
+                if pf is not None:
+                    self._latest_power_flow = pf
+                    self._latest_power_flow_monotonic = time.perf_counter()
+                    self._stream_frames_received += 1
+                    continue
+                rf = self._try_parse_regulate_frequency(resp)
+                if rf is not None:
+                    self._regulate_frequency_cache = rf
+                    continue
+                # A datagram we received but could not classify — track it so a
+                # "frames=0 but packets>0" situation is visible in diagnostics.
+                self._stream_drain_unparsed += 1
+        finally:
+            try:
+                self._sock.settimeout(prev_timeout)
+            except OSError:
+                pass
+
+    def _refresh_creds_locked(self) -> None:
+        """Pull the latest (shared) credentials before re-handshaking.
+
+        A 21204 means the device ``chat_secret`` was rotated (typically by a
+        concurrent REST ``e2e_login``). Re-handshaking with the stale secret
+        would just 21204 again, so fetch the current secret via the provider.
+        Best-effort: on any failure keep the existing creds and let the
+        handshake proceed (it may still fail and retry).
+        """
+        if self._creds_provider is None:
+            return
+        try:
+            fresh = self._creds_provider(force_refresh=True)
+        except Exception as err:  # noqa: BLE001 - best effort
+            if self._log:
+                self._log(f"Stream creds refresh failed: {err}")
+            return
+        if fresh:
+            self._creds = fresh
+            if self._log:
+                self._log("Stream creds refreshed (picked up rotated chat_secret)")
+
+    def _stream_reconnect_locked(self) -> None:
+        """Rebuild the session after a 21204/socket error and re-subscribe.
+
+        Uses escalating backoff: if reconnects keep happening without any frame
+        arriving in between (e.g. the relay is rejecting every fresh subscribe
+        with 21204), the wait grows so a penalized relay is not hammered every
+        couple of seconds. The backoff resets once a frame is received.
+        """
+        if self._closed:
+            return
+        # Count reconnects since the last received frame to drive the backoff.
+        if self._stream_frames_received != self._stream_reconnect_backoff_anchor_frames:
+            self._stream_reconnect_streak = 0
+            self._stream_reconnect_backoff_anchor_frames = self._stream_frames_received
+        backoff = min(
+            self.RECONNECT_BACKOFF_SECONDS * (2 ** self._stream_reconnect_streak),
+            self._stream_reconnect_backoff_max,
+        )
+        self._stream_reconnect_streak += 1
+        if self._log:
+            self._log(
+                f"Stream reconnecting after {backoff:.1f}s backoff "
+                f"(streak={self._stream_reconnect_streak}, "
+                f"stage={self._last_21204_stage or 'unknown'})"
+            )
+        time.sleep(backoff)
+        try:
+            self._refresh_creds_locked()
+            self._reconnect()
+            self._stream_needs_reconnect = False
+            self._last_subscribe_monotonic = None  # force immediate re-subscribe
+            self._last_keepalive_monotonic = time.perf_counter()
+            self._stream_started_monotonic = time.perf_counter()  # reset watchdog
+            self._stream_reconnects += 1
+        except Exception as err:  # noqa: BLE001 - best-effort reconnect
+            if self._log:
+                self._log(f"Stream reconnect failed: {err}")
+            # Leave the flag set so the next loop iteration retries.
 
     def read_regulate_frequency_state(self) -> dict | None:
         """Read FCR/mFRR frequency regulation state (0x45) over the existing session.
@@ -3557,6 +3945,9 @@ class PersistentE2ESession:
 
     def close(self) -> None:
         """Close the socket and mark the session closed."""
+        # Signal the stream receiver to stop before taking the lock so it can
+        # exit its loop; it is a daemon thread and will not block shutdown.
+        self._stream_stop.set()
         with self._lock:
             self._closed = True
             if self._sock is not None:

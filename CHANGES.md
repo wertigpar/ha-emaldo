@@ -1,5 +1,38 @@
 # Changes
 
+## 1.0.0-beta13d
+
+### Changed
+- **Realtime power flow switched to a subscribe-and-stream model
+  (`REALTIME_STREAM_MODE`):** packet captures of the official app show that
+  power flow (0x30) is a device *push* stream — the app subscribes once, the
+  device pushes a burst of frames, and the app re-subscribes ~every 15 s. The
+  previous poll model (send 0x30, read one frame, sleep 5 s) raced the relay's
+  power-flow session TTL and produced the recurring 21204 "session expired"
+  storm that capped realtime success around 81%. The persistent E2E session now
+  runs a background receiver thread that subscribes once, continuously drains
+  the pushed stream (caching the freshest frame), and re-subscribes +
+  keepalives on the app's cadence. The coordinator poll just reads the cached
+  frame. Set `REALTIME_STREAM_MODE = False` in `const.py` to revert to the
+  legacy poll model.
+
+### Fixed
+- **Realtime success rate raised from ~81–87 % to ~99 % by stopping a
+  `chat_secret` rotation collision:** the device `chat_secret` is rotated
+  server-side on every `e2e_login`. The periodic REST/EV reads called
+  `e2e_login` directly, rotating the secret out from under the live realtime
+  UDP stream, which then expired (21204) and re-handshaked with the now-stale
+  secret — a self-perpetuating 21204 storm. All E2E consumers now share one
+  cached credential generation via `EmaldoClient.get_e2e_credentials()`
+  (10-minute TTL), and the streaming session takes a credential-refresh
+  callback so an in-place reconnect picks up a rotated secret instead of
+  re-handshaking with a dead one. The remaining single startup 21204 now
+  recovers cleanly with no storm.
+- **Diagnostic sensor now surfaces the last read exception
+  (`last_read_error`):** deterministic read failures used to be visible only in
+  the Home Assistant log; the exact exception type/message is now exposed as a
+  realtime connection attribute for faster diagnosis.
+
 ## 1.0.0-beta13c
 
 ### Fixed
