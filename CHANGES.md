@@ -1,5 +1,18 @@
 # Changes
 
+## 1.0.0-beta13f
+
+### Fixed
+- **Battery range markers can no longer expose values >100 (#45):** the override
+  read returned the raw marker bytes (`payload[0]`/`payload[1]`) directly, so a
+  corrupt byte — seen historically during 21204 reconnect recovery — surfaced as
+  a battery-range number entity above 100 % and made `apply_bulk_schedule` fail
+  with `value must be at most 100 for ... 'low_marker'` / `'high_marker'`.
+  `parse_overrides` now rejects a frame whose markers fall outside 0–100,
+  treating it as corrupt so the coordinator keeps the last good values instead
+  of publishing an invalid one. (The beta13e stream fixes already made the
+  triggering reconnect storm rare; this adds the missing defensive validation.)
+
 ## 1.0.0-beta13e
 
 ### Added

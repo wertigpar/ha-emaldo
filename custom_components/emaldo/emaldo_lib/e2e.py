@@ -410,6 +410,13 @@ def parse_override_state(payload: bytes) -> dict | None:
         return None
     if len(payload) < 9 + n_slots:
         return None
+    # Markers are battery percentages (0-100). A corrupt/garbage byte here
+    # (seen historically during 21204 reconnect recovery) would otherwise be
+    # exposed as a >100 number entity and break apply_bulk_schedule, which
+    # validates 0-100 (#45). Treat an out-of-range marker as a corrupt frame
+    # and reject the whole read so the coordinator keeps the last good values.
+    if payload[0] > 100 or payload[1] > 100:
+        return None
     return {
         "high_marker": payload[0],
         "low_marker": payload[1],
