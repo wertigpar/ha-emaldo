@@ -2954,10 +2954,16 @@ class PersistentE2ESession:
         self._stream_last_reconnect_reason: str | None = None
         self._stream_drain_packets = 0
         self._stream_drain_unparsed = 0
-        # Escalating reconnect backoff (resets when a frame arrives).
+        # Escalating reconnect backoff. The streak resets when a frame arrives
+        # OR when a handshake succeeds (beta13e), so a single competing read
+        # cannot ratchet the backoff up to the 30 s ceiling.
         self._stream_reconnect_streak = 0
         self._stream_reconnect_backoff_anchor_frames = 0
         self._stream_reconnect_backoff_max = 30.0
+        # Monotonic deadline for the next reconnect attempt. The wait is served
+        # by the loop's poll-sleep (lock released between iterations) instead of
+        # time.sleep() under the lock, so reads never stall behind the backoff.
+        self._stream_reconnect_not_before: float | None = None
 
     @property
     def closed(self) -> bool:
@@ -3255,6 +3261,7 @@ class PersistentE2ESession:
             self._last_keepalive_monotonic = time.perf_counter()
             self._stream_started_monotonic = time.perf_counter()
             self._stream_needs_reconnect = False
+            self._stream_reconnect_not_before = None
             self._stream_thread = threading.Thread(
                 target=self._stream_loop,
                 name="emaldo-e2e-stream",
@@ -3309,12 +3316,16 @@ class PersistentE2ESession:
                     if self._closed or self._sock is None:
                         break
                     if self._stream_needs_reconnect:
+                        # While a reconnect is pending (or its backoff window is
+                        # still open) skip subscribe/keepalive/drain on the dead
+                        # socket. The loop's poll-sleep below paces the backoff.
                         self._stream_reconnect_locked()
-                    now = time.perf_counter()
-                    self._stream_watchdog_locked(now)
-                    self._stream_maybe_subscribe_locked(now)
-                    self._stream_maybe_keepalive_locked(now)
-                    self._stream_drain_locked()
+                    else:
+                        now = time.perf_counter()
+                        self._stream_watchdog_locked(now)
+                        self._stream_maybe_subscribe_locked(now)
+                        self._stream_maybe_keepalive_locked(now)
+                        self._stream_drain_locked()
             except Exception as err:  # noqa: BLE001 - keep the loop alive
                 if self._log:
                     self._log(f"Stream loop error: {err}")
@@ -3515,29 +3526,53 @@ class PersistentE2ESession:
     def _stream_reconnect_locked(self) -> None:
         """Rebuild the session after a 21204/socket error and re-subscribe.
 
-        Uses escalating backoff: if reconnects keep happening without any frame
-        arriving in between (e.g. the relay is rejecting every fresh subscribe
-        with 21204), the wait grows so a penalized relay is not hammered every
-        couple of seconds. The backoff resets once a frame is received.
+        The backoff wait is NON-BLOCKING: instead of ``time.sleep(backoff)``
+        while holding ``self._lock`` (which stalled every concurrent read for up
+        to the 30 s ceiling), the first call schedules a monotonic deadline and
+        returns. The stream loop releases the lock between its 0.1 s poll-sleeps,
+        so reads stay responsive while the backoff elapses. When the deadline
+        passes a later call performs the actual rebuild.
+
+        Escalation only grows across consecutive FAILED handshakes (a genuinely
+        penalized relay). A successful handshake — or any received frame —
+        resets the streak so a single competing read cannot ratchet the backoff
+        up to the ceiling (beta13e).
         """
         if self._closed:
             return
-        # Count reconnects since the last received frame to drive the backoff.
-        if self._stream_frames_received != self._stream_reconnect_backoff_anchor_frames:
-            self._stream_reconnect_streak = 0
-            self._stream_reconnect_backoff_anchor_frames = self._stream_frames_received
-        backoff = min(
-            self.RECONNECT_BACKOFF_SECONDS * (2 ** self._stream_reconnect_streak),
-            self._stream_reconnect_backoff_max,
-        )
-        self._stream_reconnect_streak += 1
-        if self._log:
-            self._log(
-                f"Stream reconnecting after {backoff:.1f}s backoff "
-                f"(streak={self._stream_reconnect_streak}, "
-                f"stage={self._last_21204_stage or 'unknown'})"
+        now = time.perf_counter()
+
+        # First call after the reconnect was flagged: schedule the backoff.
+        if self._stream_reconnect_not_before is None:
+            # A frame since the last reconnect means the relay is healthy again.
+            if (
+                self._stream_frames_received
+                != self._stream_reconnect_backoff_anchor_frames
+            ):
+                self._stream_reconnect_streak = 0
+                self._stream_reconnect_backoff_anchor_frames = (
+                    self._stream_frames_received
+                )
+            backoff = min(
+                self.RECONNECT_BACKOFF_SECONDS * (2 ** self._stream_reconnect_streak),
+                self._stream_reconnect_backoff_max,
             )
-        time.sleep(backoff)
+            self._stream_reconnect_streak += 1
+            self._stream_reconnect_not_before = now + backoff
+            if self._log:
+                self._log(
+                    f"Stream reconnect scheduled in {backoff:.1f}s "
+                    f"(streak={self._stream_reconnect_streak}, "
+                    f"stage={self._last_21204_stage or 'unknown'})"
+                )
+            return
+
+        # Backoff window still open — let the loop keep cycling (lock released).
+        if now < self._stream_reconnect_not_before:
+            return
+
+        # Deadline reached: perform the actual rebuild.
+        self._stream_reconnect_not_before = None
         try:
             self._refresh_creds_locked()
             self._reconnect()
@@ -3546,10 +3581,16 @@ class PersistentE2ESession:
             self._last_keepalive_monotonic = time.perf_counter()
             self._stream_started_monotonic = time.perf_counter()  # reset watchdog
             self._stream_reconnects += 1
+            # A successful handshake clears the escalation: the next 21204 starts
+            # fresh at the base backoff instead of inheriting a tall streak.
+            self._stream_reconnect_streak = 0
+            self._stream_reconnect_backoff_anchor_frames = self._stream_frames_received
         except Exception as err:  # noqa: BLE001 - best-effort reconnect
             if self._log:
                 self._log(f"Stream reconnect failed: {err}")
-            # Leave the flag set so the next loop iteration retries.
+            # Re-arm so the next loop iteration schedules a fresh (escalated)
+            # backoff window; the flag stays set so the loop keeps retrying.
+            self._stream_reconnect_not_before = None
 
     def read_regulate_frequency_state(self) -> dict | None:
         """Read FCR/mFRR frequency regulation state (0x45) over the existing session.

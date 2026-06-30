@@ -65,6 +65,13 @@ STREAM_STALE_AFTER = 28  # seconds
 # startup penalty that used to amplify it into a 20-30 s outage.
 STREAM_LONG_STALL_RECONNECT = 45  # seconds
 
+# Rolling success-rate window (beta13e): number of most recent realtime polls
+# used to compute a "recent" success rate alongside the cumulative lifetime
+# rate. The cumulative rate only ever falls and is reset by a restart, so it
+# hides recovery; this rolling rate reflects current health. 240 polls at the
+# 5 s realtime cadence ≈ a 20-minute window.
+REALTIME_SUCCESS_WINDOW = 240
+
 # Schedule polling configuration
 CONF_SCHEDULE_START_HOUR = "schedule_start_hour"
 CONF_SCHEDULE_START_MINUTE = "schedule_start_minute"

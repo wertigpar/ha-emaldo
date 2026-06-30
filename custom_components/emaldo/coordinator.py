@@ -9,6 +9,7 @@ Two coordinators:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import timedelta
 import logging
 import struct
@@ -53,6 +54,7 @@ from .const import (
     REALTIME_SCAN_INTERVAL,
     KEEPALIVE_INTERVAL,
     REALTIME_STREAM_MODE,
+    REALTIME_SUCCESS_WINDOW,
     RESUBSCRIBE_INTERVAL,
     STREAM_STALE_AFTER,
     STREAM_FRAME_GAP_RESUBSCRIBE,
@@ -525,6 +527,15 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
+        # Rolling success window (beta13e): outcome (True/False) of the most
+        # recent polls, used for a "recent" success rate that recovers after an
+        # outage instead of being permanently dragged down like the cumulative
+        # rate. The previous poll's outcome is finalised at the top of the next
+        # poll (a one-poll lag, negligible for a 240-sample window).
+        self._recent_poll_outcomes: deque[bool] = deque(
+            maxlen=REALTIME_SUCCESS_WINDOW
+        )
+        self._recent_window_prev_success: int = 0
         self.stats_empty_reads: int = 0
         self.stats_reconnects: int = 0
         self.stats_keepalive_failures: int = 0
@@ -995,6 +1006,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         surfaces the issue.
         """
         import time as _time
+        # Finalise the PREVIOUS poll's outcome into the rolling window now that
+        # it is settled (it succeeded iff stats_successful_polls advanced since
+        # we last looked). One-poll lag is fine for the rolling rate.
+        if self.stats_total_polls > 0:
+            self._recent_poll_outcomes.append(
+                self.stats_successful_polls > self._recent_window_prev_success
+            )
+        self._recent_window_prev_success = self.stats_successful_polls
         self.stats_total_polls += 1
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug(

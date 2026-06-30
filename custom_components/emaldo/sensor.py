@@ -1051,6 +1051,17 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
                 100.0 * c.stats_successful_polls / c.stats_total_polls, 1
             )
 
+        # Rolling success rate over the most recent polls (beta13e). Unlike the
+        # cumulative rate above, this recovers after an outage clears.
+        recent_outcomes = getattr(c, "_recent_poll_outcomes", None)
+        success_rate_recent = None
+        recent_window_size = 0
+        if recent_outcomes:
+            recent_window_size = len(recent_outcomes)
+            success_rate_recent = round(
+                100.0 * sum(recent_outcomes) / recent_window_size, 1
+            )
+
         avg_rtt = None
         if c.stats_e2e_rtt_samples > 0:
             avg_rtt = round(c.stats_e2e_rtt_total_ms / c.stats_e2e_rtt_samples, 1)
@@ -1088,6 +1099,8 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "total_polls": c.stats_total_polls,
             "successful_polls": c.stats_successful_polls,
             "success_rate_pct": success_rate,
+            "success_rate_recent_pct": success_rate_recent,
+            "success_rate_window": recent_window_size,
             "empty_reads": c.stats_empty_reads,
             "reconnects": c.stats_reconnects,
             "reconnect_probes": c.stats_reconnect_probes,
