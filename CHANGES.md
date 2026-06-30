@@ -1,5 +1,33 @@
 # Changes
 
+## 1.0.0-beta13e
+
+### Added
+- **Rolling "recent" success rate (`success_rate_recent_pct`):** the existing
+  `success_rate_pct` is cumulative over the lifetime of the integration run —
+  it only ever falls and is reset only by a restart, so a brief early outage
+  permanently drags it down and a restart masks an ongoing problem. The
+  realtime connection diagnostic now also reports `success_rate_recent_pct`
+  computed over the most recent `REALTIME_SUCCESS_WINDOW` polls (240 ≈ a
+  20-minute window at the 5 s cadence), plus `success_rate_window` (the number
+  of samples currently in the window). This reflects *current* health and
+  recovers once an outage clears.
+
+### Fixed
+- **Reconnect backoff no longer stalls reads (non-blocking backoff):** the
+  stream receiver previously ran `time.sleep(backoff)` while holding the
+  session lock, so an escalating backoff (up to the 30 s ceiling) blocked every
+  concurrent power-flow read for the full wait, accumulating empty reads. The
+  backoff is now served by the receiver loop's 0.1 s poll-sleep via a monotonic
+  deadline (`_stream_reconnect_not_before`); the lock is released between
+  iterations, so reads stay responsive throughout the wait.
+- **Reconnect backoff streak resets on a successful handshake:** the escalation
+  streak previously reset only when a frame arrived, so a relay that accepted
+  the handshake but expired the session before the first frame could ratchet
+  the backoff all the way to 30 s. The streak now also resets on a successful
+  handshake, so escalation only grows across genuinely failed handshakes and a
+  single competing read can no longer push the stream into 30 s stalls.
+
 ## 1.0.0-beta13d
 
 ### Changed
