@@ -60,6 +60,7 @@ from .const import (
     STREAM_FRAME_GAP_RESUBSCRIBE,
     STREAM_MIN_RESUBSCRIBE_GAP,
     STREAM_LONG_STALL_RECONNECT,
+    STREAM_STALL_FULL_RESET_SECONDS,
 )
 from .realtime_sanity import (
     REALTIME_POWER_ABS_MAX_W,
@@ -960,6 +961,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
+    #: In stream mode, after this many consecutive empty reads (no fresh frame)
+    #: the in-thread reconnect is presumed wedged (e.g. a dead shared REST token
+    #: after a cloud outage). Escalate to a full REST-client reset + session
+    #: rebuild so recovery does not depend on an HA restart (beta13g).
+    _STREAM_STALL_RESET_POLLS = max(
+        1, STREAM_STALL_FULL_RESET_SECONDS // REALTIME_SCAN_INTERVAL
+    )
     #: After this many consecutive reconnect cycles with no recovery, switch from
     #: WARNING to DEBUG to avoid flooding the log during persistent failures.
     _WARN_RECONNECT_THRESHOLD = 3
@@ -1087,6 +1095,29 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # handshake and re-incur the device's slow stream startup,
                 # amplifying a brief frame gap into a 20-30 s outage. Keep the
                 # last values visible and let the thread self-heal in place.
+                #
+                # Escalation (beta13g): the in-thread reconnect refreshes creds
+                # via the shared client. If a cloud outage (api.emaldo.com is
+                # flaky ~01:00-02:00) leaves the shared REST token dead, every
+                # re-handshake keeps using stale creds and the stream wedges
+                # indefinitely (long_stall storm, frames frozen, 0% until an HA
+                # restart). After a prolonged stall, do the full recovery the
+                # stream path otherwise never reaches: reset the REST client
+                # (clean re-login) and rebuild the session from scratch.
+                if self._empty_reads >= self._STREAM_STALL_RESET_POLLS:
+                    _LOGGER.warning(
+                        "E2E stream wedged: no fresh frame for %d consecutive "
+                        "polls (~%ds) — in-place reconnect not recovering; "
+                        "resetting REST client and rebuilding session",
+                        self._empty_reads,
+                        self._empty_reads * REALTIME_SCAN_INTERVAL,
+                    )
+                    self._parent._reset_client()  # noqa: SLF001 - clean re-login
+                    await self._close_session()  # full rebuild on next poll
+                    self._empty_reads = 0
+                    self._consecutive_reconnects += 1
+                    self._record_reconnect("stream_stall_reset", _time.time())
+                    return self.data
                 _LOGGER.debug(
                     "E2E stream: no fresh frame (empty #%d) — keeping last "
                     "values, stream thread self-heals",

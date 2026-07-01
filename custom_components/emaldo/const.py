@@ -65,6 +65,17 @@ STREAM_STALE_AFTER = 28  # seconds
 # startup penalty that used to amplify it into a 20-30 s outage.
 STREAM_LONG_STALL_RECONNECT = 45  # seconds
 
+# Stream wedged full-reset escalation (beta13g): in stream mode the background
+# thread's in-place reconnect is normally the only recovery. If a cloud-side
+# outage (api.emaldo.com is flaky around 01:00-02:00) leaves the shared REST
+# token dead, every in-thread credential refresh + re-handshake keeps failing
+# and the stream can wedge indefinitely (long_stall storm, frames frozen, 0%
+# success until an HA restart). After no fresh frame for this many seconds the
+# coordinator escalates to a full REST-client reset + session rebuild, which
+# forces a clean re-login and genuinely fresh credentials. Kept well above the
+# 45 s long-stall watchdog so a healthy in-place self-heal never triggers it.
+STREAM_STALL_FULL_RESET_SECONDS = 180
+
 # Rolling success-rate window (beta13e): number of most recent realtime polls
 # used to compute a "recent" success rate alongside the cumulative lifetime
 # rate. The cumulative rate only ever falls and is reset by a restart, so it
