@@ -1,6 +1,26 @@
 # Changes
 
-## 1.0.0-beta13f
+## v1.0.0-beta13g
+
+### Fixed
+- **Realtime stream could wedge permanently after a cloud-API outage and only
+  recover on an HA restart:** in stream mode the background receiver's in-place
+  reconnect was the *only* recovery path, and it refreshes credentials through
+  the shared REST client. When `api.emaldo.com` had a transient outage (users
+  report these around 01:00–02:00), the shared REST token could be left dead;
+  every subsequent in-thread re-handshake then reused stale credentials and the
+  stream wedged indefinitely — a `long_stall` reconnect storm with frames
+  frozen and `success_rate_recent_pct` stuck at 0 until Home Assistant was
+  restarted. The coordinator's heavier "big hammer" recovery (`_reset_client()`
+  → clean REST re-login → full session rebuild with genuinely fresh
+  credentials) was never reachable in stream mode because the empty-read path
+  short-circuited unconditionally. The coordinator now escalates to that full
+  reset after no fresh frame for `STREAM_STALL_FULL_RESET_SECONDS` (180 s,
+  well above the 45 s long-stall watchdog so a healthy in-place self-heal never
+  triggers it). A new `stream_stall_reset` reconnect reason records each
+  escalation in the diagnostic sensor.
+
+## v1.0.0-beta13f
 
 ### Fixed
 - **Battery range markers can no longer expose values >100 (#45):** the override
