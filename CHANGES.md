@@ -1,5 +1,39 @@
 # Changes
 
+## v1.0.0-beta13h
+
+### Fixed
+- **Background threads left "still running" during Home Assistant shutdown
+  (#46):** the persistent E2E session was only closed when the config entry
+  unloaded, which happens late in the shutdown sequence. Until then the
+  realtime coordinator's background stream receiver and keepalive threads
+  stayed blocked in `recvfrom()` on the open socket, so Home Assistant logged
+  `Task ...emaldo_keepalive... was still running after final writes` and
+  `Thread ... is still running at shutdown`. The integration now also listens
+  for `EVENT_HOMEASSISTANT_STOP` and closes each device's persistent E2E
+  session (and cancels its keepalive/battery-scan tasks) as soon as shutdown
+  begins, so the blocked socket reads are interrupted promptly instead of
+  lingering into the final-writes stage. The existing unload path still runs
+  and is a harmless no-op after an early stop.
+- **No empty read / `unknown` sensors on the first poll after a restart:** in
+  the subscribe-and-stream model the poll that *starts* the stream previously
+  returned immediately with no frame cached yet (the device needs a moment to
+  finish the handshake + subscribe and push its first frame), so the first read
+  after every restart came back empty and the realtime/E2E sensors sat on their
+  restored value or `unknown` for up to ~10 s until the next poll. The poll that
+  starts a fresh stream session now waits up to `STREAM_FIRST_FRAME_WAIT` (12 s)
+  for that first frame and returns it, so poll #1 already delivers live data.
+  The wait runs on the executor thread (never the event loop) and the realtime
+  coordinator's first refresh is a background task, so Home Assistant startup is
+  not delayed; it exits early the instant a frame arrives and falls through to
+  the normal keep-last-values path if the device stays silent for the full
+  window. This also removes the ~0.1 % cumulative `success_rate_pct` dent that
+  the recurring first-poll miss used to cause. (A brief `unknown`/`unavailable`
+  window can still remain on startup while the first frame is awaited and the
+  entities are re-added; a restored previous reading reduces it when one is
+  available, but it is not always fully eliminated. This is inherent to the
+  push-stream cold start.)
+
 ## v1.0.0-beta13g
 
 ### Fixed
