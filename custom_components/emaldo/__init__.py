@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -174,6 +174,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(
         entry.add_update_listener(_async_options_updated)
+    )
+
+    async def _async_close_sessions_on_stop(_event: Any) -> None:
+        """Close persistent E2E sessions early during HA shutdown (#46).
+
+        The config entry only unloads late in the shutdown sequence, so
+        without this the realtime coordinator's background stream receiver and
+        keepalive threads stay blocked in ``recvfrom()`` on the open socket and
+        HA reports them as "still running after final writes". Closing the
+        sessions when ``EVENT_HOMEASSISTANT_STOP`` fires interrupts the socket
+        reads promptly. ``async_shutdown`` is idempotent, so the later unload
+        call is a harmless no-op.
+        """
+        data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not data:
+            return
+        for item in data.get("devices") or [data]:
+            item["schedule"].async_shutdown()
+            await item["realtime"].async_shutdown()
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP, _async_close_sessions_on_stop
+        )
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

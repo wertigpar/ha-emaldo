@@ -61,6 +61,7 @@ from .const import (
     STREAM_MIN_RESUBSCRIBE_GAP,
     STREAM_LONG_STALL_RECONNECT,
     STREAM_STALL_FULL_RESET_SECONDS,
+    STREAM_FIRST_FRAME_WAIT,
 )
 from .realtime_sanity import (
     REALTIME_POWER_ABS_MAX_W,
@@ -701,6 +702,23 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 stale_after=STREAM_STALE_AFTER,
                 long_stall=STREAM_LONG_STALL_RECONNECT,
             )
+            # Cold start: give the freshly started stream a brief moment to
+            # finish the handshake + subscribe and cache the device's first
+            # pushed frame, so the poll that started the stream already returns
+            # data instead of an empty read (which would otherwise leave the
+            # realtime sensors on the restored/"unknown" value until the next
+            # poll). This runs on the executor thread, so it never blocks the
+            # event loop, and the first refresh is a background task so HA
+            # startup is unaffected. Exits early the instant a frame arrives.
+            import time as _time
+            _first_frame_deadline = _time.perf_counter() + STREAM_FIRST_FRAME_WAIT
+            while _time.perf_counter() < _first_frame_deadline:
+                if (
+                    self._session.get_latest_power_flow(max_age=STREAM_STALE_AFTER)
+                    is not None
+                ):
+                    break
+                _time.sleep(0.2)
         self._session_binding = binding
         return self._session
 

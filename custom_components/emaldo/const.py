@@ -76,6 +76,17 @@ STREAM_LONG_STALL_RECONNECT = 45  # seconds
 # 45 s long-stall watchdog so a healthy in-place self-heal never triggers it.
 STREAM_STALL_FULL_RESET_SECONDS = 180
 
+# Cold-start first-frame wait (beta13h): when a fresh stream session is started
+# the device needs a moment to complete the handshake + subscribe and push its
+# first frame. Rather than returning an immediate empty read (which leaves the
+# realtime/E2E sensors on the restored value or "unknown" until the next poll),
+# the poll that starts the stream blocks up to this many seconds for the first
+# frame to arrive. It runs on the executor thread (never the event loop) and the
+# first refresh is a background task, so HA startup is unaffected; it exits early
+# the instant a frame is cached and falls through to the normal empty-read path
+# if the device stays silent.
+STREAM_FIRST_FRAME_WAIT = 12.0
+
 # Rolling success-rate window (beta13e): number of most recent realtime polls
 # used to compute a "recent" success rate alongside the cumulative lifetime
 # rate. The cumulative rate only ever falls and is reset by a restart, so it
