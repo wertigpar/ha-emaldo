@@ -36,7 +36,17 @@ KEEPALIVE_INTERVAL = 7  # seconds — UDP session keepalive (relay TTL ~10s)
 # re-subscribes + keepalives on the app's cadence. The coordinator poll then
 # just reads the freshest cached frame instead of issuing a fresh 0x30 read.
 # Set to False to fall back to the legacy poll model.
+#
+# This is the *default*; it can be overridden per config entry via the options
+# flow (``CONF_REALTIME_STREAM_MODE``). Some networks (restrictive NAT/firewall)
+# drop the device-initiated push datagrams the stream model relies on, starving
+# realtime data even though the official app works; those users can select the
+# poll model, which is request/response and traverses NAT reliably (#41).
 REALTIME_STREAM_MODE = True
+
+#: Options-flow key to override the realtime mode per config entry. When present
+#: its bool value wins over the ``REALTIME_STREAM_MODE`` module default.
+CONF_REALTIME_STREAM_MODE = "realtime_stream_mode"
 # How often the stream receiver re-subscribes the 0x30 power-flow stream to
 # keep the device pushing. Testing showed the relay returns 21204 (session
 # expired) when 0x30 subscribes are spaced tighter than ~10 s, so the periodic

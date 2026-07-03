@@ -54,6 +54,7 @@ from .const import (
     REALTIME_SCAN_INTERVAL,
     KEEPALIVE_INTERVAL,
     REALTIME_STREAM_MODE,
+    CONF_REALTIME_STREAM_MODE,
     REALTIME_SUCCESS_WINDOW,
     RESUBSCRIBE_INTERVAL,
     STREAM_STALE_AFTER,
@@ -506,6 +507,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         self._entry = entry
         self._parent = parent
+        # Realtime transport mode is per-entry (default from const). Some
+        # networks drop the device-initiated push datagrams the stream model
+        # needs; those users can select the poll model in the options flow (#41).
+        self._stream_mode: bool = bool(
+            entry.options.get(CONF_REALTIME_STREAM_MODE, REALTIME_STREAM_MODE)
+        )
         self._session: PersistentE2ESession | None = None
         self._session_binding: tuple[str, str, str] | None = None
         self._keepalive_task: asyncio.Task | None = None
@@ -690,7 +697,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             creds_provider=_creds_provider,
         )
         self._session.connect()
-        if REALTIME_STREAM_MODE:
+        if self._stream_mode:
             # Subscribe-and-stream: a background thread owns the power-flow
             # subscription and keepalive cadence (beta13d). The coordinator's
             # separate keepalive loop is not started in this mode.
@@ -725,7 +732,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     def _read_power_flow(self) -> dict | None:
         """Synchronous helper that runs in the executor."""
         session = self._ensure_session()
-        if REALTIME_STREAM_MODE:
+        if self._stream_mode:
             # Stream mode: the background receiver keeps the freshest frame
             # cached. Just read it; the subscribe/keepalive/reconnect work is
             # all handled by the stream thread.
@@ -952,6 +959,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return self._battery_modules
 
         import time as _time
+        # Serial -> slot map from prior scans so a stray late datagram (a module
+        # whose rightful slot timed out this round) cannot be misassigned to the
+        # slot it leaked into (#44).
+        known_serial_slots = {
+            m["serial"]: slot
+            for slot, m in self._battery_module_slots.items()
+            if m.get("serial")
+        }
         for attempt in range(2):
             try:
                 creds = client.get_e2e_credentials(
@@ -959,6 +974,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 return _standalone_read_battery_info(
                     creds,
+                    known_serial_slots=known_serial_slots,
                     log=lambda msg: _LOGGER.debug("[E2E battery] %s", msg),
                 )
             except EmaldoAuthError:
@@ -1095,7 +1111,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # which would otherwise delay "Home Assistant has started".
         # In stream mode the persistent session's background receiver thread
         # owns the keepalive cadence, so the asyncio loop is not needed.
-        if not REALTIME_STREAM_MODE and (
+        if not self._stream_mode and (
             self._keepalive_task is None or self._keepalive_task.done()
         ):
             self._keepalive_task = self._entry.async_create_background_task(
@@ -1106,7 +1122,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._empty_reads += 1
             self.stats_empty_reads += 1
             self.stats_last_failure = _time.time()
-            if REALTIME_STREAM_MODE:
+            if self._stream_mode:
                 # The background stream thread owns all recovery (adaptive
                 # resubscribe, 21204 reconnect, long-stall watchdog). Tearing
                 # the session down here would force a fresh e2e_login +
@@ -1217,7 +1233,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 ",".join(invalid_channels),
                 REALTIME_POWER_ABS_MAX_W,
             )
-            if not REALTIME_STREAM_MODE and self._empty_reads >= self._MAX_EMPTY_READS:
+            if not self._stream_mode and self._empty_reads >= self._MAX_EMPTY_READS:
                 self._consecutive_reconnects += 1
                 self._record_reconnect("invalid_payload", _time.time())
                 self._empty_reconnect_deferral_streak = 0

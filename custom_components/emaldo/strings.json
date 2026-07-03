@@ -57,7 +57,8 @@
         "data": {
           "schedule_start_hour": "Start hour (0-23)",
           "schedule_start_minute": "Start minute (0-59)",
-          "schedule_interval": "Repeat interval (seconds)"
+          "schedule_interval": "Repeat interval (seconds)",
+          "realtime_stream_mode": "Realtime stream mode (recommended; turn off for poll/compatibility mode if realtime data stalls on your network)"
         }
       }
     }

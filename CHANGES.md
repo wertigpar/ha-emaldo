@@ -1,5 +1,32 @@
 # Changes
 
+## v1.0.0-beta13j
+
+### Added
+- **Realtime mode is now selectable (Stream vs Poll) in the integration options
+  (#41):** the subscribe-and-stream model (beta13d+) relies on the device
+  *pushing* UDP frames to Home Assistant. On some networks (restrictive
+  NAT/firewall/CGNAT) those device-initiated datagrams are dropped, so realtime
+  data stalls even though the official app keeps updating — the coordinator's
+  recovery fires repeatedly (`stream_stall_reset`) but no client reset can make
+  the router deliver frames that never arrive. Settings → Devices & services →
+  Emaldo Battery → Configure now offers a **Realtime stream mode** toggle; turn
+  it off to use the legacy request/response **poll** model, which traverses NAT
+  reliably. Changing the option reloads the entry so it takes effect
+  immediately. Default remains stream mode.
+
+### Fixed
+- **Battery module can no longer briefly show a neighbour's values (#44):** the
+  ~5-minute battery scan probes cabinet slots one at a time. If a module's
+  rightful slot timed out in a given scan, a late reply from that module could
+  land in the *next* slot's receive window (after the pre-probe drain) and be
+  misassigned — e.g. module 8 showing module 7's values while module 7 went
+  un-updated. The scan now carries a serial → slot map from previous scans and
+  rejects any reply whose serial is known to belong to a different slot, so a
+  stray late datagram is discarded instead of contaminating the neighbouring
+  slot. This is independent of the device's own index fields, so it is safe
+  across multi-cabinet (HP5000) systems.
+
 ## v1.0.0-beta13i
 
 ### Changed

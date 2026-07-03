@@ -240,11 +240,27 @@ async def _async_options_updated(
 ) -> None:
     """Handle options update — restart schedule listeners."""
     data = hass.data[DOMAIN].get(entry.entry_id)
-    if data:
-        devices = data.get("devices") or [data]
-        for item in devices:
-            schedule_coordinator: EmaldoScheduleCoordinator = item["schedule"]
-            schedule_coordinator.async_setup_listeners()
+    if not data:
+        return
+    devices = data.get("devices") or [data]
+    # A realtime-mode change (stream <-> poll, #41) alters how the realtime
+    # coordinator is built, so it only takes effect on a full entry reload.
+    from .const import CONF_REALTIME_STREAM_MODE, REALTIME_STREAM_MODE
+
+    desired_stream_mode = bool(
+        entry.options.get(CONF_REALTIME_STREAM_MODE, REALTIME_STREAM_MODE)
+    )
+    for item in devices:
+        realtime = item.get("realtime")
+        if realtime is not None and getattr(
+            realtime, "_stream_mode", REALTIME_STREAM_MODE
+        ) != desired_stream_mode:
+            await hass.config_entries.async_reload(entry.entry_id)
+            return
+
+    for item in devices:
+        schedule_coordinator: EmaldoScheduleCoordinator = item["schedule"]
+        schedule_coordinator.async_setup_listeners()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

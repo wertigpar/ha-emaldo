@@ -33,6 +33,8 @@ from .const import (
     CONF_SCHEDULE_START_HOUR,
     CONF_SCHEDULE_START_MINUTE,
     CONF_SCHEDULE_INTERVAL,
+    CONF_REALTIME_STREAM_MODE,
+    REALTIME_STREAM_MODE,
     DEFAULT_SCHEDULE_START_HOUR,
     DEFAULT_SCHEDULE_START_MINUTE,
     DEFAULT_SCHEDULE_INTERVAL,
@@ -268,6 +270,12 @@ class EmaldoOptionsFlow(OptionsFlow):
                             CONF_SCHEDULE_INTERVAL, DEFAULT_SCHEDULE_INTERVAL
                         ),
                     ): vol.All(int, vol.Range(min=600, max=86400)),
+                    vol.Required(
+                        CONF_REALTIME_STREAM_MODE,
+                        default=options.get(
+                            CONF_REALTIME_STREAM_MODE, REALTIME_STREAM_MODE
+                        ),
+                    ): bool,
                 }
             ),
         )

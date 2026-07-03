@@ -1076,7 +1076,7 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
         if getattr(c, "stats_stream_resubscribes_total", 0) or getattr(
             c, "stats_stream_frames_total", 0
         ):
-            stream_attrs["stream_mode"] = True
+            stream_attrs["stream_mode"] = getattr(c, "_stream_mode", True)
             stream_attrs["stream_frames_received"] = c.stats_stream_frames_total
             stream_attrs["stream_resubscribes"] = c.stats_stream_resubscribes_total
             stream_attrs["stream_reconnects"] = c.stats_stream_reconnects_total
