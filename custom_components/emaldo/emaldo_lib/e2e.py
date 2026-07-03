@@ -865,6 +865,7 @@ def read_battery_info(
     timeout: float = 5.0,
     probe_timeout: float = 1.5,
     slots: list[int] | None = None,
+    known_serial_slots: dict[str, int] | None = None,
     log: Callable[..., None] | None = None,
 ) -> list[dict]:
     """Read battery cell info via E2E request (type 0x06).
@@ -888,6 +889,12 @@ def read_battery_info(
         slots: When given, probe exactly these cabinet slot indices (a fast
             re-scan of previously discovered slots). When ``None`` (default),
             run a full cabinet discovery across all known tiers.
+        known_serial_slots: Optional serial -> slot-index map from previous
+            scans. A probe reply whose serial is already known to belong to a
+            *different* slot is a stray late datagram that leaked into this
+            slot's receive window (e.g. the rightful slot timed out this round),
+            so it is rejected rather than misassigned. Independent of the
+            device's own index fields, so it is safe across cabinets (#44).
         log: Optional log callback.
 
     Returns:
@@ -992,6 +999,17 @@ def read_battery_info(
                     log(f"Battery(idx={idx}) follow-up: timeout")
 
         if info and info["serial"] not in seen_serials:
+            # Reject a reply whose serial is known (from prior scans) to live at
+            # a different physical slot: it is a stray late datagram that leaked
+            # into this slot's window, not this slot's module (#44).
+            known_slot = (known_serial_slots or {}).get(info["serial"])
+            if known_slot is not None and known_slot != idx:
+                if log:
+                    log(
+                        f"Battery(idx={idx}): reply serial {info['serial']!r} "
+                        f"belongs to slot {known_slot} — stray, rejected"
+                    )
+                return "empty"
             seen_serials.add(info["serial"])
             info["scan_index"] = idx
             return info
