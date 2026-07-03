@@ -1361,13 +1361,27 @@ class EmaldoBatteryTotalEnergySensor(
             model=c.device_model,
         )
 
+    def _stable_modules(self) -> list[dict]:
+        """Return per-slot modules, retaining slots that were briefly silent.
+
+        The per-slot map keeps each slot's last-known module even when it does
+        not answer a given ~5-minute battery scan, so summing over it avoids the
+        sharp 5-minute dips that summing the latest raw ``battery_modules`` list
+        produces when a module is momentarily silent (#41). Falls back to the
+        raw list before the first scan has populated the slot map.
+        """
+        data = self.coordinator.data or {}
+        slots = data.get("battery_module_slots") or {}
+        if slots:
+            return list(slots.values())
+        return data.get("battery_modules") or []
+
     @property
     def native_value(self) -> int | None:
         """Return the summed stored energy (Wh) across all modules."""
-        modules = (self.coordinator.data or {}).get("battery_modules") or []
         total = 0
         found = False
-        for m in modules:
+        for m in self._stable_modules():
             val = m.get("current_energy_wh")
             if val is not None:
                 total += val
@@ -1377,7 +1391,7 @@ class EmaldoBatteryTotalEnergySensor(
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Expose the combined maximum capacity and module count."""
-        modules = (self.coordinator.data or {}).get("battery_modules") or []
+        modules = self._stable_modules()
         if not modules:
             return None
         max_capacity = sum(m.get("full_energy_wh") or 0 for m in modules)
