@@ -74,7 +74,8 @@ STREAM_LONG_STALL_RECONNECT = 45  # seconds
 # coordinator escalates to a full REST-client reset + session rebuild, which
 # forces a clean re-login and genuinely fresh credentials. Kept well above the
 # 45 s long-stall watchdog so a healthy in-place self-heal never triggers it.
-STREAM_STALL_FULL_RESET_SECONDS = 180
+# (beta13i: lowered 180 -> 120 s to recover a dead-token wedge sooner.)
+STREAM_STALL_FULL_RESET_SECONDS = 120
 
 # Cold-start first-frame wait (beta13h): when a fresh stream session is started
 # the device needs a moment to complete the handshake + subscribe and push its

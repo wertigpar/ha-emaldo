@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,7 +22,11 @@ from .emaldo_lib.e2e import (
     EV_MODE_SCHEDULED,
     set_ev_charging_mode_smart,
 )
-from .emaldo_lib.exceptions import EmaldoAuthError
+from .emaldo_lib.exceptions import (
+    EmaldoAuthError,
+    EmaldoConnectionError,
+    EmaldoE2EError,
+)
 
 from .const import DOMAIN
 
@@ -227,7 +232,8 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
 
     # Read current overrides, then patch the range
     def _do_override():
-        for attempt in range(2):
+        last_err = None
+        for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
                     hass, coordinator_key="schedule", device_id=device_id
@@ -243,23 +249,38 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 for i in range(start_slot, min(end_slot, 96)):
                     slots[i] = slot_value
 
-                ok = client.set_override(
+                if client.set_override(
                     hid, did, model, bytes(slots),
                     high_marker=high, low_marker=low,
-                )
-                if ok:
+                ):
                     _LOGGER.info(
                         "Override set: slots %d-%d = %s", start_slot, end_slot, action
                     )
-                else:
-                    _LOGGER.error("Failed to set override")
-                return ok
-            except EmaldoAuthError:
-                if attempt == 0:
-                    _LOGGER.debug("Session expired, re-authenticating")
-                    coord._reset_client()
-                else:
-                    raise
+                    return True
+                # Transient relay/device rejection (e.g. status 21204) — reset
+                # the session and retry.
+                _LOGGER.debug(
+                    "Override not applied (attempt %d/3), retrying", attempt + 1
+                )
+                coord._reset_client()
+            except EmaldoAuthError as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Session expired setting override (attempt %d/3), "
+                    "re-authenticating", attempt + 1
+                )
+                coord._reset_client()
+            except (EmaldoE2EError, EmaldoConnectionError) as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Transient E2E error setting override (attempt %d/3): %s",
+                    attempt + 1, err
+                )
+                coord._reset_client()
+            if attempt < 2:
+                time.sleep(1)
+        _LOGGER.error("Failed to set override after 3 attempts: %s", last_err)
+        return False
 
     await hass.async_add_executor_job(_do_override)
 
@@ -286,30 +307,49 @@ async def async_handle_apply_bulk_schedule(
     low = call.data["low_marker"]
 
     def _do_bulk():
-        for attempt in range(2):
+        last_err = None
+        for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
                     hass, coordinator_key="schedule", device_id=device_id
                 )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
-                ok = client.set_override(
+                if client.set_override(
                     hid, did, model, bytes(slot_values),
                     high_marker=high, low_marker=low,
-                )
-                if ok:
+                ):
                     _LOGGER.info(
                         "Bulk override applied (%d slots)", len(slot_values)
                     )
-                else:
-                    _LOGGER.error("Failed to apply bulk override")
-                return ok
-            except EmaldoAuthError:
-                if attempt == 0:
-                    _LOGGER.debug("Session expired, re-authenticating")
-                    coord._reset_client()
-                else:
-                    raise
+                    return True
+                # Transient relay/device rejection (e.g. status 21204) — reset
+                # the session and retry.
+                _LOGGER.debug(
+                    "Bulk override not applied (attempt %d/3), retrying",
+                    attempt + 1
+                )
+                coord._reset_client()
+            except EmaldoAuthError as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Session expired applying bulk override (attempt %d/3), "
+                    "re-authenticating", attempt + 1
+                )
+                coord._reset_client()
+            except (EmaldoE2EError, EmaldoConnectionError) as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Transient E2E error applying bulk override "
+                    "(attempt %d/3): %s", attempt + 1, err
+                )
+                coord._reset_client()
+            if attempt < 2:
+                time.sleep(1)
+        _LOGGER.error(
+            "Failed to apply bulk override after 3 attempts: %s", last_err
+        )
+        return False
 
     await hass.async_add_executor_job(_do_bulk)
 
@@ -341,7 +381,8 @@ async def async_handle_reset_to_internal(
     low = call.data["low_marker"]
 
     def _do_reset():
-        for attempt in range(2):
+        last_err = None
+        for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
                     hass, coordinator_key="schedule", device_id=device_id
@@ -349,41 +390,61 @@ async def async_handle_reset_to_internal(
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
                 if reset_all:
-                    ok = client.reset_overrides(
+                    if client.reset_overrides(
                         hid, did, model, high_marker=high, low_marker=low
-                    )
-                    if ok:
+                    ):
                         _LOGGER.info("All overrides reset to internal")
-                    return ok
-
-                # Partial reset — read current, clear the range
-                start_slot = _time_to_slot(start_time)
-                end_slot = _time_to_slot(end_time)
-
-                current = client.get_overrides(hid, did, model)
-                if current:
-                    slots = list(current["slots"])
-                else:
-                    slots = [SLOT_NO_OVERRIDE] * 96
-
-                for i in range(start_slot, min(end_slot, 96)):
-                    slots[i] = SLOT_NO_OVERRIDE
-
-                ok = client.set_override(
-                    hid, did, model, bytes(slots),
-                    high_marker=high, low_marker=low,
-                )
-                if ok:
-                    _LOGGER.info(
-                        "Overrides reset: slots %d-%d", start_slot, end_slot
+                        return True
+                    _LOGGER.debug(
+                        "Reset-all not applied (attempt %d/3), retrying",
+                        attempt + 1
                     )
-                return ok
-            except EmaldoAuthError:
-                if attempt == 0:
-                    _LOGGER.debug("Session expired, re-authenticating")
                     coord._reset_client()
                 else:
-                    raise
+                    # Partial reset — read current, clear the range
+                    start_slot = _time_to_slot(start_time)
+                    end_slot = _time_to_slot(end_time)
+
+                    current = client.get_overrides(hid, did, model)
+                    if current:
+                        slots = list(current["slots"])
+                    else:
+                        slots = [SLOT_NO_OVERRIDE] * 96
+
+                    for i in range(start_slot, min(end_slot, 96)):
+                        slots[i] = SLOT_NO_OVERRIDE
+
+                    if client.set_override(
+                        hid, did, model, bytes(slots),
+                        high_marker=high, low_marker=low,
+                    ):
+                        _LOGGER.info(
+                            "Overrides reset: slots %d-%d", start_slot, end_slot
+                        )
+                        return True
+                    _LOGGER.debug(
+                        "Partial reset not applied (attempt %d/3), retrying",
+                        attempt + 1
+                    )
+                    coord._reset_client()
+            except EmaldoAuthError as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Session expired resetting overrides (attempt %d/3), "
+                    "re-authenticating", attempt + 1
+                )
+                coord._reset_client()
+            except (EmaldoE2EError, EmaldoConnectionError) as err:
+                last_err = err
+                _LOGGER.debug(
+                    "Transient E2E error resetting overrides (attempt %d/3): %s",
+                    attempt + 1, err
+                )
+                coord._reset_client()
+            if attempt < 2:
+                time.sleep(1)
+        _LOGGER.error("Failed to reset overrides after 3 attempts: %s", last_err)
+        return False
 
     await hass.async_add_executor_job(_do_reset)
 

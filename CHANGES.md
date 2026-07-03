@@ -1,5 +1,40 @@
 # Changes
 
+## v1.0.0-beta13i
+
+### Changed
+- **Stream wedged full-reset escalation now fires at 120 s (was 180 s):**
+  `STREAM_STALL_FULL_RESET_SECONDS` lowered from 180 s to 120 s (24 polls at the
+  5 s cadence). Overnight logs showed the beta13g escalation working correctly
+  but only after ~3 minutes; 120 s recovers a "dead REST token but API is up"
+  wedge sooner while still sitting well above the 45 s long-stall watchdog, so a
+  healthy in-place self-heal never triggers it. (During a genuine
+  `api.emaldo.com` outage, recovery is still bounded by the API returning, not by
+  this threshold.)
+
+### Fixed
+- **Override/schedule writes now retry on transient E2E errors, not just auth
+  (fixes intermittent "Failed to apply bulk override"):** the `set_slot_range`,
+  `apply_bulk_schedule` and `reset_to_internal` service handlers previously
+  retried only on `EmaldoAuthError` and gave up — dropping the write — on a
+  transient `EmaldoE2EError`/`EmaldoConnectionError` or a `set_override` that
+  returned `False`. So a brief relay/session hiccup (e.g. a 21204) during a
+  battery-optimizer or automation write silently failed. These writes now make
+  up to 3 attempts, resetting the session between tries and retrying on auth,
+  E2E and connection errors as well as a transient rejection, with a 1 s
+  backoff; an error is logged only after all attempts fail. This brings the
+  write path up to the resilience the realtime read/write paths already had.
+- **Total Energy sensor no longer shows sharp 5-minute dips (#41):** the sensor
+  summed `current_energy_wh` over the *latest* battery scan's module list, but a
+  scan runs only every ~5 minutes on a one-shot session and not every module
+  answers every scan on multi-module systems. A partial scan therefore dropped
+  the total for one 5-minute interval before the next full scan restored it,
+  producing the sharp saw-tooth history reported in #41. Total Energy (and its
+  `maximum_capacity_wh` / `module_count` attributes) now sums over the retained
+  per-slot module map, which keeps each slot's last-known value while it is
+  briefly silent — so the total stays stable and now matches the sum of the
+  per-module energy sensors.
+
 ## v1.0.0-beta13h
 
 ### Fixed
