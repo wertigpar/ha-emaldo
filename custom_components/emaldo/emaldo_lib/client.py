@@ -157,6 +157,14 @@ class EmaldoClient:
         # Cache E2E login credentials to avoid the 3 REST round-trips that
         # e2e_login() performs on every single E2E operation.
         self._e2e_credential_ttl = 10 * 60  # seconds; tune after field testing
+        # Account-level /home/e2e-login/ result, cached per home_id. That
+        # endpoint rotates the shared home end_secret server-side, so running
+        # it inside every per-device e2e_login rotates it out from under the
+        # OTHER device's live session on a multi-device account — a mutual
+        # 21204 storm that stalls both stream and poll mode (#47). Caching it
+        # per account keeps one home generation valid for all device sessions.
+        self._home_e2e_cache: dict[str, tuple[dict, float]] = {}
+        self._home_e2e_ttl = 30 * 60  # seconds
 
     # ------------------------------------------------------------------
     # Session management
@@ -722,23 +730,66 @@ class EmaldoClient:
     # E2E override protocol
     # ------------------------------------------------------------------
 
-    def e2e_login(self, home_id: str, device_id: str, model: str) -> dict:
+    def _get_home_e2e(self, home_id: str, *, force_refresh: bool = False) -> dict:
+        """Return the account-level ``/home/e2e-login/`` result, cached per home.
+
+        This endpoint is per-account (``home_id``) and rotates the shared home
+        ``end_secret`` server-side on every call. Because that secret is baked
+        into the ``home_alive`` keepalive/handshake packets of *every* device
+        session on the account, re-running it inside each per-device
+        ``e2e_login`` expires the other device's live session (mutual 21204
+        storm — #47). Caching it per account keeps a single home generation
+        valid for all of the account's device sessions; only the device-level
+        login (which rotates the per-device ``chat_secret``) stays per-call.
+        """
+        now = time.monotonic()
+        with self._e2e_lock:
+            cached = self._home_e2e_cache.get(home_id)
+            if (
+                not force_refresh
+                and cached is not None
+                and now - cached[1] <= self._home_e2e_ttl
+            ):
+                return dict(cached[0])
+
+            home_result = self.api_request(
+                "/home/e2e-login/", json_data={"home_id": home_id}
+            )
+            home_data = home_result.get("Result", {})
+            if not isinstance(home_data, dict) or "end_id" not in home_data:
+                raise EmaldoE2EError(f"Home e2e-login failed: {home_result}")
+            self._home_e2e_cache[home_id] = (dict(home_data), now)
+            return dict(home_data)
+
+    def invalidate_home_e2e(self, home_id: str) -> None:
+        """Drop the cached account-level home login (forces a fresh fetch)."""
+        with self._e2e_lock:
+            self._home_e2e_cache.pop(home_id, None)
+
+    def e2e_login(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        *,
+        force_home_refresh: bool = False,
+    ) -> dict:
         """Perform E2E login to obtain UDP session credentials.
 
         Calls three API endpoints (home e2e-login, device e2e-user-login,
         search-bmt) and returns a credentials dict for E2E operations.
 
+        The account-level home e2e-login is cached per ``home_id`` (see
+        :meth:`_get_home_e2e`) so a per-device login does not rotate the shared
+        home secret out from under another device's live session. Pass
+        ``force_home_refresh=True`` only for a deliberate account-level refresh.
+
         Raises:
             EmaldoAuthError: Auth issue during E2E login.
             EmaldoE2EError: Missing fields in API response.
         """
-        # Step 1: Home E2E login
-        home_result = self.api_request(
-            "/home/e2e-login/", json_data={"home_id": home_id}
-        )
-        home_data = home_result.get("Result", {})
-        if not isinstance(home_data, dict) or "end_id" not in home_data:
-            raise EmaldoE2EError(f"Home e2e-login failed: {home_result}")
+        # Step 1: Home E2E login (cached per account).
+        home_data = self._get_home_e2e(home_id, force_refresh=force_home_refresh)
 
         # Step 2: Device E2E login
         dev_result = self.api_request(

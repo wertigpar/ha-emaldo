@@ -3,6 +3,23 @@
 ## v1.0.0-beta13l
 
 ### Fixed
+- **Two devices on one account stalled each other's realtime session — both
+  stream and poll mode (#47):** every per-device `e2e_login` re-ran the
+  account-level `/home/e2e-login/` endpoint, which rotates the shared home
+  `end_secret` server-side. That secret is baked into the `home_alive`
+  keepalive/handshake packets of *every* device session on the account, so one
+  device logging in (its 10-minute credential refresh, or any 21204-triggered
+  re-login, or an EV/emergency/override command) rotated the secret out from
+  under the *other* device's live session — expiring it (21204), which forced
+  *that* device to re-login and rotate the secret back, a mutual ping-pong that
+  capped realtime success around ~39 % and froze sensors like battery power.
+  Switching transport (stream ↔ poll) could not help because both share the
+  same session and `home_alive` packets. The account-level home login is now
+  cached per `home_id` and reused by all of the account's device sessions, so a
+  per-device login no longer rotates the shared home secret; only the
+  per-device `chat_secret` still refreshes per device. Single-device accounts
+  are unaffected. (Home credentials still refresh on their own 30-minute TTL and
+  on a full client reset, so a genuinely stale home secret still self-heals.)
 - **Disabling then re-enabling the integration spawned a phantom "Emaldo
   Battery" device:** the AI Battery Range entities are backed by the schedule
   coordinator, whose device identity (`device_id`/`model`/`name`) was only
@@ -17,8 +34,8 @@
   previous version can be deleted from Settings → Devices & services.
 
 ### Added
-- **"Switch to poll mode" recommendation when the stream keeps stalling (#47,
-  #41):** on networks that drop the device's push datagrams (restrictive
+- **"Switch to poll mode" recommendation when the stream keeps stalling
+  (#41):** on networks that drop the device's push datagrams (restrictive
   NAT/firewall/CGNAT), stream mode repeatedly force-resets (`stream_stall_reset`)
   and the realtime power sensors (e.g. battery power) freeze on their last value
   — no client reset can recover frames that never arrive. After
