@@ -16,6 +16,31 @@
   from the first frame. Any empty phantom "Emaldo Battery" device left by a
   previous version can be deleted from Settings → Devices & services.
 
+### Added
+- **"Switch to poll mode" recommendation when the stream keeps stalling (#47,
+  #41):** on networks that drop the device's push datagrams (restrictive
+  NAT/firewall/CGNAT), stream mode repeatedly force-resets (`stream_stall_reset`)
+  and the realtime power sensors (e.g. battery power) freeze on their last value
+  — no client reset can recover frames that never arrive. After
+  `_STREAM_STALL_POLL_HINT_RESETS` (3) consecutive stream resets without a
+  successful read in between, the coordinator now logs a one-time WARNING telling
+  the user to turn off "Realtime stream mode" (Settings → Devices & services →
+  Emaldo Battery → Configure) and use the NAT-friendly poll model. This is
+  advisory only — the transport is not changed automatically.
+
+### Changed
+- **Auxiliary state reads throttled in stream mode to reduce receiver
+  contention (#47):** the balancing / sell-back-to-grid / sell-limit /
+  manual-selling states are read on the shared realtime session every 6th
+  successful power-flow read. In stream mode these four sequential reads each
+  briefly hold the session lock and can consume/discard buffered `0x30` push
+  frames meant for the background receiver. Their cadence is now 4x looser in
+  stream mode (every 24th read, ~2 min, vs. ~30 s) so they disturb the stream
+  less; the states are all slow-changing / user-toggled so responsiveness is
+  unaffected. Poll mode is single-threaded with no receiver to starve and keeps
+  the tighter cadence. (This trims avoidable contention; it is not a fix for the
+  network-level frame drops that cause the stalls — use poll mode for that.)
+
 ## v1.0.0-beta13k
 
 ### Fixed

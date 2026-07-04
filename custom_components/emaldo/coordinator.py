@@ -534,8 +534,21 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # diagnosis since users report long after the stall started.
         self._stall_active: bool = False
         self._stall_snapshot: dict | None = None
+        # Consecutive stream-mode full-reset escalations without a successful
+        # read in between. Repeated resets mean the device-push frames simply
+        # aren't reaching Home Assistant (restrictive NAT/firewall/CGNAT) — a
+        # transport limitation no client reset can fix (#41, #47). Used to emit
+        # a one-time "switch to poll mode" recommendation.
+        self._consecutive_stream_stall_resets: int = 0
+        self._stream_poll_mode_hint_logged: bool = False
         self._regulate_frequency: dict | None = None
-        self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
+        # Seed so the first successful poll triggers an auxiliary-state read
+        # immediately, regardless of the (mode-dependent) cadence below.
+        self._balancing_poll_counter: int = (
+            self._BALANCING_POLL_INTERVAL_STREAM
+            if self._stream_mode
+            else self._BALANCING_POLL_INTERVAL
+        ) - 1
         self._battery_modules_poll_counter: int = 59  # trigger on first successful poll
         self._battery_modules: list[dict] = []
         # Currently-running battery module scan task (if any). The 0x06 scan
@@ -1076,6 +1089,20 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     _STREAM_STALL_RESET_POLLS = max(
         1, STREAM_STALL_FULL_RESET_SECONDS // REALTIME_SCAN_INTERVAL
     )
+    #: After this many consecutive stream full-reset escalations with no
+    #: successful read in between, the device-push frames are almost certainly
+    #: being dropped by the network — recommend poll mode once (#41, #47).
+    _STREAM_STALL_POLL_HINT_RESETS = 3
+    #: Auxiliary-state (balancing / VPP / sell-limit / manual-selling) poll
+    #: cadence, counted in successful power-flow reads. In STREAM mode these
+    #: reads share the session socket with the background receiver: each one
+    #: briefly holds the session lock and can consume/discard buffered 0x30
+    #: push frames, so they run 4x less often to minimise contention with the
+    #: stream (all four states are slow-changing / user-toggled). Poll mode is
+    #: single-threaded with no receiver to starve, so it keeps the tighter
+    #: cadence.
+    _BALANCING_POLL_INTERVAL = 6
+    _BALANCING_POLL_INTERVAL_STREAM = 24
     #: After this many consecutive reconnect cycles with no recovery, switch from
     #: WARNING to DEBUG to avoid flooding the log during persistent failures.
     _WARN_RECONNECT_THRESHOLD = 3
@@ -1238,7 +1265,25 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     await self._close_session()  # full rebuild on next poll
                     self._empty_reads = 0
                     self._consecutive_reconnects += 1
+                    self._consecutive_stream_stall_resets += 1
                     self._record_reconnect("stream_stall_reset", _time.time())
+                    if (
+                        self._consecutive_stream_stall_resets
+                        >= self._STREAM_STALL_POLL_HINT_RESETS
+                        and not self._stream_poll_mode_hint_logged
+                    ):
+                        self._stream_poll_mode_hint_logged = True
+                        _LOGGER.warning(
+                            "E2E realtime stream has stalled and been force-reset %d "
+                            "times without recovering — the device's push frames are "
+                            "not reaching Home Assistant (typically a restrictive "
+                            "NAT/firewall/CGNAT network). This cannot be fixed by "
+                            "reconnecting. Turn OFF 'Realtime stream mode' under "
+                            "Settings → Devices & services → Emaldo Battery → Configure "
+                            "to use the poll model, which traverses NAT reliably (#41, "
+                            "#47).",
+                            self._consecutive_stream_stall_resets,
+                        )
                     return self.data
                 _LOGGER.debug(
                     "E2E stream: no fresh frame (empty #%d) — keeping last "
@@ -1416,6 +1461,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._consecutive_read_errors = 0
         self._empty_reconnect_deferral_streak = 0
         self._undecryptable_streak = 0
+        self._consecutive_stream_stall_resets = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
         was_first = not self._successful_first_refresh
@@ -1426,10 +1472,17 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "first valid E2E read — entities will now start writing state"
             )
 
-        # Poll balancing state every 6th successful read (~60s) using the same session.
-        # This avoids opening a competing UDP socket from the slow coordinator.
+        # Poll balancing state periodically using the same session. This avoids
+        # opening a competing UDP socket from the slow coordinator. The cadence
+        # is looser in stream mode to reduce contention with the background
+        # stream receiver (see _BALANCING_POLL_INTERVAL* for the rationale).
         self._balancing_poll_counter += 1
-        if self._balancing_poll_counter >= 6:
+        _balancing_interval = (
+            self._BALANCING_POLL_INTERVAL_STREAM
+            if self._stream_mode
+            else self._BALANCING_POLL_INTERVAL
+        )
+        if self._balancing_poll_counter >= _balancing_interval:
             self._balancing_poll_counter = 0
             try:
                 rf = await self.hass.async_add_executor_job(
