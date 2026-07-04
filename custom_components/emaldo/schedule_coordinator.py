@@ -68,15 +68,16 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._entry = entry
         self._parent = parent
-        # Seed device identity from the parent, which has already discovered the
-        # device (its first refresh is awaited before this coordinator is
-        # created). Without this the fields stay None until the first background
-        # data fetch, so entities added during platform setup render their
-        # device_info with device_id=None and get attached to a phantom
-        # "Emaldo Battery" device keyed by home_id instead of the real device.
-        self._device_id: str | None = parent.device_id
-        self._model: str | None = parent.device_model
-        self._device_name: str | None = parent.device_name
+        # NOTE: device identity is intentionally NOT seeded from the parent
+        # here. `_uid_base()` (number.py / switch.py) derives the AI Battery
+        # Range entities' unique_id from this coordinator's `device_id` for
+        # non-legacy/fan-out devices, so populating it at construction changes
+        # those unique_ids and makes Home Assistant create duplicate entities on
+        # upgrade (#47 "double sensors"). It stays None until the first data
+        # fetch syncs it from the parent, matching the established unique_ids.
+        self._device_id: str | None = None
+        self._model: str | None = None
+        self._device_name: str | None = None
         self._had_next_day = False
         self._e2e_retry_count = 0
         self._retry_count = 0  # exponential backoff counter
