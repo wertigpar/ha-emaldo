@@ -2933,6 +2933,12 @@ class PersistentE2ESession:
         self._last_rtt_ms: float | None = None
         self._last_keepalive_failure_reason: str | None = None
         self._last_handshake_monotonic: float | None = None
+        # Outcome of the most recent handshake: "ok" (relay replied), "no_response"
+        # (silent socket rebuild — a "reconnect" that re-established nothing), or
+        # "session_expired_21204". The handshake is otherwise fire-and-forget, so
+        # reconnect counters alone say nothing about whether a session actually
+        # came back; this exposes that for diagnostics.
+        self._last_handshake_response: str | None = None
         self._last_keepalive_monotonic: float | None = None
         self._last_21204_monotonic: float | None = None
         self._last_21204_stage: str | None = None
@@ -3016,6 +3022,11 @@ class PersistentE2ESession:
         return self._last_keepalive_failure_reason
 
     @property
+    def last_handshake_response(self) -> str | None:
+        """Outcome of the most recent handshake (ok/no_response/21204)."""
+        return self._last_handshake_response
+
+    @property
     def last_power_flow_diag(self) -> dict[str, int | bool]:
         """Diagnostics from the latest power-flow read attempt."""
         return dict(self._last_power_flow_diag)
@@ -3049,15 +3060,28 @@ class PersistentE2ESession:
         heartbeat = build_heartbeat_packet(self._creds, self._session_nonce)
         wake = build_wake_packet(self._creds, self._session_nonce)
 
-        self._send_raw(home_alive, "Alive(home)")
-        self._send_raw(dev_alive, "Alive(device)")
+        r_home = self._send_raw(home_alive, "Alive(home)")
+        r_dev = self._send_raw(dev_alive, "Alive(device)")
         self._send_raw(wake, "Wake")
-        self._send_raw(heartbeat, "Heartbeat")
+        r_hb = self._send_raw(heartbeat, "Heartbeat")
         time.sleep(0.2)
+        # Record whether the relay actually answered the handshake so reconnect
+        # diagnostics can distinguish a genuinely re-established session from a
+        # silent socket rebuild (the handshake is fire-and-forget otherwise).
+        responses = [r for r in (r_home, r_dev, r_hb) if r is not None]
+        if any(self._is_session_expired(r) for r in responses):
+            self._last_handshake_response = "session_expired_21204"
+        elif responses:
+            self._last_handshake_response = "ok"
+        else:
+            self._last_handshake_response = "no_response"
         self._last_handshake_monotonic = time.perf_counter()
         if self._log:
             elapsed_ms = (self._last_handshake_monotonic - started) * 1000.0
-            self._log(f"Handshake complete in {elapsed_ms:.1f}ms")
+            self._log(
+                f"Handshake complete in {elapsed_ms:.1f}ms "
+                f"(response={self._last_handshake_response})"
+            )
 
     def keepalive(self) -> bool:
         """Send a fresh alive+heartbeat to keep the session alive.
@@ -3108,6 +3132,18 @@ class PersistentE2ESession:
                     if self._log:
                         self._log("Keepalive saw 21204 — session expired")
                     self._last_keepalive_failure_reason = "session_expired_21204"
+                    return False
+                if resp is None:
+                    # A healthy relay echoes the alive packet. No reply means
+                    # the relay is not answering; treating this as success (the
+                    # previous behaviour) masked relay unresponsiveness and fed
+                    # false positives into the coordinator's healthy-keepalive
+                    # reconnect-deferral. Report it as a distinct failure so a
+                    # single stray timeout is tolerated (loop needs 2 in a row)
+                    # but a silent relay no longer looks healthy.
+                    if self._log:
+                        self._log("Keepalive got no response — relay silent")
+                    self._last_keepalive_failure_reason = "response_timeout"
                     return False
                 return True
             except Exception as err:  # noqa: BLE001 - best-effort keepalive

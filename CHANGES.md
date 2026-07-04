@@ -1,5 +1,59 @@
 # Changes
 
+## v1.0.0-beta13k
+
+### Fixed
+- **Poll mode can no longer wedge indefinitely on a stale relay binding (#41):**
+  poll mode previously had no counterpart to stream mode's `stream_stall_reset`
+  escalation — a run of empty-read reconnect cycles only closed and rebuilt the
+  session while reusing the cached 10-minute E2E credentials, so a dead relay
+  binding (e.g. after a cloud hiccup) could keep re-handshaking with stale creds
+  until an HA restart. After `_POLL_STALL_RESET_RECONNECTS` (3) reconnect cycles
+  without recovery, the coordinator now resets the shared REST client and
+  rebuilds the session with **freshly fetched** credentials (`poll_stall_reset`
+  reconnect reason), firing periodically thereafter to avoid hammering the cloud
+  API during a sustained outage. This restores beta9's implicit
+  fresh-login-on-every-reconnect behaviour.
+- **Failed session rebuilds now force fresh credentials:** any session teardown
+  that follows a confirmed failure (empty-read stall, undecryptable responses,
+  stream stall) now sets a flag so the next `_ensure_session` pulls
+  `force_refresh` credentials instead of the shared cache. The 10-minute cache
+  is still used on the happy path but never survives a confirmed session
+  failure.
+- **Keepalive no longer counts relay silence as success:** a keepalive that got
+  no reply to its alive packet previously returned success, masking relay
+  unresponsiveness and feeding false positives into the healthy-keepalive
+  reconnect-deferral logic. It now reports a distinct `response_timeout` failure
+  (a single stray timeout is still tolerated — the loop needs two in a row), so
+  "healthy keepalive" once again means "the relay actually replied".
+
+### Added
+- **Stale-credential (undecryptable-response) detection:** poll mode now tracks
+  reads where the relay *answered* but no frame could be decrypted/parsed — the
+  stale-`chat_secret` signature, distinct from an empty read (no response at
+  all). After `_UNDECRYPTABLE_RESET_STREAK` (6) consecutive such polls it logs a
+  WARNING and forces a fresh re-login, and exposes a lifetime
+  `undecryptable_polls` diagnostic.
+- **Stall snapshot diagnostic:** when the rolling success window first goes
+  fully cold (≥12 consecutive failed polls) the coordinator freezes a one-shot
+  `stall_snapshot` of the key counters (power-flow diagnostics, stream
+  diagnostics, last handshake response, RTT, reconnect state, timestamp) and
+  logs it. Since users typically report a stall hours after onset, this
+  preserves the state that actually matters for diagnosis. Re-armed once a
+  successful poll re-warms the window.
+- **Richer stall logging and diagnostics:** the stream wedged warning now
+  appends `stream_diag`, and the new poll-stall warning appends
+  `powerflow_last_diag`, so the discriminating counters (relay silent vs.
+  responded-but-unparseable) survive a copy-paste of the log line. The
+  connection diagnostic sensor gains `keepalive_failures_response_timeout`,
+  `undecryptable_polls`, `last_handshake_response`, and `stall_snapshot`
+  attributes.
+- **Handshake responses are now validated for diagnostics:** the persistent
+  session records whether each handshake actually drew a reply from the relay
+  (`ok` / `no_response` / `session_expired_21204`) instead of being purely
+  fire-and-forget, so reconnect counts can be distinguished from genuine
+  session re-establishment.
+
 ## v1.0.0-beta13j
 
 ### Added

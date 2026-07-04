@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import struct
 from typing import Any
@@ -520,6 +520,20 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._consecutive_read_errors: int = 0
         self._consecutive_reconnects: int = 0
         self._episode_drops: int = 0
+        # Set when a session teardown follows a confirmed failure (empty-read
+        # stall, undecryptable responses). The next `_ensure_session` then pulls
+        # genuinely fresh E2E credentials instead of reusing the shared 10-min
+        # cache, matching beta9's implicit "fresh e2e_login on every reconnect".
+        self._needs_fresh_creds: bool = False
+        # Consecutive poll-mode reads where the relay answered but nothing could
+        # be decrypted/parsed (the stale-`chat_secret` signature). Distinct from
+        # empty reads (no response at all).
+        self._undecryptable_streak: int = 0
+        # Frozen snapshot of key counters captured the moment a stall begins
+        # (recent success rate first hits 0), preserved for after-the-fact
+        # diagnosis since users report long after the stall started.
+        self._stall_active: bool = False
+        self._stall_snapshot: dict | None = None
         self._regulate_frequency: dict | None = None
         self._balancing_poll_counter: int = 5  # trigger full read on first successful poll
         self._battery_modules_poll_counter: int = 59  # trigger on first successful poll
@@ -560,15 +574,24 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "read_error": 0,
             "empty_reads": 0,
             "invalid_payload": 0,
+            "poll_stall_reset": 0,
+            "stream_stall_reset": 0,
             "keepalive_session_expired_21204": 0,
             "keepalive_closed": 0,
             "keepalive_exception": 0,
+            "keepalive_response_timeout": 0,
             "keepalive_other": 0,
         }
         self.stats_keepalive_failures_session_expired: int = 0
         self.stats_keepalive_failures_closed: int = 0
         self.stats_keepalive_failures_exception: int = 0
         self.stats_keepalive_failures_other: int = 0
+        self.stats_keepalive_failures_response_timeout: int = 0
+        # Lifetime count of poll-mode reads where the relay answered but the
+        # payload could not be decrypted/parsed (stale-secret signature).
+        self.stats_undecryptable_polls: int = 0
+        # Outcome of the most recent session handshake (ok/no_response/21204).
+        self.stats_last_handshake_response: str | None = None
         self.stats_e2e_rtt_last_ms: float | None = None
         self.stats_e2e_rtt_min_ms: float | None = None
         self.stats_e2e_rtt_max_ms: float | None = None
@@ -681,7 +704,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 binding,
             )
 
-        creds = client.get_e2e_credentials(home_id, device_id, model)
+        creds = client.get_e2e_credentials(
+            home_id, device_id, model, force_refresh=self._needs_fresh_creds
+        )
+        if self._needs_fresh_creds:
+            _LOGGER.info(
+                "E2E session rebuild after failure — forced fresh credentials"
+            )
+        self._needs_fresh_creds = False
         _LOGGER.debug("E2E session host: %s", creds.get("host", "(default)"))
         # Provider so the stream thread can pull the latest shared chat_secret
         # on reconnect (a concurrent REST e2e_login rotates it; re-handshaking
@@ -697,6 +727,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             creds_provider=_creds_provider,
         )
         self._session.connect()
+        self.stats_last_handshake_response = self._session.last_handshake_response
         if self._stream_mode:
             # Subscribe-and-stream: a background thread owns the power-flow
             # subscription and keepalive cadence (beta13d). The coordinator's
@@ -825,6 +856,49 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_reconnect_reasons[reason] = (
             self.stats_reconnect_reasons.get(reason, 0) + 1
         )
+
+    def _maybe_update_stall_snapshot(self) -> None:
+        """Freeze diagnostics the moment the recent window goes fully cold.
+
+        Users report stalls hours after they begin, by which point the live
+        counters have moved on. Capturing a one-shot snapshot at stall onset
+        preserves the state that actually matters for diagnosis. The snapshot is
+        re-armed once a successful poll re-warms the rolling window.
+        """
+        window = self._recent_poll_outcomes
+        min_samples = min(REALTIME_SUCCESS_WINDOW, 12)
+        recent_cold = len(window) >= min_samples and not any(window)
+        if recent_cold and not self._stall_active:
+            self._stall_active = True
+            self._stall_snapshot = self._build_stall_snapshot()
+            _LOGGER.warning(
+                "E2E realtime stall detected (no successful poll in the last %d "
+                "polls) — snapshot captured for diagnostics: %s",
+                len(window),
+                self._stall_snapshot,
+            )
+        elif any(window):
+            self._stall_active = False
+
+    def _build_stall_snapshot(self) -> dict[str, Any]:
+        """Assemble the diagnostic snapshot recorded at stall onset."""
+        return {
+            "captured": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "stream_mode": self._stream_mode,
+            "total_polls": self.stats_total_polls,
+            "successful_polls": self.stats_successful_polls,
+            "empty_reads_lifetime": self.stats_empty_reads,
+            "consecutive_reconnects": self._consecutive_reconnects,
+            "reconnects_lifetime": self.stats_reconnects,
+            "undecryptable_streak": self._undecryptable_streak,
+            "undecryptable_polls_lifetime": self.stats_undecryptable_polls,
+            "last_reconnect_reason": self.stats_last_reconnect_reason,
+            "last_read_error": self.stats_last_read_error,
+            "last_handshake_response": self.stats_last_handshake_response,
+            "powerflow_last_diag": dict(self.stats_powerflow_last_diag),
+            "stream_diag": dict(self._stream_diag) if self._stream_mode else None,
+            "e2e_rtt_last_ms": self.stats_e2e_rtt_last_ms,
+        }
 
     def _write_thirdparty_pv(self, enabled: bool) -> None:
         """Send SET_THIRDPARTYPV_ON (0x41) via the existing persistent session.
@@ -1007,6 +1081,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     _WARN_RECONNECT_THRESHOLD = 3
     #: Max times to defer reconnect on empty reads while keepalive remains healthy.
     _MAX_EMPTY_RECONNECT_DEFERRALS = 3
+    #: Poll mode: after this many consecutive empty-read reconnect cycles with no
+    #: recovery, escalate to a full REST-client reset + fresh-credential session
+    #: rebuild (the poll-mode counterpart of stream mode's stall reset). Without
+    #: this, poll-mode reconnects only reuse the cached 10-min credentials and a
+    #: dead relay binding can wedge indefinitely until an HA restart (#41).
+    _POLL_STALL_RESET_RECONNECTS = 3
+    #: Poll mode: after this many consecutive reads where the relay answered but
+    #: nothing could be decrypted (stale-`chat_secret` signature), force a fresh
+    #: re-login + session rebuild.
+    _UNDECRYPTABLE_RESET_STREAK = 6
 
     async def _async_final_probe_before_reconnect(self) -> dict[str, Any] | None:
         """Perform one last direct power-flow read before tearing down session.
@@ -1057,6 +1141,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
         self._recent_window_prev_success = self.stats_successful_polls
         self.stats_total_polls += 1
+        self._maybe_update_stall_snapshot()
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug(
                 "EMALDO_DEBUG[realtime_poll_start] poll #%d first_successful_refresh=%s "
@@ -1142,11 +1227,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     _LOGGER.warning(
                         "E2E stream wedged: no fresh frame for %d consecutive "
                         "polls (~%ds) — in-place reconnect not recovering; "
-                        "resetting REST client and rebuilding session",
+                        "resetting REST client and rebuilding session "
+                        "(stream_diag=%s)",
                         self._empty_reads,
                         self._empty_reads * REALTIME_SCAN_INTERVAL,
+                        self._stream_diag,
                     )
                     self._parent._reset_client()  # noqa: SLF001 - clean re-login
+                    self._needs_fresh_creds = True
                     await self._close_session()  # full rebuild on next poll
                     self._empty_reads = 0
                     self._consecutive_reconnects += 1
@@ -1158,6 +1246,36 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     self._empty_reads,
                 )
                 return self.data
+            # Poll mode only past this point (stream mode returned above).
+            # Classify the failure: did the relay stay silent (a true empty
+            # read), or answer with something we could not decrypt/parse? The
+            # latter is the stale-`chat_secret` signature and warrants a forced
+            # re-login rather than an endless reuse of the cached credentials.
+            _pf_diag = self.stats_powerflow_last_diag or {}
+            received_but_unparsed = bool(
+                _pf_diag.get("initial_timeout", 0) == 0
+                and _pf_diag.get("initial_session_expired", 0) == 0
+                and _pf_diag.get("drain_session_expired", 0) == 0
+                and _pf_diag.get("drain_powerflow_hits", 0) == 0
+                and (
+                    _pf_diag.get("initial_nonmatching", 0)
+                    or _pf_diag.get("drain_packets_seen", 0)
+                )
+            )
+            if received_but_unparsed:
+                self._undecryptable_streak += 1
+                self.stats_undecryptable_polls += 1
+                if self._undecryptable_streak == self._UNDECRYPTABLE_RESET_STREAK:
+                    _LOGGER.warning(
+                        "E2E power flow: relay responded but no frame was "
+                        "decryptable for %d consecutive polls — credentials "
+                        "likely stale; will force a fresh re-login "
+                        "(powerflow_diag=%s)",
+                        self._undecryptable_streak,
+                        _pf_diag,
+                    )
+            else:
+                self._undecryptable_streak = 0
             if self._empty_reads >= self._MAX_EMPTY_READS:
                 keepalive_recently_ok = (
                     self._last_keepalive_success is not None
@@ -1183,11 +1301,48 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     data = probe_data
                     self._empty_reads = 0
                     self._empty_reconnect_deferral_streak = 0
+                    self._undecryptable_streak = 0
                 else:
                     self._consecutive_reconnects += 1
                     self._episode_drops += 1
-                    self._record_reconnect("empty_reads", _time.time())
                     self._empty_reconnect_deferral_streak = 0
+                    # Escalation (poll-mode counterpart of stream_stall_reset):
+                    # after repeated reconnect cycles that never recover, or a
+                    # run of undecryptable responses, a plain session teardown
+                    # keeps reusing the cached credentials / dead relay binding.
+                    # Reset the REST client and force fresh credentials so the
+                    # next rebuild re-registers from scratch (#41). Fire only on
+                    # the threshold and then periodically to avoid hammering the
+                    # cloud API every poll during a sustained outage.
+                    full_reset = (
+                        (
+                            self._consecutive_reconnects
+                            >= self._POLL_STALL_RESET_RECONNECTS
+                            and self._consecutive_reconnects
+                            % self._POLL_STALL_RESET_RECONNECTS
+                            == 0
+                        )
+                        or self._undecryptable_streak
+                        >= self._UNDECRYPTABLE_RESET_STREAK
+                    )
+                    if full_reset:
+                        _LOGGER.warning(
+                            "E2E poll stall: %d reconnect cycles without recovery "
+                            "(undecryptable_streak=%d) — resetting REST client and "
+                            "rebuilding session with fresh credentials "
+                            "(powerflow_diag=%s)",
+                            self._consecutive_reconnects,
+                            self._undecryptable_streak,
+                            self.stats_powerflow_last_diag,
+                        )
+                        self._parent._reset_client()  # noqa: SLF001 - clean re-login
+                        self._needs_fresh_creds = True
+                        self._undecryptable_streak = 0
+                        self._record_reconnect("poll_stall_reset", _time.time())
+                        await self._close_session()
+                        self._empty_reads = 0
+                        return self.data  # keep last known values visible
+                    self._record_reconnect("empty_reads", _time.time())
                     if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
                         # Session expiry is normal relay behaviour — always INFO unless persistent
                         _LOGGER.info(
@@ -1260,6 +1415,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
         self._consecutive_read_errors = 0
         self._empty_reconnect_deferral_streak = 0
+        self._undecryptable_streak = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
         was_first = not self._successful_first_refresh
@@ -1498,6 +1654,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         self.stats_keepalive_failures_closed += 1
                     elif reason == "exception":
                         self.stats_keepalive_failures_exception += 1
+                    elif reason == "response_timeout":
+                        self.stats_keepalive_failures_response_timeout += 1
                     else:
                         self.stats_keepalive_failures_other += 1
                     _LOGGER.info(
@@ -1515,7 +1673,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         )
                         reconnect_reason = (
                             f"keepalive_{reason}"
-                            if reason in {"session_expired_21204", "closed", "exception"}
+                            if reason
+                            in {
+                                "session_expired_21204",
+                                "closed",
+                                "exception",
+                                "response_timeout",
+                            }
                             else "keepalive_other"
                         )
                         self._record_reconnect(reconnect_reason, _time.time())
