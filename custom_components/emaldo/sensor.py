@@ -1114,6 +1114,9 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "keepalive_failures_session_expired": c.stats_keepalive_failures_session_expired,
             "keepalive_failures_closed": c.stats_keepalive_failures_closed,
             "keepalive_failures_exception": c.stats_keepalive_failures_exception,
+            "keepalive_failures_response_timeout": getattr(
+                c, "stats_keepalive_failures_response_timeout", 0
+            ),
             "keepalive_failures_other": c.stats_keepalive_failures_other,
             "e2e_rtt_last_ms": c.stats_e2e_rtt_last_ms,
             "e2e_rtt_avg_ms": avg_rtt,
@@ -1134,6 +1137,11 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "powerflow_drain_timeouts": c.stats_powerflow_drain_timeouts,
             "powerflow_drain_exhausted": c.stats_powerflow_drain_exhausted,
             "powerflow_last_diag": c.stats_powerflow_last_diag,
+            "undecryptable_polls": getattr(c, "stats_undecryptable_polls", 0),
+            "last_handshake_response": getattr(
+                c, "stats_last_handshake_response", None
+            ),
+            "stall_snapshot": getattr(c, "_stall_snapshot", None),
             "last_success": _to_iso(c.stats_last_success),
             "last_failure": _to_iso(c.stats_last_failure),
             "last_reconnect": _to_iso(c.stats_last_reconnect),
