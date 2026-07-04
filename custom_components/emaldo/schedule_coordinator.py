@@ -68,9 +68,15 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._entry = entry
         self._parent = parent
-        self._device_id: str | None = None
-        self._model: str | None = None
-        self._device_name: str | None = None
+        # Seed device identity from the parent, which has already discovered the
+        # device (its first refresh is awaited before this coordinator is
+        # created). Without this the fields stay None until the first background
+        # data fetch, so entities added during platform setup render their
+        # device_info with device_id=None and get attached to a phantom
+        # "Emaldo Battery" device keyed by home_id instead of the real device.
+        self._device_id: str | None = parent.device_id
+        self._model: str | None = parent.device_model
+        self._device_name: str | None = parent.device_name
         self._had_next_day = False
         self._e2e_retry_count = 0
         self._retry_count = 0  # exponential backoff counter

@@ -1,5 +1,21 @@
 # Changes
 
+## v1.0.0-beta13l
+
+### Fixed
+- **Disabling then re-enabling the integration spawned a phantom "Emaldo
+  Battery" device:** the AI Battery Range entities are backed by the schedule
+  coordinator, whose device identity (`device_id`/`model`/`name`) was only
+  synced from the parent lazily during its first background data fetch. On
+  re-enable, entities are added during platform setup *before* that fetch runs,
+  so their `device_info` rendered with `device_id=None` and attached to a second
+  device keyed by `home_id` and named "Emaldo Battery" instead of the real
+  device (e.g. "Power Store"). The schedule coordinator now seeds its device
+  identity from the parent coordinator at construction (the parent's discovery
+  is already complete by then), so these entities render on the correct device
+  from the first frame. Any empty phantom "Emaldo Battery" device left by a
+  previous version can be deleted from Settings → Devices & services.
+
 ## v1.0.0-beta13k
 
 ### Fixed
