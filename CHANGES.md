@@ -1,5 +1,24 @@
 # Changes
 
+## v1.0.0-beta13m
+
+### Fixed
+- **Duplicate AI Battery Range entities ("double sensors") after upgrading to
+  beta13l (#47):** beta13l's phantom-device fix seeded the schedule
+  coordinator's `device_id` at construction, but that value also feeds
+  `_uid_base()`, which builds the AI Battery Range entities' `unique_id` for
+  non-legacy/fan-out devices. Seeding it changed those unique_ids, so Home
+  Assistant created a second copy of each entity (smart/emergency markers and
+  the override switch) alongside the originals — worst on multi-device setups,
+  and enough extra entity churn to overload low-power hosts (a reporter's Pi
+  choked). The seeding is reverted so unique_ids match pre-beta13l releases and
+  no duplicates are created. Users who ran beta13l will have orphaned duplicate
+  entities left in the registry; these show as unavailable and can be deleted
+  from Settings → Devices & services. (The original phantom empty-device
+  cosmetic issue that beta13l tried to fix returns for now and needs a
+  unique_id-safe reimplementation — fix `device_info` without touching the uid
+  base.)
+
 ## v1.0.0-beta13l
 
 ### Fixed
@@ -32,6 +51,8 @@
   is already complete by then), so these entities render on the correct device
   from the first frame. Any empty phantom "Emaldo Battery" device left by a
   previous version can be deleted from Settings → Devices & services.
+  **(Note: reverted in beta13m — this seeding changed entity unique_ids and
+  caused duplicate sensors; see #47.)**
 
 ### Added
 - **"Switch to poll mode" recommendation when the stream keeps stalling
