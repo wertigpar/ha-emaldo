@@ -12,6 +12,10 @@
     `_write_emergency_charge_on/off` already logged timestamps and device ID from
     beta13o. This lets a single debug-log capture show whether a toggle's E2E
     handshake completed, which step failed, and what the relay replied, per device.
+- **Power-flow data logging:** `EmaldoRealtimeCoordinator._async_update_data` now
+  logs parsed power-flow values (`battery_w`, `solar_w`, `grid_w`, `soc`) under
+  the `[PowerFlow]` prefix on every successful read. This shows whether HA is
+  actually receiving the correct realtime data from the E2E stream.
 
 ## v1.0.0-beta13o
 

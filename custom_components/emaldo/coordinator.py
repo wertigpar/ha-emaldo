@@ -1602,6 +1602,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return self._keep_last_or_fail()
 
         self._empty_reads = 0
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _pf = {k: data.get(k) for k in ("battery_w", "solar_w", "grid_w", "soc") if k in data}
+            _LOGGER.debug("[PowerFlow] %s", _pf)
         if self._consecutive_reconnects > 0:
             _LOGGER.info(
                 "E2E power flow recovered after %d reconnect cycles (episode drops: %d)",
