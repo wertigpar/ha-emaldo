@@ -1,5 +1,38 @@
 # Changes
 
+## v1.0.0-beta13o
+
+### Fixed
+- **Cross-device 21204 cascade on emergency charge / sell / EV commands (#47
+  follow-up):** `send_sell()`, `cancel_sell()`, `emergency_charge_window()`
+  called `e2e_login()` directly instead of the shared credential cache. That
+  rotated the per-device `chat_secret` server-side, immediately expiring the
+  active stream session (21204). On a multi-device account, device A's stream
+  reconnect then force-refreshed the *home* secret (via
+  `force_home_refresh=True` in `_get_e2e_credentials`), rotating it out from
+  under device B's live session — a mutual ping-pong that neither device could
+  escape. All one-shot E2E operations now use `get_e2e_credentials()` (the
+  shared cache), and `_get_e2e_credentials(force_refresh=True)` no longer
+  propagates `force_home_refresh=True`, so a device-only credential refresh
+  never rotates the shared home secret.
+- **Emergency charge toggle unreliability after E2E session expiry:** if the
+  E2E session expired (21204) between the user toggling the switch and the
+  command reaching the relay, the command silently failed and the coordinator's
+  optimistic state (`_emergency_charge_active`) permanently diverged from the
+  device. `_write_emergency_charge_on/off` now catch `EmaldoE2ESessionExpired`,
+  invalidate the stale cache entry, and retry once with fresh credentials so
+  the toggle succeeds even when the session was stale.
+
+### Changed
+- **Emergency charge write in coordinator.py:** `_write_emergency_charge_on/off`
+  now invalidate cached E2E credentials on `EmaldoE2ESessionExpired` + retry
+  once, matching the pattern from `_run_e2e_with_refresh_retry`.
+- **Credential refresh cascade blocked in client.py:**
+  `_get_e2e_credentials(force_refresh=True)` no longer passes
+  `force_home_refresh=True` to `e2e_login`. Home secret rotation happens only
+  on its own 30-minute TTL, so one device's transient 21204 recovery never
+  punches the other device offline.
+
 ## v1.0.0-beta13n
 
 ### Fixed
