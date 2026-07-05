@@ -1617,8 +1617,15 @@ def set_emergency_charge(
             now = time.time()
             end_unix = int(now - (int(now) % 3600)) + 172800
         payload = struct.pack("<BII", 1, start_unix, end_unix)
+        _LOGGER.debug(
+            "[EmergencyCharge] enabling: start=%d end=%d payload_hex=%s",
+            start_unix, end_unix, payload.hex(),
+        )
     else:
         payload = bytes(9)  # 9 zeros
+        _LOGGER.debug(
+            "[EmergencyCharge] disabling: payload_hex=%s", payload.hex(),
+        )
 
     session_nonce = generate_nonce()
     home_alive = build_alive_packet(
@@ -1643,13 +1650,24 @@ def set_emergency_charge(
     addr = (host, port)
 
     def _send(pkt: bytes, label: str) -> bytes | None:
+        t0 = time.monotonic()
         sock.sendto(pkt, addr)
         try:
             resp, _ = sock.recvfrom(4096)
+            elapsed = (time.monotonic() - t0) * 1000
+            _LOGGER.debug(
+                "[EmergencyCharge] %s: sent %dB \u2192 got %dB (rtt=%.1fms) resp_hex=%s",
+                label, len(pkt), len(resp), elapsed, resp[:64].hex(),
+            )
             if log:
                 log(f"{label}: sent {len(pkt)}B \u2192 got {len(resp)}B")
             return resp
         except socket.timeout:
+            elapsed = (time.monotonic() - t0) * 1000
+            _LOGGER.debug(
+                "[EmergencyCharge] %s: sent %dB \u2192 timeout (%.1fms)",
+                label, len(pkt), elapsed,
+            )
             if log:
                 log(f"{label}: sent {len(pkt)}B \u2192 no response")
             return None
@@ -1661,7 +1679,12 @@ def set_emergency_charge(
         _send(heartbeat, "Heartbeat")
         time.sleep(0.2)
         resp = _send(cmd_pkt, "EmergencyCharge")
-        return resp is not None
+        result = resp is not None
+        _LOGGER.debug(
+            "[EmergencyCharge] result=%s resp_len=%s",
+            result, len(resp) if resp else None,
+        )
+        return result
     finally:
         sock.close()
 

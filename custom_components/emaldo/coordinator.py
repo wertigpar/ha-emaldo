@@ -442,6 +442,10 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             start_unix = int(_time.time())
         if end_unix is None:
             end_unix = start_unix + 3600  # 1 hour fallback
+        _LOGGER.debug(
+            "[EmergencyCharge] _write_emergency_charge_on start=%d end=%d device=%s",
+            start_unix, end_unix, self._device_id,
+        )
         for attempt in range(2):
             try:
                 client = self._ensure_client()
@@ -472,6 +476,10 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Retries once after invalidating the cached E2E session if the failure
         looks like a stale ``chat_secret`` (21204 cascade follow-up).
         """
+        _LOGGER.debug(
+            "[EmergencyCharge] _write_emergency_charge_off device=%s",
+            self._device_id,
+        )
         for attempt in range(2):
             try:
                 client = self._ensure_client()
