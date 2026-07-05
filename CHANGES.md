@@ -1,5 +1,18 @@
 # Changes
 
+## v1.0.0-beta13p
+
+### Added
+- **Emergency charge E2E diagnostic logging:** `set_emergency_charge()` in
+  `e2e.py` now logs each handshake step (Alive/Wake/Heartbeat/Command) with
+  sent/received byte counts, round-trip time, and response hex prefix — plus
+    timeout detection — under the `[EmergencyCharge]` prefix. The OFF
+    path (`cancel_sell` → `emergency_charge_off`) also logs the same handshake
+    details when the label mentions "emergency"/"charge". Coordinator
+    `_write_emergency_charge_on/off` already logged timestamps and device ID from
+    beta13o. This lets a single debug-log capture show whether a toggle's E2E
+    handshake completed, which step failed, and what the relay replied, per device.
+
 ## v1.0.0-beta13o
 
 ### Fixed

@@ -1555,14 +1555,30 @@ def cancel_sell(
     sock.settimeout(timeout)
     addr = (host, port)
 
+    def _is_emergency() -> bool:
+        return "emergency" in label.lower() or "charge" in label.lower()
+
     def _send(pkt: bytes, label: str) -> bytes | None:
+        t0 = time.monotonic()
         sock.sendto(pkt, addr)
         try:
             resp, _ = sock.recvfrom(4096)
+            elapsed = (time.monotonic() - t0) * 1000
+            if _is_emergency():
+                _LOGGER.debug(
+                    "[EmergencyCharge] %s: sent %dB \u2192 got %dB (rtt=%.1fms) resp_hex=%s",
+                    label, len(pkt), len(resp), elapsed, resp[:64].hex(),
+                )
             if log:
                 log(f"{label}: sent {len(pkt)}B \u2192 got {len(resp)}B")
             return resp
         except socket.timeout:
+            elapsed = (time.monotonic() - t0) * 1000
+            if _is_emergency():
+                _LOGGER.debug(
+                    "[EmergencyCharge] %s: sent %dB \u2192 timeout (%.1fms)",
+                    label, len(pkt), elapsed,
+                )
             if log:
                 log(f"{label}: sent {len(pkt)}B \u2192 no response")
             return None
@@ -1575,6 +1591,11 @@ def cancel_sell(
         time.sleep(0.2)
 
         resp = _send(cancel_pkt, label)
+        if _is_emergency():
+            _LOGGER.debug(
+                "[EmergencyCharge] cancel result=%s resp_len=%s",
+                resp is not None, len(resp) if resp else None,
+            )
         if resp and len(resp) == 161:
             return True
         return resp is not None
