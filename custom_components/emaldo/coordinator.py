@@ -454,6 +454,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     start_unix, end_unix,
                 )
                 self._emergency_charge_active = True
+                self._close_realtime_session()
                 return
             except EmaldoE2ESessionExpired:
                 client = self._ensure_client()
@@ -487,6 +488,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.home_id, self._device_id, self._model
                 )
                 self._emergency_charge_active = False
+                self._close_realtime_session()
                 return
             except EmaldoE2ESessionExpired:
                 client = self._ensure_client()
@@ -502,6 +504,29 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception:
                 if attempt == 1:
                     raise
+
+    def _close_realtime_session(self) -> None:
+        """Close paired realtime coordinator's E2E session after one-shot.
+
+        A one-shot E2E command (emergency charge ON/OFF) opens a fresh UDP
+        socket with cached credentials, which kicks the persistent stream's
+        relay session (21204). Proactively closing the stream session avoids
+        60-90s of stale power flow data — the next poll reconnects cleanly.
+        """
+        try:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+            if not entry_data:
+                return
+            for item in entry_data.get("devices", [entry_data]):
+                if item.get("power") is self:
+                    realtime = item.get("realtime")
+                    if realtime is not None:
+                        asyncio.run_coroutine_threadsafe(
+                            realtime._close_session(), self.hass.loop
+                        )
+                    return
+        except Exception:
+            _LOGGER.debug("Failed to close paired stream session", exc_info=True)
 
 
 class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
