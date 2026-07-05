@@ -913,7 +913,19 @@ class EmaldoClient:
             )
 
             if force_refresh or expired:
-                creds = self.e2e_login(home_id, device_id, model)
+                # A forced refresh only fires after a confirmed session expiry
+                # or decrypt failure. In that case the shared home-level secret
+                # generation is also suspect, so rotate it too (force_home_refresh)
+                # rather than reusing the cached home login for up to the home
+                # TTL. beta9 always fetched fresh home+device creds on every
+                # reconnect, which both #41 and #47 reporters confirm is stable;
+                # the routine (TTL-expiry) path still reuses the cached home
+                # login so it does not rotate the shared secret out from under
+                # another device's live session (#47).
+                creds = self.e2e_login(
+                    home_id, device_id, model,
+                    force_home_refresh=force_refresh,
+                )
                 generation = entry.generation + 1 if entry else 1
                 entry = E2ECredentialCacheEntry(
                     creds=creds,

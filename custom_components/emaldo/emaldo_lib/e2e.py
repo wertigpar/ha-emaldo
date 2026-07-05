@@ -3209,11 +3209,19 @@ class PersistentE2ESession:
                     f"age_since_keepalive={keepalive_age_ms})"
                 )
             if reconnect_on_expiry and self._reconnect_after_expiry():
+                # Retry the read immediately on the refreshed session instead
+                # of deferring to the next poll. Deferring turned every 21204
+                # into a guaranteed empty read (~2.4s wasted per poll) and, when
+                # the relay expires the session on each first read, produced an
+                # endless empty-read chain (#41). The retry passes
+                # reconnect_on_expiry=False, so a second 21204 returns None and
+                # cannot loop.
                 if self._log:
                     self._log(
-                        "Session re-handshaked after 21204; deferring power-flow "
-                        "read until next poll"
+                        "Session re-handshaked after 21204; retrying power-flow "
+                        "read on the refreshed session"
                     )
+                return self._read_power_flow_locked(reconnect_on_expiry=False)
             return None
 
         result = self._try_parse_power_flow(resp)

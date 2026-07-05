@@ -42,6 +42,7 @@ from .emaldo_lib.e2e import (
     _VIRTUALPOWERPLANT_SET_TYPE,
     _build_vpp_payload,
     read_battery_info as _standalone_read_battery_info,
+    read_power_flow as _standalone_read_power_flow,
 )
 
 from .const import (
@@ -639,6 +640,18 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         #: handshake/reconnect phase, preventing a flash of "unavailable" over
         #: previously restored sensor values on HA restart.
         self._successful_first_refresh: bool = False
+        # -- Legacy (beta9-style) fallback -----------------------------------
+        # When the persistent-session model cannot recover on a network (the
+        # stream/poll full-reset escalations keep firing with no successful read
+        # in between), fall back to the beta9 read model: a fresh UDP socket +
+        # full handshake + single 0x30 read per poll, no persistent session.
+        # Both #41 and #47 reporters confirm beta9 is stable on their networks
+        # while the persistent model yields zero usable frames even after full
+        # client resets. Latched until the integration is reloaded.
+        self._legacy_fallback_active: bool = False
+        # Full-reset escalations (stream_stall_reset / poll_stall_reset) since
+        # the last successful read. Any successful read resets this to 0.
+        self._stall_resets_without_success: int = 0
 
     # -- Proxy properties so sensors can share one class across coordinators --
 
@@ -775,6 +788,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     def _read_power_flow(self) -> dict | None:
         """Synchronous helper that runs in the executor."""
+        if self._legacy_fallback_active:
+            # Persistent/stream session gave up on this network — use the
+            # beta9-style one-shot read model (see _read_power_flow_legacy).
+            return self._read_power_flow_legacy()
         session = self._ensure_session()
         if self._stream_mode:
             # Stream mode: the background receiver keeps the freshest frame
@@ -1119,6 +1136,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     #: re-login + session rebuild.
     _UNDECRYPTABLE_RESET_STREAK = 6
 
+    #: After this many consecutive full-reset escalations (stream_stall_reset or
+    #: poll_stall_reset) without a single successful read in between, the
+    #: persistent-session model has failed to recover on this network. Latch
+    #: into the beta9-style legacy read model (fresh socket + handshake + one
+    #: 0x30 read per poll), which both #41 and #47 reporters confirm is stable.
+    _LEGACY_FALLBACK_RESETS = 3
+
     async def _async_final_probe_before_reconnect(self) -> dict[str, Any] | None:
         """Perform one last direct power-flow read before tearing down session.
 
@@ -1148,6 +1172,86 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "(reconnects avoided: %d)",
             self.stats_reconnects_avoided,
         )
+        return data
+
+    def _keep_last_or_fail(self) -> dict[str, Any] | None:
+        """Return last-known data, or raise UpdateFailed if none ever arrived.
+
+        Keeping the previous values visible is correct once the session has
+        produced at least one good read — a transient gap must not blank the
+        sensors. But when NO successful read has ever happened and the failures
+        have passed the tolerance threshold, returning ``None`` silently marks
+        the coordinator update as successful, so HA reports the integration as
+        healthy while every entity is unavailable (#47, and the method's own
+        docstring already promises to surface this). Raise instead so HA shows
+        the real state and keeps retrying.
+        """
+        if (
+            self.data is None
+            and not self._successful_first_refresh
+            and max(self._empty_reads, self._consecutive_read_errors)
+            >= self._MAX_EMPTY_READS
+        ):
+            raise UpdateFailed(
+                "No realtime E2E data received yet — the device's power-flow "
+                "frames are not reaching Home Assistant"
+            )
+        return self.data
+
+    def _register_stall_reset_and_maybe_fallback(self) -> None:
+        """Count a full-reset escalation; latch legacy fallback if they persist.
+
+        Both ``stream_stall_reset`` and ``poll_stall_reset`` call this after a
+        full REST-client reset + session rebuild. When the persistent-session
+        model has been fully reset ``_LEGACY_FALLBACK_RESETS`` times with no
+        successful read in between, it cannot recover on this network. Latch
+        into the beta9-style one-shot read model (fresh socket + handshake +
+        single 0x30 read per poll), which both #41 and #47 reporters confirm is
+        stable where the persistent/stream session yields no usable frames. The
+        counter resets to 0 on any successful read.
+        """
+        if self._legacy_fallback_active:
+            return
+        self._stall_resets_without_success += 1
+        if self._stall_resets_without_success >= self._LEGACY_FALLBACK_RESETS:
+            self._legacy_fallback_active = True
+            _LOGGER.warning(
+                "E2E persistent session failed to recover after %d full resets "
+                "with no successful read — switching to legacy compatibility "
+                "reads (beta9 model: fresh handshake + single read per poll). "
+                "This traverses networks where the persistent/stream session "
+                "cannot; it stays active until the integration is reloaded "
+                "(#41, #47).",
+                self._stall_resets_without_success,
+            )
+
+    def _read_power_flow_legacy(self) -> dict | None:
+        """beta9-style one-shot read: fresh socket + handshake + single 0x30.
+
+        Runs in the executor. Uses the shared cached E2E credentials; on a
+        ``None`` result it retries once with a forced fresh login (rotating
+        home + device secrets), mirroring beta9's fresh-login-after-failure
+        without hammering the REST API on every poll.
+        """
+        client = self._parent._ensure_client()  # noqa: SLF001 - intended
+        home_id = self._parent.home_id
+        device_id = self._parent._device_id  # noqa: SLF001
+        model = self._parent._model  # noqa: SLF001
+        if device_id is None or model is None:
+            raise UpdateFailed("Device not yet discovered")
+
+        creds = client.get_e2e_credentials(home_id, device_id, model)
+        data = _standalone_read_power_flow(
+            creds, log=lambda msg: _LOGGER.debug("[E2E legacy] %s", msg)
+        )
+        if data is None:
+            creds = client.get_e2e_credentials(
+                home_id, device_id, model, force_refresh=True
+            )
+            data = _standalone_read_power_flow(
+                creds, log=lambda msg: _LOGGER.debug("[E2E legacy] %s", msg)
+            )
+        self._e2e_diag = f"legacy result={'data' if data else 'None'}"
         return data
 
     async def _async_update_data(self) -> dict[str, Any] | None:
@@ -1192,7 +1296,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.stats_last_failure = _time.time()
             self._record_reconnect("auth_expired", self.stats_last_failure)
             _LOGGER.info("E2E auth expired, will re-login on next poll: %s", err)
-            return self.data  # keep last known values visible
+            return self._keep_last_or_fail()  # keep last known values visible
         except Exception as err:
             await self._close_session()
             self._empty_reads = 0
@@ -1215,7 +1319,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     "E2E power flow read failed (attempt %d/%d): %s",
                     self._consecutive_read_errors, self._MAX_EMPTY_READS, err,
                 )
-            return self.data  # keep last known values visible
+            return self._keep_last_or_fail()  # keep last known values visible
 
         # Ensure keepalive task is running. Created as a config-entry
         # background task (not hass.async_create_task) so HA's bootstrap does
@@ -1267,30 +1371,56 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     self._consecutive_reconnects += 1
                     self._consecutive_stream_stall_resets += 1
                     self._record_reconnect("stream_stall_reset", _time.time())
+                    self._register_stall_reset_and_maybe_fallback()
                     if (
                         self._consecutive_stream_stall_resets
                         >= self._STREAM_STALL_POLL_HINT_RESETS
                         and not self._stream_poll_mode_hint_logged
                     ):
                         self._stream_poll_mode_hint_logged = True
-                        _LOGGER.warning(
-                            "E2E realtime stream has stalled and been force-reset %d "
-                            "times without recovering — the device's push frames are "
-                            "not reaching Home Assistant (typically a restrictive "
-                            "NAT/firewall/CGNAT network). This cannot be fixed by "
-                            "reconnecting. Turn OFF 'Realtime stream mode' under "
-                            "Settings → Devices & services → Emaldo Battery → Configure "
-                            "to use the poll model, which traverses NAT reliably (#41, "
-                            "#47).",
-                            self._consecutive_stream_stall_resets,
-                        )
-                    return self.data
+                        # Classify the stall from the stream diagnostics rather
+                        # than assuming a NAT/firewall drop. drain_packets counts
+                        # datagrams the receiver actually pulled off the socket;
+                        # drain_unparsed counts those it could not decrypt/parse.
+                        # If packets ARE arriving but cannot be decoded, this is
+                        # a credential/decryption problem (poll mode will not
+                        # help) — not the no-traffic NAT case (#41, #47).
+                        _sd = self._stream_diag or {}
+                        _pkts = int(_sd.get("drain_packets", 0) or 0)
+                        _unparsed = int(_sd.get("drain_unparsed", 0) or 0)
+                        if _pkts > 0 and _unparsed >= max(1, _pkts - 1):
+                            _LOGGER.warning(
+                                "E2E realtime stream has stalled and been "
+                                "force-reset %d times without recovering. The "
+                                "relay IS delivering packets (%d seen, %d "
+                                "undecryptable) but none can be decrypted — this "
+                                "is a credential/decryption failure, not a "
+                                "network drop, so switching to poll mode may not "
+                                "help. Please report this log on the issue "
+                                "tracker (#41, #47).",
+                                self._consecutive_stream_stall_resets,
+                                _pkts,
+                                _unparsed,
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "E2E realtime stream has stalled and been force-reset %d "
+                                "times without recovering — the device's push frames are "
+                                "not reaching Home Assistant (typically a restrictive "
+                                "NAT/firewall/CGNAT network). This cannot be fixed by "
+                                "reconnecting. Turn OFF 'Realtime stream mode' under "
+                                "Settings → Devices & services → Emaldo Battery → Configure "
+                                "to use the poll model, which traverses NAT reliably (#41, "
+                                "#47).",
+                                self._consecutive_stream_stall_resets,
+                            )
+                    return self._keep_last_or_fail()
                 _LOGGER.debug(
                     "E2E stream: no fresh frame (empty #%d) — keeping last "
                     "values, stream thread self-heals",
                     self._empty_reads,
                 )
-                return self.data
+                return self._keep_last_or_fail()
             # Poll mode only past this point (stream mode returned above).
             # Classify the failure: did the relay stay silent (a true empty
             # read), or answer with something we could not decrypt/parse? The
@@ -1341,7 +1471,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         self._empty_reconnect_deferral_streak,
                         self._MAX_EMPTY_RECONNECT_DEFERRALS,
                     )
-                    return self.data
+                    return self._keep_last_or_fail()
                 if (probe_data := await self._async_final_probe_before_reconnect()) is not None:
                     data = probe_data
                     self._empty_reads = 0
@@ -1384,9 +1514,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         self._needs_fresh_creds = True
                         self._undecryptable_streak = 0
                         self._record_reconnect("poll_stall_reset", _time.time())
+                        self._register_stall_reset_and_maybe_fallback()
                         await self._close_session()
                         self._empty_reads = 0
-                        return self.data  # keep last known values visible
+                        return self._keep_last_or_fail()  # keep last known values visible
                     self._record_reconnect("empty_reads", _time.time())
                     if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
                         # Session expiry is normal relay behaviour — always INFO unless persistent
@@ -1414,14 +1545,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         )
                     await self._close_session()
                     self._empty_reads = 0
-                    return self.data  # keep last known values visible
+                    return self._keep_last_or_fail()  # keep last known values visible
                 # fall through and process recovered probe_data as a normal success
             # Keep previous data visible to sensors
             _LOGGER.info(
                 "E2E power flow empty read %d/%d, keeping previous values",
                 self._empty_reads, self._MAX_EMPTY_READS,
             )
-            return self.data
+            return self._keep_last_or_fail()
 
         invalid_channels = get_invalid_realtime_power_channels(data)
         if invalid_channels:
@@ -1439,7 +1570,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._empty_reconnect_deferral_streak = 0
                 await self._close_session()
                 self._empty_reads = 0
-            return self.data
+            return self._keep_last_or_fail()
 
         self._empty_reads = 0
         if self._consecutive_reconnects > 0:
@@ -1462,6 +1593,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._empty_reconnect_deferral_streak = 0
         self._undecryptable_streak = 0
         self._consecutive_stream_stall_resets = 0
+        # A successful read means the current transport is working, so clear the
+        # legacy-fallback escalation counter (Fix E). Note: once
+        # ``_legacy_fallback_active`` latches it stays until reload — a working
+        # legacy read must not silently flip back to the persistent model.
+        self._stall_resets_without_success = 0
         self.stats_successful_polls += 1
         self.stats_last_success = _time.time()
         was_first = not self._successful_first_refresh

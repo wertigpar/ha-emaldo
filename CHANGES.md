@@ -1,5 +1,49 @@
 # Changes
 
+## v1.0.0-beta13n
+
+### Fixed
+- **Realtime session reported "healthy" while no data ever arrived (#47):** the
+  realtime coordinator returned the last-known data on every empty read, which
+  marks the Home Assistant update as *successful*. Before the first successful
+  read there is no last-known data, so the coordinator kept reporting success
+  with `None` data — the integration looked healthy while every entity stayed
+  unavailable (a reporter saw 180+ consecutive "success" polls with no data).
+  The coordinator now raises `UpdateFailed` when it has never produced a valid
+  read and the failures pass the tolerance threshold, so HA surfaces the real
+  state and keeps retrying. Established sessions still keep their last values on
+  a transient gap (unchanged).
+- **Every session-expiry (21204) wasted a full poll (#41):** on a 21204 the
+  session re-handshaked in place and then *deferred* the power-flow read to the
+  next poll. When the relay expired the session on each first read, this turned
+  every poll into a guaranteed empty read and could chain indefinitely. The
+  read is now retried immediately on the refreshed session; a second 21204 in
+  the retry returns cleanly without looping.
+- **Confirmed-failure credential refresh did not rotate the home secret
+  (#41, #47):** a forced credential refresh (after a confirmed session expiry
+  or decrypt failure) rotated only the per-device `chat_secret` and reused the
+  cached account-level home login for up to its 30-minute TTL. The forced path
+  now also refreshes the home secret (matching beta9, which both reporters
+  confirm is stable), while the routine TTL-expiry path still reuses the cached
+  home login so it does not disturb another device's live session (#47).
+- **Misleading stall diagnosis:** the "switch to poll mode" advisory always
+  blamed a restrictive NAT/firewall even when the relay *was* delivering
+  packets that simply could not be decrypted. The advisory now classifies the
+  stall from the stream diagnostics: it only cites NAT/firewall when no packets
+  are arriving, and otherwise reports a credential/decryption failure (for
+  which poll mode may not help) and asks for a log on the issue tracker.
+
+### Added
+- **Automatic legacy (beta9) compatibility fallback (#41, #47):** when the
+  persistent/stream session is fully reset several times with no successful
+  read in between, the coordinator latches into the beta9 read model — a fresh
+  UDP socket + handshake + single power-flow read per poll, with a one-shot
+  fresh re-login on failure. Both #41 and #47 reporters confirm beta9 is stable
+  on networks where the persistent/stream session yields no usable frames. The
+  fallback stays active until the integration is reloaded and is exposed as the
+  `legacy_fallback_active` attribute on the realtime connection diagnostics
+  sensor.
+
 ## v1.0.0-beta13m
 
 ### Fixed
