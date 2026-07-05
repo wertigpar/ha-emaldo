@@ -1,5 +1,22 @@
 # Changes
 
+## v1.0.0-beta13q
+
+### Fixed
+- **Emergency charge toggle kills realtime E2E stream (21204 storm):** The
+  one-shot E2E command (`emergency_charge_window` / `cancel_sell`) opens a
+  fresh UDP socket with cached credentials, which kicks the persistent
+  stream's relay session. This causes 60-90s of stale power flow data during
+  the charge period because the stream spends that time in 21204 reconnect
+  storms instead of receiving device push frames.
+  **Fix:** `EmaldoCoordinator._close_realtime_session()` proactively tears
+  down the paired realtime coordinator's stream session immediately after
+  the one-shot command succeeds. The next poll (10s) reconnects cleanly
+  without the 21204 conflict.
+  *Fixes real root cause revealed by beta13p diagnostic logging — confirmed
+  both PS1 and PS2 get identical successful E2E handshakes; the 21204 was
+  the actual data staleness problem.*
+
 ## v1.0.0-beta13p
 
 ### Added
