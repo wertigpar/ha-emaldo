@@ -433,6 +433,9 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         If *start_unix* is None the device starts immediately (now).
         If *end_unix* is None the E2E library falls back to its own default
         (top-of-current-hour + 48 h).
+
+        Retries once after invalidating the cached E2E session if the failure
+        looks like a stale ``chat_secret`` (21204 cascade follow-up).
         """
         import time as _time
         if start_unix is None:
@@ -448,6 +451,13 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._emergency_charge_active = True
                 return
+            except EmaldoE2ESessionExpired:
+                client = self._ensure_client()
+                client.invalidate_e2e_session(
+                    self.home_id, self._device_id, self._model
+                )
+                if attempt == 1:
+                    raise
             except EmaldoAuthError:
                 self._reset_client()
                 if attempt == 1:
@@ -457,7 +467,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise
 
     def _write_emergency_charge_off(self) -> None:
-        """Cancel active emergency charge via the REST API."""
+        """Cancel active emergency charge via the REST API.
+
+        Retries once after invalidating the cached E2E session if the failure
+        looks like a stale ``chat_secret`` (21204 cascade follow-up).
+        """
         for attempt in range(2):
             try:
                 client = self._ensure_client()
@@ -466,6 +480,13 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._emergency_charge_active = False
                 return
+            except EmaldoE2ESessionExpired:
+                client = self._ensure_client()
+                client.invalidate_e2e_session(
+                    self.home_id, self._device_id, self._model
+                )
+                if attempt == 1:
+                    raise
             except EmaldoAuthError:
                 self._reset_client()
                 if attempt == 1:

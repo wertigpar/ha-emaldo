@@ -913,18 +913,19 @@ class EmaldoClient:
             )
 
             if force_refresh or expired:
-                # A forced refresh only fires after a confirmed session expiry
-                # or decrypt failure. In that case the shared home-level secret
-                # generation is also suspect, so rotate it too (force_home_refresh)
-                # rather than reusing the cached home login for up to the home
-                # TTL. beta9 always fetched fresh home+device creds on every
-                # reconnect, which both #41 and #47 reporters confirm is stable;
-                # the routine (TTL-expiry) path still reuses the cached home
-                # login so it does not rotate the shared secret out from under
-                # another device's live session (#47).
+                # A forced refresh fires after a confirmed session expiry or
+                # decrypt failure for THIS device. The home-level secret is
+                # shared across ALL device sessions on the account; propagating
+                # force_home_refresh=True here would rotate it out from under
+                # the OTHER device's live session, triggering a reciprocal 21204
+                # on the next keepalive. That creates a mutual ping-pong that
+                # neither device can escape (#47 follow-up).
+                # Let the home TTL (30 min) handle natural rotation; a device-
+                # only credential refresh is sufficient to recover from a
+                # transient 21204.
                 creds = self.e2e_login(
                     home_id, device_id, model,
-                    force_home_refresh=force_refresh,
+                    force_home_refresh=False,
                 )
                 generation = entry.generation + 1 if entry else 1
                 entry = E2ECredentialCacheEntry(
@@ -1132,6 +1133,9 @@ class EmaldoClient:
     ) -> bool:
         """Send a sell (discharge-to-grid) command.
 
+        Uses the shared cached E2E credentials so the per-device ``chat_secret``
+        is not rotated out from under the active stream session (#47 follow-up).
+
         Args:
             duration_seconds: How long the sell window lasts.
             label: Verbose log label for the E2E command.
@@ -1140,7 +1144,7 @@ class EmaldoClient:
         Returns:
             *True* if acknowledged.
         """
-        creds = self.e2e_login(home_id, device_id, model)
+        creds = self.get_e2e_credentials(home_id, device_id, model)
         return _e2e.send_sell(creds, duration_seconds, label=label, log=log)
 
     def cancel_sell(
@@ -1152,8 +1156,12 @@ class EmaldoClient:
         label: str = "Cancel sell",
         log: Callable[..., None] | None = None,
     ) -> bool:
-        """Cancel an active sell command."""
-        creds = self.e2e_login(home_id, device_id, model)
+        """Cancel an active sell command.
+
+        Uses the shared cached E2E credentials so the per-device ``chat_secret``
+        is not rotated out from under the active stream session (#47 follow-up).
+        """
+        creds = self.get_e2e_credentials(home_id, device_id, model)
         return _e2e.cancel_sell(creds, label=label, log=log)
 
     # Emergency charge uses the same E2E type 0x01 command as sell.
@@ -1187,11 +1195,14 @@ class EmaldoClient:
     ) -> bool:
         """Start emergency charge for a specific time window.
 
+        Uses the shared cached E2E credentials so the per-device ``chat_secret``
+        is not rotated out from under the active stream session (#47 follow-up).
+
         Args:
             start_unix: Window start as a Unix timestamp.
             end_unix:   Window end as a Unix timestamp.
         """
-        creds = self.e2e_login(home_id, device_id, model)
+        creds = self.get_e2e_credentials(home_id, device_id, model)
         return _e2e.set_emergency_charge(
             creds, on=True,
             start_unix=start_unix, end_unix=end_unix,
