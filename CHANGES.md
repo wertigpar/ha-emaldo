@@ -1,19 +1,30 @@
 # Changes
 
-## v1.0.0-beta14
+## v1.0.0-beta14b
 
-### Changed
-- **Emergency charge ON/OFF now uses the persistent stream socket** via
-  ``PersistentE2ESession.send_command(0x01, payload)`` instead of opening a
-  separate one-shot UDP socket. This eliminates the second-socket conflict
-  with the persistent stream session, which was the root cause of the 21204
-  storm after toggling emergency charge. Both ON and OFF acknowledged with
-  ``resp_len=161``, battery charged at -9.4 kW after ON, stopped at 0 W after
-  OFF, no 21204 caused by either toggle.
-- Removed the one-shot fallback path (``client.emergency_charge_window`` /
-  ``client.emergency_charge_off``). Retry logic preserved: if the stream path
-  fails, the session is closed and E2E credentials are invalidated before the
-  second attempt, which creates a fresh session with fresh creds.
+### Fixed
+- **Sensor entity duplication on reload after device binding (#41 RC1):** the
+  legacy UID detection checked only for ``{home_id}_battery_soc`` in the entity
+  registry. If that specific sensor was absent (e.g. certain Power Core models,
+  or a partial migration), the check missed all legacy entities and the
+  ``_uid_base`` switched from ``home_id`` to ``device_id``, creating orphan
+  duplicates. Detection now matches **any** ``{home_id}_`` prefix in the
+  entry's existing unique IDs, so legacy mode is activated correctly as long as
+  at least one sensor from a previous version exists.
+- **Power Core 2.0 high combined output rejected by sanity filter (#41 RC3):**
+  the ``REALTIME_POWER_ABS_MAX_W`` threshold was set to 100 000 W. Power Core
+  2.0 systems can exceed this during simultaneous solar + battery + grid export.
+  The threshold is raised to 500 000 W, keeping safety for malformed payloads
+  without blocking legitimate data from high-capacity installations.
+- **Emergency charge toggle not reflected in battery_w sensor (#47):** after
+  emergency charge ON/OFF, the paired realtime coordinator's stream session
+  could hold stale power-flow data from another device in multi-device setups
+  (cross-device frame pollution). The toggle now forces a device-specific
+  one-shot legacy E2E read and pushes the result into the realtime coordinator
+  data, so ``battery_w`` (and related power sensors) reflect the new charge
+  state immediately instead of waiting for the next interleaved stream frame.
+
+## v1.0.0-beta14
 
 ## v1.0.0-beta13r
 
