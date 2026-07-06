@@ -7,7 +7,7 @@ from typing import Any
 # Conservative generic bound used as a second-stage safety net.
 # The protocol parser already rejects absurd payloads; this protects entity
 # updates in case a malformed-but-parseable packet still slips through.
-REALTIME_POWER_ABS_MAX_W = 100_000
+REALTIME_POWER_ABS_MAX_W = 500_000
 
 # Only these channels feed Home Assistant realtime entities today.
 # Outliers on unused/raw channels must not block the whole payload.
