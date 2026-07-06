@@ -477,8 +477,8 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         If *start_unix* is None the device starts immediately (now).
         If *end_unix* is None the fallback is 1 hour from now.
 
-        Retries once after invalidating the cached E2E session + closing the
-        stream session if the relay rejects the command.
+        Attempt 0: stream path.  Attempt 1: standalone legacy command with
+        fresh credentials (bypasses broken stream, #47).
         """
         import time as _time
         if start_unix is None:
@@ -490,9 +490,19 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "[EmergencyCharge] _write_emergency_charge_on start=%d end=%d device=%s",
             start_unix, end_unix, self._device_id,
         )
+        client = self._ensure_client()
         for attempt in range(2):
             try:
-                ok = self._send_emergency_charge_via_stream(payload, "ON")
+                if attempt == 1:
+                    _LOGGER.debug(
+                        "[EmergencyCharge] ON retry via legacy standalone command"
+                    )
+                    ok = client.emergency_charge_window(
+                        self.home_id, self._device_id, self._model,
+                        start_unix=start_unix, end_unix=end_unix,
+                    )
+                else:
+                    ok = self._send_emergency_charge_via_stream(payload, "ON")
                 if not ok:
                     raise EmaldoE2ESessionExpired(
                         "Emergency charge ON rejected by relay"
@@ -501,7 +511,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
             except EmaldoE2ESessionExpired:
                 self._close_realtime_session()
-                client = self._ensure_client()
                 client.invalidate_e2e_session(
                     self.home_id, self._device_id, self._model
                 )
@@ -509,26 +518,33 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise
             except EmaldoAuthError:
                 self._reset_client()
-                if attempt == 1:
-                    raise
-            except Exception:
+                client = self._ensure_client()
                 if attempt == 1:
                     raise
 
     def _write_emergency_charge_off(self) -> None:
-        """Cancel active emergency charge via the persistent stream E2E session.
+        """Cancel active emergency charge.
 
-        Retries once after invalidating the cached E2E session + closing the
-        stream session if the relay rejects the command.
+        Attempt 0: stream path.  Attempt 1: standalone legacy command with
+        fresh credentials (bypasses broken stream, #47).
         """
         payload = bytes(9)
         _LOGGER.debug(
             "[EmergencyCharge] _write_emergency_charge_off device=%s",
             self._device_id,
         )
+        client = self._ensure_client()
         for attempt in range(2):
             try:
-                ok = self._send_emergency_charge_via_stream(payload, "OFF")
+                if attempt == 1:
+                    _LOGGER.debug(
+                        "[EmergencyCharge] OFF retry via legacy standalone command"
+                    )
+                    ok = client.emergency_charge_off(
+                        self.home_id, self._device_id, self._model,
+                    )
+                else:
+                    ok = self._send_emergency_charge_via_stream(payload, "OFF")
                 if not ok:
                     raise EmaldoE2ESessionExpired(
                         "Emergency charge OFF rejected by relay"
@@ -537,7 +553,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
             except EmaldoE2ESessionExpired:
                 self._close_realtime_session()
-                client = self._ensure_client()
                 client.invalidate_e2e_session(
                     self.home_id, self._device_id, self._model
                 )
@@ -545,9 +560,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise
             except EmaldoAuthError:
                 self._reset_client()
-                if attempt == 1:
-                    raise
-            except Exception:
+                client = self._ensure_client()
                 if attempt == 1:
                     raise
 
@@ -891,6 +904,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         self._session.connect()
         self.stats_last_handshake_response = self._session.last_handshake_response
+        # Set binding BEFORE frame wait so racing threads see it and avoid
+        # closing this session out from under the frame-wait loop (#47).
+        self._session_binding = binding
         if self._stream_mode:
             # Subscribe-and-stream: a background thread owns the power-flow
             # subscription and keepalive cadence (beta13d). The coordinator's
@@ -913,14 +929,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # startup is unaffected. Exits early the instant a frame arrives.
             import time as _time
             _first_frame_deadline = _time.perf_counter() + STREAM_FIRST_FRAME_WAIT
+            _session = self._session
             while _time.perf_counter() < _first_frame_deadline:
                 if (
-                    self._session.get_latest_power_flow(max_age=STREAM_STALE_AFTER)
+                    _session.get_latest_power_flow(max_age=STREAM_STALE_AFTER)
                     is not None
                 ):
                     break
                 _time.sleep(0.2)
-        self._session_binding = binding
         return self._session
 
     def _read_power_flow(self) -> dict | None:

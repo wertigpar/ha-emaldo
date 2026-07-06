@@ -1,5 +1,31 @@
 # Changes
 
+## v1.0.0-beta14d
+
+### Fixed
+- **Emergency charge toggle crashes with TypeError on HA 2026.12+ (#47 RC4):**
+  ``_async_force_realtime_refresh_after_charge()`` called
+  ``await realtime.async_set_updated_data(data)``, but ``async_set_updated_data``
+  is synchronous (not ``async def``) in HA 2026.12+ — calling it with ``await``
+  executed the method body (which returned ``None``) and then tried to ``await
+  None``, producing ``TypeError: 'NoneType' object can't be awaited``. Removed
+  the ``await`` so the call matches the integration's existing 12 call sites.
+- **``_ensure_session`` thread-safety crash on dual-inverter setups (#47 RC5):**
+  multiple executor threads (SyncWorker_N) raced on ``self._session`` during
+  emergency charge toggle. Thread A created a new session and entered the
+  first-frame wait loop; thread B found ``_session_binding=None``, closed A's
+  session, and set ``self._session=None``, so A crashed at
+  ``AttributeError: 'NoneType' object has no attribute 'get_latest_power_flow'``.
+  The session binding is now set before the frame-wait loop, and a local
+  reference protects the loop from cross-thread ``self._session`` replacement.
+- **Emergency charge command depends on broken stream in multi-device setups
+  (#47 RC5):** ``_write_emergency_charge_on/off`` only used the stream path
+  (``_send_emergency_charge_via_stream``), which returns ``CONN_NOT_ESTABLISHED``
+  when the relay keeps rejecting handshakes with 21204 session expired. Added a
+  legacy fallback: after the stream path fails, retry once via the standalone
+  legacy E2E command (``client.emergency_charge_window / off``) with fresh
+  credentials, bypassing the broken stream entirely.
+
 ## v1.0.0-beta14c
 
 ### Fixed
