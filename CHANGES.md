@@ -1,5 +1,20 @@
 # Changes
 
+## v1.0.0-beta14
+
+### Changed
+- **Emergency charge ON/OFF now uses the persistent stream socket** via
+  ``PersistentE2ESession.send_command(0x01, payload)`` instead of opening a
+  separate one-shot UDP socket. This eliminates the second-socket conflict
+  with the persistent stream session, which was the root cause of the 21204
+  storm after toggling emergency charge. Both ON and OFF acknowledged with
+  ``resp_len=161``, battery charged at -9.4 kW after ON, stopped at 0 W after
+  OFF, no 21204 caused by either toggle.
+- Removed the one-shot fallback path (``client.emergency_charge_window`` /
+  ``client.emergency_charge_off``). Retry logic preserved: if the stream path
+  fails, the session is closed and E2E credentials are invalidated before the
+  second attempt, which creates a fresh session with fresh creds.
+
 ## v1.0.0-beta13r
 
 ### Fixed

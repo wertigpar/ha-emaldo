@@ -425,35 +425,74 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return set_ev_charging_mode_instant(creds, mode, fixed_kwh=fixed_kwh)
         raise ValueError(f"Unknown EV mode: {mode}")
 
+    def _send_emergency_charge_via_stream(
+        self, payload: bytes, label: str,
+    ) -> bool:
+        """Send E2E command on the persistent stream socket.
+
+        Ensures the stream session exists (creates if needed) and sends the
+        command through it, avoiding the second-socket conflict entirely.
+
+        Returns True if relay acknowledged, False otherwise.
+        """
+        try:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+            if not entry_data:
+                return False
+            for item in entry_data.get("devices", [entry_data]):
+                if item.get("power") is self:
+                    rt = item.get("realtime")
+                    if rt is None:
+                        return False
+                    session = rt._ensure_session()  # noqa: SLF001
+                    resp = session.send_command(0x01, payload)
+                    if resp is None:
+                        _LOGGER.debug(
+                            "[EmergencyCharge] %s stream cmd: timeout / no response",
+                            label,
+                        )
+                        return False
+                    if b"CONN_NOT_ESTABLISHED" in resp:
+                        _LOGGER.debug(
+                            "[EmergencyCharge] %s stream cmd: CONN_NOT_ESTABLISHED",
+                            label,
+                        )
+                        return False
+                    _LOGGER.debug(
+                        "[EmergencyCharge] %s stream cmd: OK resp_len=%s",
+                        label, len(resp),
+                    )
+                    return True
+        except Exception:
+            _LOGGER.debug(
+                "[EmergencyCharge] %s stream cmd: exception", label, exc_info=True,
+            )
+        return False
+
     def _write_emergency_charge_on(
         self, start_unix: int | None = None, end_unix: int | None = None
     ) -> None:
-        """Start emergency charge for the given time window via the REST API.
+        """Start emergency charge via the persistent stream E2E session.
 
         If *start_unix* is None the device starts immediately (now).
-        If *end_unix* is None the E2E library falls back to its own default
-        (top-of-current-hour + 48 h).
+        If *end_unix* is None the fallback is 1 hour from now.
 
-        Retries once after invalidating the cached E2E session if the failure
-        looks like a stale ``chat_secret`` (21204 cascade follow-up).
+        Retries once after invalidating the cached E2E session + closing the
+        stream session if the relay rejects the command.
         """
         import time as _time
         if start_unix is None:
             start_unix = int(_time.time())
         if end_unix is None:
-            end_unix = start_unix + 3600  # 1 hour fallback
+            end_unix = start_unix + 3600
+        payload = struct.pack("<BII", 1, start_unix, end_unix)
         _LOGGER.debug(
             "[EmergencyCharge] _write_emergency_charge_on start=%d end=%d device=%s",
             start_unix, end_unix, self._device_id,
         )
         for attempt in range(2):
             try:
-                self._close_realtime_session()
-                client = self._ensure_client()
-                ok = client.emergency_charge_window(
-                    self.home_id, self._device_id, self._model,
-                    start_unix, end_unix,
-                )
+                ok = self._send_emergency_charge_via_stream(payload, "ON")
                 if not ok:
                     raise EmaldoE2ESessionExpired(
                         "Emergency charge ON rejected by relay"
@@ -461,6 +500,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emergency_charge_active = True
                 return
             except EmaldoE2ESessionExpired:
+                self._close_realtime_session()
                 client = self._ensure_client()
                 client.invalidate_e2e_session(
                     self.home_id, self._device_id, self._model
@@ -476,22 +516,19 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise
 
     def _write_emergency_charge_off(self) -> None:
-        """Cancel active emergency charge via the REST API.
+        """Cancel active emergency charge via the persistent stream E2E session.
 
-        Retries once after invalidating the cached E2E session if the failure
-        looks like a stale ``chat_secret`` (21204 cascade follow-up).
+        Retries once after invalidating the cached E2E session + closing the
+        stream session if the relay rejects the command.
         """
+        payload = bytes(9)
         _LOGGER.debug(
             "[EmergencyCharge] _write_emergency_charge_off device=%s",
             self._device_id,
         )
         for attempt in range(2):
             try:
-                self._close_realtime_session()
-                client = self._ensure_client()
-                ok = client.emergency_charge_off(
-                    self.home_id, self._device_id, self._model
-                )
+                ok = self._send_emergency_charge_via_stream(payload, "OFF")
                 if not ok:
                     raise EmaldoE2ESessionExpired(
                         "Emergency charge OFF rejected by relay"
@@ -499,6 +536,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emergency_charge_active = False
                 return
             except EmaldoE2ESessionExpired:
+                self._close_realtime_session()
                 client = self._ensure_client()
                 client.invalidate_e2e_session(
                     self.home_id, self._device_id, self._model
@@ -514,13 +552,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise
 
     def _close_realtime_session(self) -> None:
-        """Close paired realtime coordinator's E2E session before one-shot.
+        """Close paired realtime coordinator's E2E stream session.
 
-        A one-shot E2E command (emergency charge ON/OFF) opens a fresh UDP
-        socket with cached credentials, which kicks the persistent stream's
-        relay session (21204). Closing the stream session *before* the
-        one-shot prevents the 21204 entirely — the next poll reconnects
-        cleanly without competing relay sessions.
+        Used after a stream-path command failure to force the next
+        ``_ensure_session()`` call to create a fresh session (with a new
+        handshake and potentially fresh credentials).
         """
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
