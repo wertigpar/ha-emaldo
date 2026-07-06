@@ -999,17 +999,6 @@ def read_battery_info(
                     log(f"Battery(idx={idx}) follow-up: timeout")
 
         if info and info["serial"] not in seen_serials:
-            # Reject a reply whose serial is known (from prior scans) to live at
-            # a different physical slot: it is a stray late datagram that leaked
-            # into this slot's window, not this slot's module (#44).
-            known_slot = (known_serial_slots or {}).get(info["serial"])
-            if known_slot is not None and known_slot != idx:
-                if log:
-                    log(
-                        f"Battery(idx={idx}): reply serial {info['serial']!r} "
-                        f"belongs to slot {known_slot} — stray, rejected"
-                    )
-                return "empty"
             seen_serials.add(info["serial"])
             info["scan_index"] = idx
             return info
