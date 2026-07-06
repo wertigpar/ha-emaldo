@@ -448,13 +448,17 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         for attempt in range(2):
             try:
+                self._close_realtime_session()
                 client = self._ensure_client()
-                client.emergency_charge_window(
+                ok = client.emergency_charge_window(
                     self.home_id, self._device_id, self._model,
                     start_unix, end_unix,
                 )
+                if not ok:
+                    raise EmaldoE2ESessionExpired(
+                        "Emergency charge ON rejected by relay"
+                    )
                 self._emergency_charge_active = True
-                self._close_realtime_session()
                 return
             except EmaldoE2ESessionExpired:
                 client = self._ensure_client()
@@ -483,12 +487,16 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         for attempt in range(2):
             try:
+                self._close_realtime_session()
                 client = self._ensure_client()
-                client.emergency_charge_off(
+                ok = client.emergency_charge_off(
                     self.home_id, self._device_id, self._model
                 )
+                if not ok:
+                    raise EmaldoE2ESessionExpired(
+                        "Emergency charge OFF rejected by relay"
+                    )
                 self._emergency_charge_active = False
-                self._close_realtime_session()
                 return
             except EmaldoE2ESessionExpired:
                 client = self._ensure_client()
@@ -506,12 +514,13 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise
 
     def _close_realtime_session(self) -> None:
-        """Close paired realtime coordinator's E2E session after one-shot.
+        """Close paired realtime coordinator's E2E session before one-shot.
 
         A one-shot E2E command (emergency charge ON/OFF) opens a fresh UDP
         socket with cached credentials, which kicks the persistent stream's
-        relay session (21204). Proactively closing the stream session avoids
-        60-90s of stale power flow data — the next poll reconnects cleanly.
+        relay session (21204). Closing the stream session *before* the
+        one-shot prevents the 21204 entirely — the next poll reconnects
+        cleanly without competing relay sessions.
         """
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
@@ -521,9 +530,10 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if item.get("power") is self:
                     realtime = item.get("realtime")
                     if realtime is not None:
-                        asyncio.run_coroutine_threadsafe(
+                        future = asyncio.run_coroutine_threadsafe(
                             realtime._close_session(), self.hass.loop
                         )
+                        future.result(timeout=5)
                     return
         except Exception:
             _LOGGER.debug("Failed to close paired stream session", exc_info=True)
