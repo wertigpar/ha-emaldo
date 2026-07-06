@@ -12,9 +12,9 @@
   entry's existing unique IDs, so legacy mode is activated correctly as long as
   at least one sensor from a previous version exists.
 - **Power Core 2.0 high combined output rejected by sanity filter (#41 RC3):**
-  the ``REALTIME_POWER_ABS_MAX_W`` threshold was set to 100 000 W. Power Core
+  the ``REALTIME_POWER_ABS_MAX_W`` threshold was set to 10 kW. Power Core
   2.0 systems can exceed this during simultaneous solar + battery + grid export.
-  The threshold is raised to 500 000 W, keeping safety for malformed payloads
+  The threshold is raised to 50 k W, keeping safety for malformed payloads
   without blocking legitimate data from high-capacity installations.
 - **Emergency charge toggle not reflected in battery_w sensor (#47):** after
   emergency charge ON/OFF, the paired realtime coordinator's stream session
