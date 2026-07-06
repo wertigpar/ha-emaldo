@@ -586,6 +586,10 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         This is an async method that runs the blocking read via executor and
         calls ``async_set_updated_data`` from the event loop, avoiding the
         thread-safety violation in HA 2026.12+ (#47).
+
+        Note: ``async_set_updated_data`` is synchronous in HA 2026.12+ (not
+        ``async def``), so it is called without ``await`` to match the
+        integration's existing call sites.
         """
         entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         if not entry_data:
@@ -599,7 +603,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             realtime._read_power_flow_legacy  # noqa: SLF001
                         )
                         if data is not None:
-                            await realtime.async_set_updated_data(data)
+                            realtime.async_set_updated_data(data)
                     except Exception:
                         _LOGGER.debug(
                             "[EmergencyCharge] legacy read after toggle failed",
