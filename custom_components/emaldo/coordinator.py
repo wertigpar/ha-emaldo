@@ -498,7 +498,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Emergency charge ON rejected by relay"
                     )
                 self._emergency_charge_active = True
-                self._force_realtime_refresh_after_charge()
                 return
             except EmaldoE2ESessionExpired:
                 self._close_realtime_session()
@@ -535,7 +534,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Emergency charge OFF rejected by relay"
                     )
                 self._emergency_charge_active = False
-                self._force_realtime_refresh_after_charge()
                 return
             except EmaldoE2ESessionExpired:
                 self._close_realtime_session()
@@ -576,7 +574,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             _LOGGER.debug("Failed to close paired stream session", exc_info=True)
 
-    def _force_realtime_refresh_after_charge(self) -> None:
+    async def _async_force_realtime_refresh_after_charge(self) -> None:
         """Force fresh device-specific power flow read after charge toggle.
 
         Emergency charge ON/OFF is sent to this specific device.  The paired
@@ -584,8 +582,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         device (cross-device frame pollution in multi-device setups, #47).
         A one-shot legacy read bypasses the interleaved stream and returns
         power flow from *this* device only.
+
+        This is an async method that runs the blocking read via executor and
+        calls ``async_set_updated_data`` from the event loop, avoiding the
+        thread-safety violation in HA 2026.12+ (#47).
         """
-        import asyncio
         entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         if not entry_data:
             return
@@ -594,12 +595,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 realtime = item.get("realtime")
                 if realtime is not None:
                     try:
-                        data = realtime._read_power_flow_legacy()  # noqa: SLF001
+                        data = await self.hass.async_add_executor_job(
+                            realtime._read_power_flow_legacy  # noqa: SLF001
+                        )
                         if data is not None:
-                            asyncio.run_coroutine_threadsafe(
-                                realtime.async_set_updated_data(data),
-                                self.hass.loop,
-                            )
+                            await realtime.async_set_updated_data(data)
                     except Exception:
                         _LOGGER.debug(
                             "[EmergencyCharge] legacy read after toggle failed",

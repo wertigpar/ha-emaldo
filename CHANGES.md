@@ -1,5 +1,25 @@
 # Changes
 
+## v1.0.0-beta14c
+
+### Fixed
+- **Battery module slot permanently locked by stray late packet (#44 RC2):**
+  when a race or slow response caused a module's serial to be recorded at the
+  wrong slot, the ``known_serial_slots`` check in ``_probe_slot`` permanently
+  rejected the correct serial from its rightful slot. Removed the
+  serial-slot rejection — the pre-probe drain already catches ~99% of stray
+  packets, and accepting the rare false assignment beats a permanent slot lock.
+- **Emergency charge toggle crashes on HA 2026.12+ with thread-safety
+  RuntimeError (#47 RC3):** ``_force_realtime_refresh_after_charge()`` ran on
+  the executor thread and used ``run_coroutine_threadsafe`` to schedule
+  ``async_set_updated_data``. HA 2026.12+ hardened the thread-safety check in
+  ``async_write_ha_state``, making cross-thread origin a hard RuntimeError even
+  with ``run_coroutine_threadsafe``. The method is now async; the blocking
+  legacy read runs via ``async_add_executor_job`` and
+  ``async_set_updated_data`` is called with ``await`` from the event loop.
+  The call is moved from the executor functions to ``switch.py``, which is
+  already on the event loop after the executor job completes.
+
 ## v1.0.0-beta14b
 
 ### Fixed
