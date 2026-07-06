@@ -1,21 +1,35 @@
 # Changes
 
-## v1.0.0-beta13q
+## v1.0.0-beta13r
 
 ### Fixed
-- **Emergency charge toggle kills realtime E2E stream (21204 storm):** The
-  one-shot E2E command (`emergency_charge_window` / `cancel_sell`) opens a
-  fresh UDP socket with cached credentials, which kicks the persistent
-  stream's relay session. This causes 60-90s of stale power flow data during
-  the charge period because the stream spends that time in 21204 reconnect
-  storms instead of receiving device push frames.
-  **Fix:** `EmaldoCoordinator._close_realtime_session()` proactively tears
-  down the paired realtime coordinator's stream session immediately after
-  the one-shot command succeeds. The next poll (10s) reconnects cleanly
-  without the 21204 conflict.
-  *Fixes real root cause revealed by beta13p diagnostic logging — confirmed
-  both PS1 and PS2 get identical successful E2E handshakes; the 21204 was
-  the actual data staleness problem.*
+- **Emergency charge ON/OFF silently fails when handshake timeouts or relay
+  rejects the command:** The one-shot E2E functions (`set_emergency_charge`
+  and `cancel_sell`) ignored handshake step failures (Alive/Wake/Heartbeat
+  returning ``None``) and accepted *any* non-``None`` response as success.
+  When the Heartbeat timed out (3 s), the code continued to send the command
+  on a broken session, and the relay replied ``CONN_NOT_ESTABLISHED`` — which
+  was treated as ``result=True`` because ``resp is not None`` evaluated to
+  ``True``. The coordinator then also ignored the boolean return value,
+  setting ``_emergency_charge_active`` regardless of the actual outcome.
+  The device kept charging and the user had to toggle again to stop it.
+  **Fix in ``cancel_sell`` / ``set_emergency_charge``:**
+  - Abort early (return ``False``) if any handshake step returns ``None``.
+  - Reject responses containing the ASCII error ``CONN_NOT_ESTABLISHED``.
+  **Fix in ``_write_emergency_charge_on/off``:** check the boolean return
+  value and raise ``EmaldoE2ESessionExpired`` on ``False``, which triggers
+  the existing retry logic (invalidate session cache → fresh credentials →
+  reattempt). After two failed attempts the exception propagates to HA,
+  which logs the error and leaves the switch unchanged.
+
+### Changed
+- Moved ``_close_realtime_session()`` from *after* the one-shot command to
+  *before* it (beta13q placed it after, but the 21204 kick happens during
+  the handshake, too early for a post-command close). Also added
+  ``future.result(timeout=5)`` so the executor thread waits for the async
+  close to actually complete before opening the one-shot socket.
+
+## v1.0.0-beta13q
 
 ## v1.0.0-beta13p
 

@@ -1584,10 +1584,10 @@ def cancel_sell(
             return None
 
     try:
-        _send(home_alive, "Alive(home)")
-        _send(dev_alive, "Alive(device)")
-        _send(wake, "Wake")
-        _send(heartbeat, "Heartbeat")
+        if _send(home_alive, "Alive(home)") is None: return False
+        if _send(dev_alive, "Alive(device)") is None: return False
+        if _send(wake, "Wake") is None: return False
+        if _send(heartbeat, "Heartbeat") is None: return False
         time.sleep(0.2)
 
         resp = _send(cancel_pkt, label)
@@ -1596,9 +1596,13 @@ def cancel_sell(
                 "[EmergencyCharge] cancel result=%s resp_len=%s",
                 resp is not None, len(resp) if resp else None,
             )
-        if resp and len(resp) == 161:
-            return True
-        return resp is not None
+        if resp is None:
+            return False
+        if b"CONN_NOT_ESTABLISHED" in resp:
+            if _is_emergency():
+                _LOGGER.debug("[EmergencyCharge] cancel rejected: CONN_NOT_ESTABLISHED")
+            return False
+        return True
     finally:
         sock.close()
 
@@ -1694,18 +1698,22 @@ def set_emergency_charge(
             return None
 
     try:
-        _send(home_alive, "Alive(home)")
-        _send(dev_alive, "Alive(device)")
-        _send(wake, "Wake")
-        _send(heartbeat, "Heartbeat")
+        if _send(home_alive, "Alive(home)") is None: return False
+        if _send(dev_alive, "Alive(device)") is None: return False
+        if _send(wake, "Wake") is None: return False
+        if _send(heartbeat, "Heartbeat") is None: return False
         time.sleep(0.2)
         resp = _send(cmd_pkt, "EmergencyCharge")
-        result = resp is not None
+        if resp is None:
+            _LOGGER.debug("[EmergencyCharge] result=False (no response)")
+            return False
+        if b"CONN_NOT_ESTABLISHED" in resp:
+            _LOGGER.debug("[EmergencyCharge] command rejected: CONN_NOT_ESTABLISHED")
+            return False
         _LOGGER.debug(
-            "[EmergencyCharge] result=%s resp_len=%s",
-            result, len(resp) if resp else None,
+            "[EmergencyCharge] result=True resp_len=%s", len(resp),
         )
-        return result
+        return True
     finally:
         sock.close()
 
