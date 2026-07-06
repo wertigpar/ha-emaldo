@@ -110,7 +110,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             e.unique_id
             for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
         }
-        has_legacy_uids = f"{home_id}_battery_soc" in existing_uids
+        has_legacy_uids = any(uid.startswith(f"{home_id}_") for uid in existing_uids)
 
         for i, device in enumerate(devices_to_setup):
             if i == 0:
