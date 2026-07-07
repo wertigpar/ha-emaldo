@@ -3292,7 +3292,7 @@ class PersistentE2ESession:
                 return self._read_power_flow_locked(reconnect_on_expiry=False)
             return None
 
-        result = self._try_parse_power_flow(resp)
+        result = self._try_parse_power_flow(resp, actual_creds["chat_secret"])
         if result is not None:
             return result
         self._last_power_flow_diag["initial_nonmatching"] = 1
@@ -3326,11 +3326,11 @@ class PersistentE2ESession:
                     if self._log:
                         self._log("Session expired mid-drain")
                     break
-                result = self._try_parse_power_flow(more_resp)
+                result = self._try_parse_power_flow(more_resp, actual_creds["chat_secret"])
                 if result is not None:
                     self._last_power_flow_diag["drain_powerflow_hits"] += 1
                     return result
-                rf = self._try_parse_regulate_frequency(more_resp)
+                rf = self._try_parse_regulate_frequency(more_resp, actual_creds["chat_secret"])
                 if rf is not None:
                     self._last_power_flow_diag["drain_regfreq_hits"] += 1
                     self._regulate_frequency_cache = rf
@@ -3772,22 +3772,32 @@ class PersistentE2ESession:
             # No explicit response — fall back to any passively-captured push.
             return self._regulate_frequency_cache
 
-    def _try_parse_regulate_frequency(self, resp: bytes) -> dict | None:
-        """Decrypt+parse a response as a regulate-frequency payload. Returns None on mismatch."""
+    def _try_parse_regulate_frequency(self, resp: bytes, chat_secret: str | None = None) -> dict | None:
+        """Decrypt+parse a response as a regulate-frequency payload. Returns None on mismatch.
+
+        chat_secret — when provided (secondary device read), use this key for
+        AES-CBC decryption instead of self._creds["chat_secret"].
+        """
+        key = chat_secret if chat_secret is not None else self._creds["chat_secret"]
         try:
             decrypted = decrypt_response(
-                resp, self._creds["chat_secret"],
+                resp, key,
                 payload_validator=_is_regulate_frequency_payload,
             )
         except Exception:  # noqa: BLE001 - best-effort parse
             return None
         return parse_regulate_frequency_state(decrypted)
 
-    def _try_parse_power_flow(self, resp: bytes) -> dict | None:
-        """Decrypt+parse a response as a power flow payload. Returns None on mismatch."""
+    def _try_parse_power_flow(self, resp: bytes, chat_secret: str | None = None) -> dict | None:
+        """Decrypt+parse a response as a power flow payload. Returns None on mismatch.
+
+        chat_secret — when provided (secondary device read), use this key for
+        AES-CBC decryption instead of self._creds["chat_secret"].
+        """
+        key = chat_secret if chat_secret is not None else self._creds["chat_secret"]
         try:
             decrypted = decrypt_response(
-                resp, self._creds["chat_secret"],
+                resp, key,
                 payload_validator=_is_power_flow_payload,
             )
         except Exception:  # noqa: BLE001 - best-effort parse

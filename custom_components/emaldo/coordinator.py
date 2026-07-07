@@ -448,19 +448,23 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     resp = session.send_command(0x01, payload)
                     if resp is None:
                         _LOGGER.debug(
-                            "[EmergencyCharge] %s stream cmd: timeout / no response",
-                            label,
+                            "[EmergencyCharge] %s stream cmd: timeout / no response "
+                            "device=%s is_primary=%s",
+                            label, self._device_id, getattr(rt, "_is_primary", True),
                         )
                         return False
                     if b"CONN_NOT_ESTABLISHED" in resp:
                         _LOGGER.debug(
-                            "[EmergencyCharge] %s stream cmd: CONN_NOT_ESTABLISHED",
-                            label,
+                            "[EmergencyCharge] %s stream cmd: CONN_NOT_ESTABLISHED "
+                            "device=%s is_primary=%s",
+                            label, self._device_id, getattr(rt, "_is_primary", True),
                         )
                         return False
                     _LOGGER.debug(
-                        "[EmergencyCharge] %s stream cmd: OK resp_len=%s",
-                        label, len(resp),
+                        "[EmergencyCharge] %s stream cmd: OK resp_len=%s "
+                        "device=%s is_primary=%s",
+                        label, len(resp), self._device_id,
+                        getattr(rt, "_is_primary", True),
                     )
                     return True
         except Exception:
@@ -494,6 +498,18 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for attempt in range(2):
             try:
                 if attempt == 1:
+                    rt = self._get_paired_realtime()
+                    if rt is not None and not rt._is_primary:
+                        _LOGGER.warning(
+                            "[EmergencyCharge] ON failed on stream path for "
+                            "secondary device %s — legacy fallback skipped "
+                            "(would collide with shared session)",
+                            self._device_id,
+                        )
+                        raise EmaldoE2ESessionExpired(
+                            "Emergency charge ON: stream path failed, "
+                            "secondary device cannot use legacy fallback"
+                        )
                     _LOGGER.debug(
                         "[EmergencyCharge] ON retry via legacy standalone command"
                     )
@@ -537,6 +553,18 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for attempt in range(2):
             try:
                 if attempt == 1:
+                    rt = self._get_paired_realtime()
+                    if rt is not None and not rt._is_primary:
+                        _LOGGER.warning(
+                            "[EmergencyCharge] OFF failed on stream path for "
+                            "secondary device %s — legacy fallback skipped "
+                            "(would collide with shared session)",
+                            self._device_id,
+                        )
+                        raise EmaldoE2ESessionExpired(
+                            "Emergency charge OFF: stream path failed, "
+                            "secondary device cannot use legacy fallback"
+                        )
                     _LOGGER.debug(
                         "[EmergencyCharge] OFF retry via legacy standalone command"
                     )
@@ -586,6 +614,19 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return
         except Exception:
             _LOGGER.debug("Failed to close paired stream session", exc_info=True)
+
+    def _get_paired_realtime(self) -> EmaldoRealtimeCoordinator | None:
+        """Return the paired realtime coordinator for this device."""
+        try:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+            if not entry_data:
+                return None
+            for item in entry_data.get("devices", [entry_data]):
+                if item.get("power") is self:
+                    return item.get("realtime")
+        except Exception:
+            return None
+        return None
 
 
 class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
@@ -810,8 +851,18 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._battery_scan_task = None
         if self._session is not None:
             if self._is_primary:
+                _LOGGER.debug(
+                    "Shutdown: closing shared E2E session (primary device %s)",
+                    self.device_id,
+                )
                 await self.hass.async_add_executor_job(self._session.close)
                 self._pop_shared_session()
+            else:
+                _LOGGER.debug(
+                    "Shutdown: not closing E2E session for secondary device %s "
+                    "(shared with primary)",
+                    self.device_id,
+                )
             self._invalidate_session_ref()
 
     def _invalidate_session_ref(self) -> None:
@@ -863,11 +914,21 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # Shared session alive — use it regardless of primary/secondary.
             # Secondary coordinators never create their own session.
             self._session = shared
+            if not self._is_primary:
+                _LOGGER.debug(
+                    "Shared E2E session acquired for secondary device %s",
+                    self.device_id,
+                )
             return shared
 
         if not self._is_primary:
             # Session closed and we're not the owner — cannot recreate.
             # The primary coordinator will recreate it on its next poll.
+            _LOGGER.debug(
+                "Shared E2E session not available for secondary device %s "
+                "(waiting for primary)",
+                self.device_id,
+            )
             raise EmaldoE2EError(
                 "Shared E2E session closed; waiting for primary reconnect"
             )
@@ -1044,6 +1105,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         model = self._parent._model  # noqa: SLF001
         if device_id is None or model is None:
             raise UpdateFailed("Device not yet discovered")
+        _LOGGER.debug(
+            "Secondary power-flow read for device %s via shared session",
+            device_id,
+        )
         creds = client.get_e2e_credentials(
             home_id, device_id, model, force_refresh=self._needs_fresh_creds
         )
@@ -2013,11 +2078,21 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         if self._session is not None:
             if self._is_primary:
+                _LOGGER.debug(
+                    "Closing shared E2E session (primary device %s)",
+                    self.device_id,
+                )
                 try:
                     await self.hass.async_add_executor_job(self._session.close)
                 except Exception:  # noqa: BLE001
                     pass
                 self._pop_shared_session()
+            else:
+                _LOGGER.debug(
+                    "Not closing E2E session for secondary device %s "
+                    "(shared with primary)",
+                    self.device_id,
+                )
             self._invalidate_session_ref()
 
     async def _keepalive_loop(self) -> None:

@@ -1,5 +1,28 @@
 # Changes
 
+## v1.0.0-beta15b
+
+### Fixed
+- **Secondary power-flow read always returned None (decryption used wrong
+  key):** `_try_parse_power_flow` called `decrypt_response(resp,
+  self._creds["chat_secret"])` — the primary's `chat_secret`. The device
+  encrypts the 0x30 response with the sender's `chat_secret` (secondary's), so
+  decryption with the primary's key produced garbage and was always rejected by
+  the payload validator. Now accepts optional `chat_secret` param; both call
+  sites in `_read_power_flow_locked` pass `actual_creds["chat_secret"]`.
+- **Emergency charge legacy fallback collision with shared session (#47):** the
+  second attempt in `_write_emergency_charge_on/off` calls
+  `client.emergency_charge_window/off()` which opens a fresh UDP socket and
+  sends `Alive(home)` — would collide with the primary's shared session for
+  secondary devices. Now gated: detects paired realtime coordinator's
+  `_is_primary` flag before attempt 1; secondary devices skip the legacy
+  fallback and raise directly with a warning log.
+
+### Added
+- Runtime logging for shared E2E session lifecycle: acquire/rejected for
+  secondary, secondary power-flow reads, shutdown no-op (secondary does not
+  close shared session), emergency charge device context (`is_primary` flag).
+
 ## v1.0.0-beta15
 
 ### Fixed
