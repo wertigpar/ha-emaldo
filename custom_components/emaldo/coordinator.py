@@ -587,43 +587,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             _LOGGER.debug("Failed to close paired stream session", exc_info=True)
 
-    async def _async_force_realtime_refresh_after_charge(self) -> None:
-        """Force fresh device-specific power flow read after charge toggle.
-
-        Emergency charge ON/OFF is sent to this specific device.  The paired
-        realtime coordinator's stream session may hold stale data from another
-        device (cross-device frame pollution in multi-device setups, #47).
-        A one-shot legacy read bypasses the interleaved stream and returns
-        power flow from *this* device only.
-
-        This is an async method that runs the blocking read via executor and
-        calls ``async_set_updated_data`` from the event loop, avoiding the
-        thread-safety violation in HA 2026.12+ (#47).
-
-        Note: ``async_set_updated_data`` is synchronous in HA 2026.12+ (not
-        ``async def``), so it is called without ``await`` to match the
-        integration's existing call sites.
-        """
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
-        if not entry_data:
-            return
-        for item in entry_data.get("devices", [entry_data]):
-            if item.get("power") is self:
-                realtime = item.get("realtime")
-                if realtime is not None:
-                    try:
-                        data = await self.hass.async_add_executor_job(
-                            realtime._read_power_flow_legacy  # noqa: SLF001
-                        )
-                        if data is not None:
-                            realtime.async_set_updated_data(data)
-                    except Exception:
-                        _LOGGER.debug(
-                            "[EmergencyCharge] legacy read after toggle failed",
-                            exc_info=True,
-                        )
-                return
-
 
 class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     """Fast coordinator for E2E real-time power flow (10s).

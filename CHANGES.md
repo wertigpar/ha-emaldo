@@ -1,5 +1,30 @@
 # Changes
 
+## v1.0.0-beta14e
+
+### Fixed
+- **Battery module probe uses device-reported slot index instead of probe
+  sequence index (#44 RC5):** `_probe_slot` stored `idx` (the sequential probe
+  index) as `scan_index`, overriding the module's self-reported physical
+  position. When a late UDP response from the previous slot arrived during the
+  next probe's receive window, the module was assigned to the wrong slot,
+  causing cascading off-by-one shifts in multi-cabinet setups. Now uses
+  `info.get("index", idx)` — the module's own instance index — so even a stray
+  response carries its correct slot position. Also fixes the class-method path
+  (`PersistentE2ESession.battery_info`). Tested on single-unit setup.
+- **Emergency charge toggle disrupts stream, sensors briefly lose values (#47
+  follow-up):** the legacy read after toggle (beta14b) opened a fresh UDP socket
+  to the E2E relay, invalidating the stream's persistent session (21204 flood).
+  Stream reconnect cycle caused sensors to flash unavailable on every ON/OFF.
+  Removed ``_async_force_realtime_refresh_after_charge`` entirely — the stream
+  recovers naturally within 1-2 polls, and the legacy command fallback already
+  covers stream failures.
+- **``emergency_charge_off`` called ``cancel_sell`` instead of
+  ``set_emergency_charge(on=False)`` (#47 follow-up):** both send identical wire
+  payloads (9 zero bytes on type 0x01), so this was harmless in practice — the
+  fix is for code consistency with the on-path and to remove the confusing
+  dependency on the outdated sell-named helper.
+
 ## v1.0.0-beta14d
 
 ### Fixed

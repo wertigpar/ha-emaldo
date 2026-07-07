@@ -1000,7 +1000,7 @@ def read_battery_info(
 
         if info and info["serial"] not in seen_serials:
             seen_serials.add(info["serial"])
-            info["scan_index"] = idx
+            info["scan_index"] = info.get("index", idx)
             return info
         return "empty"
 
@@ -4028,7 +4028,7 @@ class PersistentE2ESession:
                             continue
 
                         seen_serials.add(serial)
-                        info["scan_index"] = idx
+                        info["scan_index"] = info.get("index", idx)
                         batteries.append(info)
                         found_in_tier += 1
                         if self._log:

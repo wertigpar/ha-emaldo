@@ -447,7 +447,6 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
             self.coordinator._write_emergency_charge_on,  # noqa: SLF001
             start_unix, end_unix,
         )
-        await self.coordinator._async_force_realtime_refresh_after_charge()
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
             updated["emergency_charge_active"] = True
@@ -458,7 +457,6 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
         await self.hass.async_add_executor_job(
             self.coordinator._write_emergency_charge_off  # noqa: SLF001
         )
-        await self.coordinator._async_force_realtime_refresh_after_charge()
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
             updated["emergency_charge_active"] = False
