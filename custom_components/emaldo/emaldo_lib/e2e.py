@@ -3208,13 +3208,40 @@ class PersistentE2ESession:
 
             return self._read_power_flow_locked(reconnect_on_expiry=True)
 
-    def _read_power_flow_locked(self, *, reconnect_on_expiry: bool) -> dict | None:
+    def read_power_flow_for_creds(self, target_creds: dict) -> dict | None:
+        """Read power flow using *target_creds* (secondary device).
+
+        Uses the established session socket but sends the 0x30 subscription
+        with *target_creds* (different ``sender_end_id`` / ``chat_secret``)
+        instead of the session's own credentials.  Does NOT send
+        ``Alive(home)`` — the session must already be alive via the primary
+        device.
+
+        On 21204 (session expired) returns *None* without reconnecting; the
+        primary device handles re-handshake.
+        """
+        with self._lock:
+            if self._sock is None or self._closed:
+                raise EmaldoE2EError("Session is not connected")
+            return self._read_power_flow_locked(
+                reconnect_on_expiry=False, creds=target_creds
+            )
+
+    def _read_power_flow_locked(
+        self, *, reconnect_on_expiry: bool, creds: dict | None = None
+    ) -> dict | None:
         """Power-flow read body.  Caller must hold ``self._lock``.
 
         When *reconnect_on_expiry* is *True* (first attempt), a 21204 response
         triggers an in-place re-handshake. We then return *None* and let the
         coordinator's next poll read using the refreshed session.
+
+        *creds* — when provided (secondary device), use these credentials for
+        the 0x30 subscription instead of ``self._creds`` and skip reconnect
+        on 21204 (only the primary device re-handshakes).
         """
+        actual_creds = creds if creds is not None else self._creds
+        is_own_creds = creds is None
         self._last_power_flow_diag = {
             "initial_timeout": 0,
             "initial_session_expired": 0,
@@ -3228,7 +3255,7 @@ class PersistentE2ESession:
             "drain_exhausted": 0,
         }
         power_pkt = build_subscription_packet(
-            self._creds, 0x30, self._session_nonce, payload=bytes([0x01]),
+            actual_creds, 0x30, self._session_nonce, payload=bytes([0x01]),
         )
         resp = self._send_raw(power_pkt, "PowerFlow(0x30)")
         if resp is None:
@@ -3249,7 +3276,7 @@ class PersistentE2ESession:
                     f"(age_since_handshake={handshake_age_ms}, "
                     f"age_since_keepalive={keepalive_age_ms})"
                 )
-            if reconnect_on_expiry and self._reconnect_after_expiry():
+            if is_own_creds and reconnect_on_expiry and self._reconnect_after_expiry():
                 # Retry the read immediately on the refreshed session instead
                 # of deferring to the next poll. Deferring turned every 21204
                 # into a guaranteed empty read (~2.4s wasted per poll) and, when
