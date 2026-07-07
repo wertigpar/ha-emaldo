@@ -1217,11 +1217,14 @@ class EmaldoClient:
         *,
         log: Callable[..., None] | None = None,
     ) -> bool:
-        """Disable emergency charge."""
-        return self.cancel_sell(
-            home_id, device_id, model,
-            label="Cancel emergency charge", log=log,
-        )
+        """Disable emergency charge.
+
+        Uses the shared cached E2E credentials and sends the cancel payload
+        (9 zero bytes) via ``set_emergency_charge(on=False)``, matching the
+        on-path used by :meth:`emergency_charge_window` (#47).
+        """
+        creds = self.get_e2e_credentials(home_id, device_id, model)
+        return _e2e.set_emergency_charge(creds, on=False, log=log)
 
     # ── Peak shaving ─────────────────────────────────────────────────
 
