@@ -1,5 +1,23 @@
 # Changes
 
+## v1.0.0-beta15
+
+### Fixed
+- **Multi-device Deadly Embrace: PS2 stream works, PS1 never gets frames (#47
+  RC6):** two devices on the same home share the same `home_end_id`. Each
+  device's `Alive(home)` packet registered the home endpoint with the relay,
+  and the second send invalidated the first device's session — a ping-pong where
+  whichever device sent `Alive(home)` most recently kept its session alive and
+  the other hung at 0 frames forever. The config entry now maintains a single
+  shared `PersistentE2ESession` owned by the primary (first-discovered) device.
+  Secondary devices fetch their own E2E credentials (`sender_end_id`,
+  `chat_secret`) but send the 0x30 power-flow subscription through the shared
+  session socket via the new `read_power_flow_for_creds()` method — no
+  `Alive(home)` is ever sent for secondary devices, so the relay collision is
+  eliminated. The primary handles keepalive and re-handshake; secondary
+  coordinators read through the shared session and never send `Alive(home)`,
+  never start their own keepalive loop, and never close the shared session.
+
 ## v1.0.0-beta14e
 
 ### Fixed

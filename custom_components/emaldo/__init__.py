@@ -129,7 +129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 setattr(power, "_legacy_uid_mode", False)
                 await power.async_config_entry_first_refresh()
 
-            realtime = EmaldoRealtimeCoordinator(hass, entry, power)
+            realtime = EmaldoRealtimeCoordinator(hass, entry, power, is_primary=(i == 0))
             setattr(realtime, "_legacy_uid_mode", getattr(power, "_legacy_uid_mode", False))
             # Start the realtime coordinator in the background. Its E2E UDP
             # handshake can block for several seconds (or retry) and must not
