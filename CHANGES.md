@@ -1,5 +1,19 @@
 # Changes
 
+## v1.0.0-beta15d
+
+### Fixed
+- **Two separate config entries for the same home created two E2E sessions
+  (relay collision, same as #47):** the shared E2E session was scoped to a
+  single config entry. Users with two config entries (one per device on the
+  same Emaldo account) each got their own session — both sent ``Alive(home)``
+  with the same ``home_end_id``, causing the relay to invalidate the first
+  session when the second ``Alive(home)`` arrived. The session is now keyed
+  by ``home_id`` across all config entries of the same home. The first entry
+  to create the session is recorded as its owner; only the owner closes the
+  session on shutdown, so the stream survives an entry reload of the other
+  device.
+
 ## v1.0.0-beta15c
 
 ### Fixed
