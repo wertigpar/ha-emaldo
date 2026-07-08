@@ -1341,7 +1341,9 @@ def read_power_flow(
         resp = _send(power_pkt, "PowerFlow(0x30)")
         if resp and log:
             log(f"  raw ({len(resp)}B): {resp[:128].hex()}")
-            log(f"  nonce markers: 90a3={b'\x90\xa3' in resp} 10a3={b'\x10\xa3' in resp}")
+            has_90a3 = b"\x90\xa3" in resp
+            has_10a3 = b"\x10\xa3" in resp
+            log(f"  nonce markers: 90a3={has_90a3} 10a3={has_10a3}")
         if not resp:
             return None
 
