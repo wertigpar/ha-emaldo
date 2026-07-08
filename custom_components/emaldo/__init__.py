@@ -129,8 +129,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 setattr(power, "_legacy_uid_mode", False)
                 await power.async_config_entry_first_refresh()
 
-            realtime = EmaldoRealtimeCoordinator(hass, entry, power, is_primary=(i == 0))
+            is_primary = i == 0
+            realtime = EmaldoRealtimeCoordinator(hass, entry, power, is_primary=is_primary)
             setattr(realtime, "_legacy_uid_mode", getattr(power, "_legacy_uid_mode", False))
+            _LOGGER.info(
+                "[Setup] device %s (%d/%d): realtime coordinator is_primary=%s",
+                device["id"], i + 1, len(devices_to_setup), is_primary,
+            )
             # Start the realtime coordinator in the background. Its E2E UDP
             # handshake can block for several seconds (or retry) and must not
             # delay HA bootstrap. Failures are non-fatal — sensors fall back to
