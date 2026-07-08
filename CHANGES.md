@@ -1,5 +1,14 @@
 # Changes
 
+## v1.0.0-beta15e
+
+### Added
+- **Diagnostic debug logging for Power Core 2.0 0x30 parse failure (#41):** six
+  targeted log sites now dump raw response hex, nonce-marker presence, decrypt
+  stage (success/failure/exception), and parse stage — all at DEBUG level.
+  No behavioral change; normal operation unaffected until debug logging is
+  enabled.
+
 ## v1.0.0-beta15d
 
 ### Fixed
