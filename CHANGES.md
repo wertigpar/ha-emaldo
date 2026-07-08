@@ -1,5 +1,26 @@
 # Changes
 
+## v1.0.0-beta15c
+
+### Fixed
+- **Dual-primary race could still create two E2E sessions (#47):** when two
+  coordinators both think they are primary (`_is_primary=True`), both enter
+  the session-creation path in `_ensure_session`. The first stores its
+  session as shared, then the second overwrites it — leaving two live
+  sessions (two stream threads, two `Alive(home)` sequences) and the same
+  relay collision as the original #47. Now after storing the session, the
+  coordinator re-reads the shared slot. If another session was stored
+  concurrently, it closes its own and uses the existing one, so at most one
+  session survives regardless of how many coordinators think they are
+  primary.
+
+### Added
+- **Setup-time logging for multi-device detection:** each device's realtime
+  coordinator now prints its `is_primary` flag at setup time so a debug log
+  immediately shows whether `__init__.py` deployed correctly
+  (`[Setup] device <id> (1/2): realtime coordinator is_primary=True` /
+  `(2/2): false` for secondary).
+
 ## v1.0.0-beta15b
 
 ### Fixed
