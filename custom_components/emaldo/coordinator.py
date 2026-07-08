@@ -850,18 +850,25 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 pass
             self._battery_scan_task = None
         if self._session is not None:
-            if self._is_primary:
+            is_owner = (
+                self.hass.data.get(DOMAIN, {})
+                .get("_home_session_owners", {})
+                .get(self.home_id)
+                == self._entry.entry_id
+            )
+            if self._is_primary and is_owner:
                 _LOGGER.debug(
-                    "Shutdown: closing shared E2E session (primary device %s)",
+                    "Shutdown: closing shared E2E session (owner device %s)",
                     self.device_id,
                 )
                 await self.hass.async_add_executor_job(self._session.close)
                 self._pop_shared_session()
             else:
                 _LOGGER.debug(
-                    "Shutdown: not closing E2E session for secondary device %s "
-                    "(shared with primary)",
+                    "Shutdown: not closing E2E session for device %s "
+                    "(not session owner, is_primary=%s)",
                     self.device_id,
+                    self._is_primary,
                 )
             self._invalidate_session_ref()
 
@@ -875,39 +882,55 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._last_stream_resubs_seen = 0
         self._last_stream_reconnects_seen = 0
 
-    # -- Shared E2E session (one per config entry, #47) --------------------- #
+    # -- Shared E2E session (one per home_id, #47) ------------------------- #
 
     def _get_shared_session(self) -> PersistentE2ESession | None:
-        """Return the config-entry-wide shared E2E session, or *None*."""
-        data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
-        if data is None:
-            return None
-        return data.get("e2e_session")
+        """Return the home-wide shared E2E session, or *None*.
+
+        Shared across all config entries for the same home_id. The session is
+        owned by whichever entry created it first; other entries reuse it and
+        never send ``Alive(home)``. Prevents relay collisions (#47).
+        """
+        return self.hass.data.get(DOMAIN, {}).get(
+            "_home_sessions", {}
+        ).get(self.home_id)
 
     def _set_shared_session(self, session: PersistentE2ESession) -> None:
-        """Store the config-entry-wide shared E2E session (primary only)."""
+        """Store the home-wide shared E2E session and record ownership.
+
+        The first entry to create the session becomes its owner. Only the
+        owner closes the session on shutdown — other entries just drop their
+        local reference, so the stream keeps running.
+        """
         self.hass.data.setdefault(DOMAIN, {}).setdefault(
-            self._entry.entry_id, {}
-        )["e2e_session"] = session
+            "_home_sessions", {}
+        )[self.home_id] = session
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            "_home_session_owners", {}
+        )[self.home_id] = self._entry.entry_id
 
     def _pop_shared_session(self) -> PersistentE2ESession | None:
-        """Remove and return the shared E2E session (primary only)."""
-        data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
-        if data is None:
-            return None
-        return data.pop("e2e_session", None)
+        """Remove and return the home-wide shared E2E session."""
+        sessions = self.hass.data.get(DOMAIN, {}).get("_home_sessions", {})
+        session = sessions.pop(self.home_id, None)
+        if session is not None:
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                "_home_session_owners", {}
+            ).pop(self.home_id, None)
+        return session
 
     # ----------------------------------------------------------------------- #
 
     def _ensure_session(self) -> PersistentE2ESession:
-        """Return the config-entry-wide shared E2E session.
+        """Return the home-wide shared E2E session.
 
-        The primary coordinator owns the session — creates it, sends
-        ``Alive(home)``, handles keepalive and reconnection. Secondary
-        coordinators look up the shared session and never send
+        The first entry to create the session owns it — creates the
+        persistent socket, sends ``Alive(home)``, handles keepalive and
+        reconnection. Other entries (even from separate config entries on
+        the same home) look up the shared session and never send
         ``Alive(home)``, preventing relay collisions (#47).
 
-        Session scope is one per config entry (home), not one per device.
+        Session scope is one per home_id, shared across all config entries.
         """
         shared = self._get_shared_session()
         if shared is not None and not shared.closed:
