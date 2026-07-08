@@ -360,6 +360,12 @@ def decrypt_response(
             idx = pos + 1
 
     if not nonces:
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "decrypt_response: no nonce markers (90a3/10a3) found "
+                "in %d-byte response, hex=%s",
+                len(data), data[:128].hex(),
+            )
         return None
 
     for nonce in nonces:
@@ -378,6 +384,12 @@ def decrypt_response(
             except (ValueError, KeyError):
                 continue
 
+    if _LOGGER.isEnabledFor(logging.DEBUG) and nonces:
+        _LOGGER.debug(
+            "decrypt_response: %d nonce(s) tried but decryption/validation "
+            "failed for all offsets (resp %dB, hex=%s)",
+            len(nonces), len(data), data[:128].hex(),
+        )
     return None
 
 
@@ -1327,6 +1339,9 @@ def read_power_flow(
         time.sleep(0.2)
 
         resp = _send(power_pkt, "PowerFlow(0x30)")
+        if resp and log:
+            log(f"  raw ({len(resp)}B): {resp[:128].hex()}")
+            log(f"  nonce markers: 90a3={b'\x90\xa3' in resp} 10a3={b'\x10\xa3' in resp}")
         if not resp:
             return None
 
@@ -1336,24 +1351,38 @@ def read_power_flow(
         )
         if decrypted is not None and log:
             _log_power_flow_raw(decrypted, log)
+        elif decrypted is None and log:
+            log(f"  decrypt_response returned None (resp {len(resp)}B)")
         result = parse_power_flow(decrypted)
         if result is not None:
             return result
+        if decrypted is not None and log:
+            log(f"  parse_power_flow FAILED on decrypted payload ({len(decrypted)}B)")
 
         # First response may be an echo/ACK; try a few more
+        drain_idx = 0
         for _ in range(5):
             try:
                 resp, _ = sock.recvfrom(4096)
+                drain_idx += 1
+                if log:
+                    log(f"  legacy drain #{drain_idx} ({len(resp)}B): {resp[:128].hex()}")
                 decrypted = decrypt_response(
                     resp, e2e_creds["chat_secret"],
                     payload_validator=_is_power_flow_payload,
                 )
                 if decrypted is not None and log:
                     _log_power_flow_raw(decrypted, log)
+                elif decrypted is None and log:
+                    log(f"  legacy drain #{drain_idx}: decrypt=None")
                 result = parse_power_flow(decrypted)
                 if result is not None:
                     return result
+                if decrypted is not None and log:
+                    log(f"  legacy drain #{drain_idx}: parse FAILED")
             except socket.timeout:
+                if log:
+                    log(f"  legacy drain #{drain_idx}: timeout (no more packets)")
                 break
 
         return None
@@ -3262,6 +3291,14 @@ class PersistentE2ESession:
             self._last_power_flow_diag["initial_timeout"] = 1
             return None
 
+        if self._log:
+            self._log(
+                f"PowerFlow(0x30) raw ({len(resp)}B): {resp[:128].hex()}"
+            )
+            has_90a3 = b"\x90\xa3" in resp
+            has_10a3 = b"\x10\xa3" in resp
+            self._log(f"  nonce markers: 90a3={has_90a3} 10a3={has_10a3}")
+
         # Session expired — reconnect in place and retry once.
         if self._is_session_expired(resp):
             self._last_power_flow_diag["initial_session_expired"] = 1
@@ -3296,6 +3333,11 @@ class PersistentE2ESession:
         if result is not None:
             return result
         self._last_power_flow_diag["initial_nonmatching"] = 1
+        if self._log:
+            self._log(
+                f"  initial parse FAILED ({len(resp)}B); "
+                f"draining up to {self.POWER_FLOW_DRAIN_PACKETS} packet(s)"
+            )
 
         # First response may be a subscription ACK or another interleaved push;
         # drain a few more packets with a short timeout before declaring the
@@ -3329,13 +3371,23 @@ class PersistentE2ESession:
                 result = self._try_parse_power_flow(more_resp, actual_creds["chat_secret"])
                 if result is not None:
                     self._last_power_flow_diag["drain_powerflow_hits"] += 1
+                    if self._log:
+                        self._log(
+                            f"  drain packet #{self._last_power_flow_diag['drain_packets_seen']}: "
+                            f"parse OK"
+                        )
                     return result
+                if self._log:
+                    self._log(
+                        f"  drain packet #{self._last_power_flow_diag['drain_packets_seen']} "
+                        f"({len(more_resp)}B): {more_resp[:128].hex()}"
+                    )
                 rf = self._try_parse_regulate_frequency(more_resp, actual_creds["chat_secret"])
                 if rf is not None:
                     self._last_power_flow_diag["drain_regfreq_hits"] += 1
                     self._regulate_frequency_cache = rf
                     if self._log:
-                        self._log(f"Passive 0x45 push captured: {rf}")
+                        self._log(f"  drain: passive 0x45 push captured: {rf}")
         finally:
             try:
                 self._sock.settimeout(prev_timeout)
@@ -3800,9 +3852,31 @@ class PersistentE2ESession:
                 resp, key,
                 payload_validator=_is_power_flow_payload,
             )
-        except Exception:  # noqa: BLE001 - best-effort parse
+        except Exception as exc:  # noqa: BLE001 - best-effort parse
+            if self._log:
+                self._log(
+                    f"  _try_parse_power_flow: decrypt_response raised: {exc}"
+                )
             return None
-        return parse_power_flow(decrypted)
+        if decrypted is None:
+            if self._log:
+                self._log(
+                    f"  _try_parse_power_flow: decrypt_response=None "
+                    f"(resp {len(resp)}B)"
+                )
+            return None
+        if self._log:
+            self._log(
+                f"  _try_parse_power_flow: decrypted OK ({len(decrypted)}B): "
+                f"{decrypted[:48].hex()}"
+            )
+        result = parse_power_flow(decrypted)
+        if result is None and self._log:
+            self._log(
+                f"  _try_parse_power_flow: parse_power_flow FAILED "
+                f"(decrypted {len(decrypted)}B)"
+            )
+        return result
 
     def read_selling_protection(self) -> dict | None:
         """Read selling-protection state (0x5F) over the existing session.
