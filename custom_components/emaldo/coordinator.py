@@ -982,6 +982,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "E2E session rebuild after failure — forced fresh credentials"
             )
         self._needs_fresh_creds = False
+        # Register device key BEFORE creating the session / starting the stream
+        # so the stream drain loop's reverse-lookup finds the API device_id and
+        # stores frames under the key the coordinator reads by (#47 beta15f).
+        PersistentE2ESession.register_device_key(home_id, device_id, creds["chat_secret"])
         _LOGGER.debug("E2E session host: %s", creds.get("host", "(default)"))
         # Provider so the stream thread can pull the latest shared chat_secret
         # on reconnect (a concurrent REST e2e_login rotates it; re-handshaking
@@ -993,6 +997,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         self._session = PersistentE2ESession(
             creds,
+            home_id=home_id,
             log=lambda msg: _LOGGER.debug("[E2E] %s", msg),
             creds_provider=_creds_provider,
         )
@@ -1064,11 +1069,28 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # beta9-style one-shot read model (see _read_power_flow_legacy).
             return self._read_power_flow_legacy()
         session = self._ensure_session()
+        # Register this device's chat_secret in the session's cross-device
+        # key registry so the stream drain loop can decrypt packets from
+        # other devices on the same home (#47 beta15f). The creds call is
+        # a no-op cache lookup (no API call) when the TTL is fresh.
+        if self.device_id and self.device_id not in PersistentE2ESession._device_key_registry.get(self.home_id, {}):  # noqa: SLF001
+            try:
+                _client = self._parent._ensure_client()  # noqa: SLF001
+                _creds = _client.get_e2e_credentials(
+                    self.home_id, self.device_id, self.device_model,
+                )
+                PersistentE2ESession.register_device_key(
+                    self.home_id, self.device_id, _creds["chat_secret"],
+                )
+            except Exception:  # noqa: BLE001 — best-effort; stream works without alt keys
+                _LOGGER.debug("Failed to register device key for cross-device decryption")
         if self._is_primary and self._stream_mode:
             # Stream mode: the background receiver keeps the freshest frame
             # cached. Just read it; the subscribe/keepalive/reconnect work is
             # all handled by the stream thread.
-            data = session.get_latest_power_flow(max_age=STREAM_STALE_AFTER)
+            data = session.get_latest_power_flow(
+                max_age=STREAM_STALE_AFTER, device_id=self.device_id,
+            )
             self._accumulate_stream_stats(session)
             self._stream_diag = session.stream_diagnostics()
             self._e2e_diag = (
@@ -1078,6 +1100,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 f"pkts={self._stream_diag.get('drain_packets')} "
                 f"unparsed={self._stream_diag.get('drain_unparsed')} "
                 f"last_reason={self._stream_diag.get('last_reconnect_reason')} "
+                f"creds_refresh={self._stream_diag.get('creds_refresh_queued')} "
                 f"result={'data' if data else 'None'}"
             )
             if data is None and session.closed:

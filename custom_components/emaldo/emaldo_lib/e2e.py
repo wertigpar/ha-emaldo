@@ -2938,7 +2938,7 @@ class PersistentE2ESession:
         client.login(email, password)
         creds = client.e2e_login(home_id, device_id, model)
 
-        session = PersistentE2ESession(creds)
+        session = PersistentE2ESession(creds, home_id=home_id)
         session.connect()
         try:
             data = session.read_power_flow()  # fast — reuses socket
@@ -2950,7 +2950,7 @@ class PersistentE2ESession:
 
         import threading
 
-        session = PersistentE2ESession(creds)
+        session = PersistentE2ESession(creds, home_id=home_id)
         session.connect()
 
         def _keepalive_loop():
@@ -2981,14 +2981,33 @@ class PersistentE2ESession:
     POWER_FLOW_DRAIN_PACKETS = 5
     POWER_FLOW_DRAIN_TIMEOUT_SECONDS = 0.5
 
+    # -- Cross-device key registry (home_id → {device_id → chat_secret}) ------
+    # Populated by each coordinator during _ensure_session(). Used by the
+    # stream drain loop to try every known device secret on each received
+    # datagram, so packets from ALL devices on the same account are decrypted
+    # instead of landing as unparsed (#47 beta15f).
+    _device_key_registry: dict[str, dict[str, str]] = {}
+
+    @classmethod
+    def register_device_key(cls, home_id: str, device_id: str, chat_secret: str) -> None:
+        """Register a device's chat_secret for cross-device decryption."""
+        cls._device_key_registry.setdefault(home_id, {})[device_id] = chat_secret
+
+    @classmethod
+    def unregister_device_key(cls, home_id: str, device_id: str) -> None:
+        """Remove a device's chat_secret from the registry."""
+        cls._device_key_registry.get(home_id, {}).pop(device_id, None)
+
     def __init__(
         self,
         e2e_creds: dict,
         *,
+        home_id: str,
         timeout: float = 5.0,
         log: Callable[..., None] | None = None,
         creds_provider: Callable[..., dict] | None = None,
     ) -> None:
+        self._home_id = home_id
         self._creds = e2e_creds
         self._timeout = timeout
         self._log = log
@@ -3030,10 +3049,14 @@ class PersistentE2ESession:
         # -- Subscribe-and-stream receiver state (beta13d) -------------------
         self._stream_thread: threading.Thread | None = None
         self._stream_stop = threading.Event()
-        self._latest_power_flow: dict | None = None
-        self._latest_power_flow_monotonic: float | None = None
+        # Per-device cache: device_id → power_flow_data / monotonic_timestamp.
+        # Enables cross-device decryption (#47 beta15f): each coordinator reads
+        # only its own device's cached frame.
+        self._latest_power_flow: dict[str, dict] = {}
+        self._latest_power_flow_monotonic: dict[str, float] = {}
         self._last_subscribe_monotonic: float | None = None
         self._stream_needs_reconnect = False
+        self._stream_needs_creds_refresh = False
         self._stream_resubscribe_interval = 12.0
         self._stream_keepalive_interval = 7.0
         self._stream_drain_timeout = 0.4
@@ -3481,23 +3504,40 @@ class PersistentE2ESession:
         t = self._stream_thread
         return t is not None and t.is_alive()
 
-    def get_latest_power_flow(self, max_age: float | None = None) -> dict | None:
+    def get_latest_power_flow(
+        self, max_age: float | None = None, device_id: str | None = None,
+    ) -> dict | None:
         """Return the freshest streamed power-flow frame, or *None*.
+
+        If *device_id* is given, return only that device's cached frame.
+        If *None* (backward compat), return the latest frame across all
+        devices (useful for the startup frame-wait loop).
 
         If *max_age* is given and the cached frame is older than that many
         seconds, *None* is returned so the caller's stale/reconnect path can
         rebuild a stalled stream.
         """
         with self._lock:
-            if self._latest_power_flow is None:
-                return None
-            if (
-                max_age is not None
-                and self._latest_power_flow_monotonic is not None
-                and (time.perf_counter() - self._latest_power_flow_monotonic) > max_age
-            ):
-                return None
-            return dict(self._latest_power_flow)
+            if device_id is not None:
+                data = self._latest_power_flow.get(device_id)
+                ts = self._latest_power_flow_monotonic.get(device_id)
+                if data is None:
+                    return None
+                if max_age is not None and ts is not None and (time.perf_counter() - ts) > max_age:
+                    return None
+                return dict(data)
+            # No device_id: return the most recent across all devices.
+            best_data = None
+            best_ts = 0.0
+            now = time.perf_counter()
+            for dev_id, data in self._latest_power_flow.items():
+                ts = self._latest_power_flow_monotonic.get(dev_id, 0.0)
+                if max_age is not None and (now - ts) > max_age:
+                    continue
+                if ts > best_ts:
+                    best_ts = ts
+                    best_data = data
+            return dict(best_data) if best_data else None
 
     def _stream_loop(self) -> None:
         """Background receiver: subscribe, drain pushes, re-subscribe, keepalive."""
@@ -3528,12 +3568,19 @@ class PersistentE2ESession:
 
         The reason counters are exposed via the diagnostic sensor so a reconnect
         storm can be diagnosed from attributes alone (no debug logging needed).
+
+        Only force-refresh E2E credentials when the reconnect is caused by a
+        21204 (session expired).  Other reasons (long_stall, socket errors) do
+        NOT rotate chat_secret, breaking the death spiral where every reconnect
+        creates undecryptable pending packets (#47 beta15f).
         """
         if not self._stream_needs_reconnect:
             self._stream_last_reconnect_reason = reason
             self._stream_reconnect_reasons[reason] = (
                 self._stream_reconnect_reasons.get(reason, 0) + 1
             )
+        if "21204" in reason:
+            self._stream_needs_creds_refresh = True
         self._stream_needs_reconnect = True
 
     def stream_diagnostics(self) -> dict:
@@ -3547,6 +3594,7 @@ class PersistentE2ESession:
                 "drain_unparsed": self._stream_drain_unparsed,
                 "last_reconnect_reason": self._stream_last_reconnect_reason,
                 "reconnect_reasons": dict(self._stream_reconnect_reasons),
+                "creds_refresh_queued": self._stream_needs_creds_refresh,
             }
 
     def _stream_watchdog_locked(self, now: float) -> None:
@@ -3557,21 +3605,23 @@ class PersistentE2ESession:
         (frames stopped, or none ever arrived after start) rebuilds the
         session — avoiding the fresh-handshake startup penalty on every minor
         gap that the coordinator-level reconnect used to incur.
+
+        Uses the most recent timestamp across ALL devices' per-device caches
+        (#47 beta15f): if ANY device is still receiving frames, the stream is
+        considered alive.
         """
         if self._stream_needs_reconnect:
             return
-        reference = (
-            self._latest_power_flow_monotonic
-            if self._latest_power_flow_monotonic is not None
-            else self._stream_started_monotonic
-        )
+        # Latest frame across all devices (per-device cache, beta15f)
+        latest_ts = max(self._latest_power_flow_monotonic.values()) if self._latest_power_flow_monotonic else None
+        reference = latest_ts if latest_ts is not None else self._stream_started_monotonic
         if reference is None:
             return
         if (now - reference) > self._stream_long_stall:
             if self._log:
                 kind = (
                     "no frame since start"
-                    if self._latest_power_flow_monotonic is None
+                    if latest_ts is None
                     else "frames stopped"
                 )
                 self._log(
@@ -3649,9 +3699,25 @@ class PersistentE2ESession:
         self._last_keepalive_monotonic = now
 
     def _stream_drain_locked(self, budget: int = 24) -> None:
-        """Drain currently-buffered datagrams, caching the freshest power flow."""
+        """Drain currently-buffered datagrams, caching the freshest power flow.
+
+        Tries every known device secret on each datagram (#47 beta15f). When a
+        packet was encrypted for a different device on the same home, the own-
+        secret decrypt fails but the alt-key loop finds the right one.  Stores
+        per-device so each coordinator reads only its own data.
+        """
         if self._sock is None:
             return
+        alt_keys = dict(self._device_key_registry.get(self._home_id, {}))
+        # Resolve API device_id from registry (reverse lookup by chat_secret)
+        # so frames are stored under the key the coordinator uses to read.
+        # Fallback to sender_end_id if registry not yet populated (#47 beta15f).
+        own_chat_secret = self._creds.get("chat_secret", "")
+        own_device_id = self._creds.get("sender_end_id", "")
+        for _api_dev_id, _secret in alt_keys.items():
+            if _secret == own_chat_secret:
+                own_device_id = _api_dev_id
+                break
         prev_timeout = self._sock.gettimeout()
         self._sock.settimeout(self._stream_drain_timeout)
         try:
@@ -3673,12 +3739,35 @@ class PersistentE2ESession:
                     self._last_21204_stage = "stream"
                     self._stream_flag_reconnect("session_expired_21204")
                     break
+
+                # 1) Try own chat_secret first (fast path — most packets)
                 pf = self._try_parse_power_flow(resp)
+                dev_id = own_device_id
+                alt_hit = False
+
+                # 2) Alt-key loop: try every other device's secret (#47 beta15f)
+                if pf is None and alt_keys:
+                    for alt_dev_id, alt_secret in alt_keys.items():
+                        if alt_secret == self._creds.get("chat_secret"):
+                            continue  # already tried via own-creds path
+                        pf = self._try_parse_power_flow(resp, chat_secret=alt_secret)
+                        if pf is not None:
+                            dev_id = alt_dev_id
+                            alt_hit = True
+                            if self._log:
+                                self._log(
+                                    "[E2E] multi-key decrypt: device=%s "
+                                    "works (alt_key, TLV raw=%s)",
+                                    alt_dev_id, resp[:48].hex(),
+                                )
+                            break
+
                 if pf is not None:
-                    self._latest_power_flow = pf
-                    self._latest_power_flow_monotonic = time.perf_counter()
+                    self._latest_power_flow[dev_id] = pf
+                    self._latest_power_flow_monotonic[dev_id] = time.perf_counter()
                     self._stream_frames_received += 1
                     continue
+
                 rf = self._try_parse_regulate_frequency(resp)
                 if rf is not None:
                     self._regulate_frequency_cache = rf
@@ -3700,19 +3789,31 @@ class PersistentE2ESession:
         would just 21204 again, so fetch the current secret via the provider.
         Best-effort: on any failure keep the existing creds and let the
         handshake proceed (it may still fail and retry).
+
+        Only calls the provider with ``force_refresh=True`` when the reconnect
+        was triggered by a 21204 (``_stream_needs_creds_refresh``). Other
+        reconnect reasons (``long_stall``, socket errors) refresh via normal
+        TTL expiry, avoiding the chat_secret rotation that turns every reconnect
+        into a self-inflicted decrypt failure (#47 beta15f).
         """
         if self._creds_provider is None:
             return
+        needs_force = self._stream_needs_creds_refresh
+        self._stream_needs_creds_refresh = False
         try:
-            fresh = self._creds_provider(force_refresh=True)
+            fresh = self._creds_provider(force_refresh=needs_force)
         except Exception as err:  # noqa: BLE001 - best effort
             if self._log:
                 self._log(f"Stream creds refresh failed: {err}")
+            # Re-arm the flag so the next reconnect retries the forced refresh.
+            if needs_force:
+                self._stream_needs_creds_refresh = True
             return
         if fresh:
             self._creds = fresh
             if self._log:
-                self._log("Stream creds refreshed (picked up rotated chat_secret)")
+                why = " (forced by 21204)" if needs_force else ""
+                self._log(f"Stream creds refreshed{why}")
 
     def _stream_reconnect_locked(self) -> None:
         """Rebuild the session after a 21204/socket error and re-subscribe.
