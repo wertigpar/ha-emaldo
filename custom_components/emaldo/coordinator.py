@@ -1007,24 +1007,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # coordinators will find it via _get_shared_session().
         self._set_shared_session(self._session)
 
-        # Defensive race check: another primary may have stored a different
-        # shared session between our creation and this check. If so, close
-        # ours and use the existing one to prevent dual sessions (#47).
-        stored = self._get_shared_session()
-        if stored is not self._session:
-            _LOGGER.warning(
-                "Shared session race: another coordinator created a session "
-                "concurrently. Closing ours and using existing one."
-            )
-            try:
-                self._session.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self._session = stored
-
-        # Set binding AFTER potential session swap so the binding always
-        # matches the session we actually use. Must be set before the
-        # frame-wait loop so racing threads see it (#47).
         self._session_binding = binding
         if self._stream_mode:
             # Subscribe-and-stream: a background thread owns the power-flow
