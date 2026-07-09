@@ -3307,7 +3307,30 @@ class PersistentE2ESession:
             "drain_timeout": 0,
             "drain_socket_error": 0,
             "drain_exhausted": 0,
+            "predrain_packets": 0,
         }
+
+        # Drain stale push frames or leftover alive responses from the socket
+        # buffer before sending the 0x30 subscription.  The persistent session
+        # keeps the 0x30 subscription alive between polls, so pushed frames
+        # accumulate and pollute the initial recvfrom (#41).
+        _predrain_timeout = self._sock.gettimeout()
+        self._sock.settimeout(0.05)
+        try:
+            while True:
+                try:
+                    _stale, _ = self._sock.recvfrom(4096)
+                    self._last_power_flow_diag["predrain_packets"] += 1
+                except socket.timeout:
+                    break
+        except OSError:
+            pass
+        finally:
+            try:
+                self._sock.settimeout(_predrain_timeout)
+            except OSError:
+                pass
+
         power_pkt = build_subscription_packet(
             actual_creds, 0x30, self._session_nonce, payload=bytes([0x01]),
         )
@@ -3482,14 +3505,6 @@ class PersistentE2ESession:
                 daemon=True,
             )
             self._stream_thread.start()
-        if self._log:
-            self._log(
-                f"Stream receiver started (resubscribe={resubscribe_interval}s, "
-                f"keepalive={keepalive_interval}s, "
-                f"adaptive_gap={frame_gap_resubscribe}s, "
-                f"min_gap={min_resubscribe_gap}s)"
-            )
-
     def stop_stream(self) -> None:
         """Signal the stream receiver to stop and join it (best effort)."""
         self._stream_stop.set()
@@ -3756,9 +3771,8 @@ class PersistentE2ESession:
                             alt_hit = True
                             if self._log:
                                 self._log(
-                                    "[E2E] multi-key decrypt: device=%s "
-                                    "works (alt_key, TLV raw=%s)",
-                                    alt_dev_id, resp[:48].hex(),
+                                    f"[E2E] multi-key decrypt: device={alt_dev_id} "
+                                    f"works (alt_key, TLV raw={resp[:48].hex()})"
                                 )
                             break
 

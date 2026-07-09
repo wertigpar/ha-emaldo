@@ -1,5 +1,53 @@
 # Changes
 
+## v1.0.0-beta15g
+
+### Fixed
+- **21204 storm on dual-device setups caused by lambda TypeError (#47
+  JanBaecklund):** ``self._log(...)`` in ``e2e.py`` was called with printf-style
+  format + 2 positional arguments (3 args total), but ``coordinator.py`` provides
+  a ``lambda msg:`` that takes exactly 1 argument. The resulting ``TypeError``
+  propagated out of ``_stream_drain_locked`` into ``_stream_loop``'s catch-all
+  exception handler, which called ``_stream_flag_reconnect("loop_exception:
+  TypeError")`` — triggering a full session reconnect on every alt-key decrypt.
+  With two devices (PS1+PS2) pushing frames, this produced a ~2-5s reconnect
+  cycle. Converted the printf-style call to f-string so the call site matches the
+  1-arg lambda. The stream now stays alive across alt-key decryption.
+
+### Removed
+- **Misleading ``start_stream`` log-after-return:** the "Stream receiver started"
+  message printed unconditionally after the early-return guard, implying a fresh
+  startup on every call even when the stream was already running.
+- **Dead race-check code in ``_ensure_session``:** the defensive race check
+  (``coordinator.py:1010-1023``) assumed dual config entries sharing one session.
+  With single-entry multi-device discovery this path is never exercised. Removed.
+
+### Fixed
+- **Service handlers crash on ``_home_sessions`` metadata in ``hass.data[DOMAIN]``:**
+  ``_home_sessions`` and ``_home_session_owners`` (added by #47) are stored at the
+  same level as config-entry data in ``hass.data[DOMAIN]``. All 7 service-handler
+  loops that iterated ``.values()`` picked up these dicts, causing:
+  - ``async_handle_set_ev_schedule``: crash (``KeyError`` on ``item["power"]``)
+  - ``_get_target_set(device_id=None)``: crash (``KeyError`` on ``result["schedule"]``)
+  - ``async_handle_apply_bulk_schedule``: false-positive warning
+    (``item missing 'schedule' key!``, the user-visible symptom)
+  Added ``_get_entry_data()`` helper that filters out ``_``-prefixed keys. All
+  iteration sites now use it instead of raw ``hass.data.get(DOMAIN, {})``.
+
+- **Legacy-mode high-load stall caused by stale push frames in socket
+  buffer (#41 InterceptorDK):** The persistent session's 0x30 subscription
+  (``payload=bytes([0x01])``, meaning "subscribe continuously") kept the relay
+  pushing frames between polls. Under high solar+battery load the relay pushed
+  more aggressively; leftover frames accumulated in the socket buffer and
+  polluted the next ``read_power_flow()`` call's initial ``recvfrom``. The first
+  response was a stale push (``initial_nonmatching=1``) and the 5-packet drain
+  timed out before reaching a fresh power-flow frame (``drain_exhausted=1``).
+  Beta9 didn't have this because each poll used a fresh socket.
+  **Fix:** ``_read_power_flow_locked()`` now drains stale packets from the socket
+  buffer (0.05s non-blocking drain) before sending the 0x30 subscription. The
+  initial response is now always a fresh reply to the current poll — no more
+  intermittent stalls under high load.
+
 ## v1.0.0-beta15f
 
 ### Fixed

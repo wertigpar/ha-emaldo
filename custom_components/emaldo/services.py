@@ -173,6 +173,21 @@ def _iter_device_sets(entry_data: dict[str, Any]) -> list[dict[str, Any]]:
     return entry_data.get("devices") or [entry_data]
 
 
+def _get_entry_data(hass: HomeAssistant) -> dict[str, Any]:
+    """Return only config-entry data dicts, excluding internal metadata keys starting with '_'.
+
+    Internal keys like ``_home_sessions`` and ``_home_session_owners`` are
+    stored at the same level as entry data in ``hass.data[DOMAIN]``. All
+    iteration over config entries must filter them out to avoid ``KeyError``
+    crashes and false-positive warnings.
+    """
+    return {
+        k: v
+        for k, v in hass.data.get(DOMAIN, {}).items()
+        if not k.startswith("_")
+    }
+
+
 def _get_target_set(
     hass: HomeAssistant,
     *,
@@ -180,7 +195,7 @@ def _get_target_set(
     device_id: str | None,
 ) -> dict[str, Any]:
     """Return selected device set or the primary set when device_id is omitted."""
-    entries = hass.data.get(DOMAIN, {})
+    entries = _get_entry_data(hass)
     if not entries:
         raise ValueError("No Emaldo integration configured")
 
@@ -300,7 +315,7 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
         )
         await target_set["schedule"].async_request_refresh()
     else:
-        entries = hass.data.get(DOMAIN, {})
+        entries = _get_entry_data(hass)
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
                 sched = item.get("schedule")
@@ -375,7 +390,7 @@ async def async_handle_apply_bulk_schedule(
         )
         await target_set["schedule"].async_request_refresh()
     else:
-        entries = hass.data.get(DOMAIN, {})
+        entries = _get_entry_data(hass)
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
                 sched = item.get("schedule")
@@ -477,7 +492,7 @@ async def async_handle_reset_to_internal(
         )
         await target_set["schedule"].async_request_refresh()
     else:
-        entries = hass.data.get(DOMAIN, {})
+        entries = _get_entry_data(hass)
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
                 sched = item.get("schedule")
@@ -498,7 +513,7 @@ async def async_handle_refresh_schedule(
         await target_set["schedule"].async_request_refresh()
         return
 
-    entries = hass.data.get(DOMAIN, {})
+    entries = _get_entry_data(hass)
     for entry_data in entries.values():
         for item in _iter_device_sets(entry_data):
             _LOGGER.info("Manual schedule refresh requested")
@@ -573,7 +588,7 @@ async def async_handle_set_ev_schedule(
         )
         await target_set["power"].async_request_refresh()
     else:
-        entries = hass.data.get(DOMAIN, {})
+        entries = _get_entry_data(hass)
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
                 await item["power"].async_request_refresh()
@@ -814,7 +829,7 @@ async def async_handle_set_battery_range(
         )
         await target_set["schedule"].async_request_refresh()
     else:
-        entries = hass.data.get(DOMAIN, {})
+        entries = _get_entry_data(hass)
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
                 sched = item.get("schedule")
