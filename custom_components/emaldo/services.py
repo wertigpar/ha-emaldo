@@ -186,7 +186,12 @@ def _get_target_set(
 
     if not device_id:
         entry_data = next(iter(entries.values()))
-        return _iter_device_sets(entry_data)[0]
+        result = _iter_device_sets(entry_data)[0]
+        _LOGGER.debug(
+            "_get_target_set: device_id=None, entry_ids=%s, item_keys=%s, has_schedule=%s",
+            list(entries), list(result.keys()), "schedule" in result,
+        )
+        return result
 
     for entry_data in entries.values():
         for item in _iter_device_sets(entry_data):
@@ -208,6 +213,10 @@ def _get_coordinator_and_client(
         hass,
         coordinator_key=coordinator_key,
         device_id=device_id,
+    )
+    _LOGGER.debug(
+        "_get_coordinator_and_client: key=%s, device_id=%s, target_set_keys=%s, type=%s",
+        coordinator_key, device_id, list(target_set.keys()), type(target_set).__name__,
     )
     schedule_coord = target_set[coordinator_key]
     try:
@@ -294,7 +303,9 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
         entries = hass.data.get(DOMAIN, {})
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
-                await item["schedule"].async_request_refresh()
+                sched = item.get("schedule")
+                if sched is not None:
+                    await sched.async_request_refresh()
 
 
 async def async_handle_apply_bulk_schedule(
@@ -305,6 +316,10 @@ async def async_handle_apply_bulk_schedule(
     slot_values = call.data["slots"]
     high = call.data["high_marker"]
     low = call.data["low_marker"]
+    _LOGGER.debug(
+        "apply_bulk_schedule called: device_id=%s, data_keys=%s",
+        device_id, list(call.data.keys()),
+    )
 
     def _do_bulk():
         last_err = None
@@ -363,7 +378,15 @@ async def async_handle_apply_bulk_schedule(
         entries = hass.data.get(DOMAIN, {})
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
-                await item["schedule"].async_request_refresh()
+                sched = item.get("schedule")
+                if sched is not None:
+                    await sched.async_request_refresh()
+                else:
+                    _LOGGER.warning(
+                        "apply_bulk_schedule: item missing 'schedule' key! "
+                        "item_keys=%s entry_keys=%s",
+                        list(item.keys()), list(entry_data.keys()),
+                    )
 
 
 async def async_handle_reset_to_internal(
@@ -457,7 +480,9 @@ async def async_handle_reset_to_internal(
         entries = hass.data.get(DOMAIN, {})
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
-                await item["schedule"].async_request_refresh()
+                sched = item.get("schedule")
+                if sched is not None:
+                    await sched.async_request_refresh()
 
 
 async def async_handle_refresh_schedule(
@@ -477,7 +502,9 @@ async def async_handle_refresh_schedule(
     for entry_data in entries.values():
         for item in _iter_device_sets(entry_data):
             _LOGGER.info("Manual schedule refresh requested")
-            await item["schedule"].async_request_refresh()
+            sched = item.get("schedule")
+            if sched is not None:
+                await sched.async_request_refresh()
 
 
 async def async_handle_set_ev_schedule(
@@ -790,7 +817,9 @@ async def async_handle_set_battery_range(
         entries = hass.data.get(DOMAIN, {})
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
-                await item["schedule"].async_request_refresh()
+                sched = item.get("schedule")
+                if sched is not None:
+                    await sched.async_request_refresh()
 
 
 def async_register_services(hass: HomeAssistant) -> None:

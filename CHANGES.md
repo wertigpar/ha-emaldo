@@ -1,5 +1,66 @@
 # Changes
 
+## v1.0.0-beta15f
+
+### Fixed
+- **Battery Optimizer `KeyError: 'schedule'` crash:** All five service handlers
+  that iterate device sets for post-operation schedule refresh now use
+  `item.get("schedule")` instead of `item["schedule"]`, preventing KeyError
+  when a device-set dict is missing the "schedule" key. The refresh is
+  safely skipped when the key is absent; the schedule coordinator catches up
+  on its next periodic interval. Diagnostic ERROR-level logging added to
+  capture the missing key and surrounding keys for root-cause analysis.
+
+- **Stream credential-rotation death spiral (#47 JanBaecklund):** Every stream
+  reconnect (long_stall, socket error) force-refreshed the device chat_secret,
+  turning previously-queued relay push notifications undecryptable — causing
+  more stalls → more reconnects → 89% unparsed packets. Fix: only force-refresh
+  E2E credentials when the reconnect is triggered by an actual 21204 (session
+  expired). `long_stall` and socket-error reconnects reuse existing credentials,
+  breaking the self-inflicted decrypt failure loop.
+
+- **Cross-device packet decryption (#47 multi-config-entry):** When two Power-
+  Stores share the same E2E account, the relay pushes each device's encrypted
+  notifications to all open sessions. The stream now tries EVERY registered
+  device's `chat_secret` on each received datagram (try-all-keys). Packets from
+  device B are no longer discarded as `unparsed` by device A's stream — they
+  are decrypted and cached per device.
+
+- **Stream frame cache key mismatch (single-unit data unavailable):** The per-
+  device power-flow cache stored frames keyed by `sender_end_id` (E2E end_id)
+  but `get_latest_power_flow(device_id=...)` looked up by API `device_id`
+  — different strings → every read returned None. Fixed: `_stream_drain_locked`
+  now reverse-lookup the API `device_id` from `_device_key_registry` using the
+  own `chat_secret`; `_ensure_session` registers the device key **before**
+  starting the stream so the registry is populated on the first drain.
+
+- **`AttributeError: _device_id` on single-unit setup:** `_read_power_flow`
+  referenced `self._device_id` (private attr of `EmaldoCoordinator`) but
+  `EmaldoRealtimeCoordinator` extends `DataUpdateCoordinator` directly — the
+  attr does not exist. Changed to `self.device_id` / `self.device_model`
+  (public properties that delegate to parent).
+
+### Added
+- **Diagnostic debug logging for traceability:**
+  `async_handle_apply_bulk_schedule` entry (call data keys),
+  `_get_target_set` (entry_ids, returned item keys, schedule-key presence),
+  `_get_coordinator_and_client` (target_set keys, type).
+
+- **Per-device power flow cache (`PersistentE2ESession`):** `_latest_power_flow`
+  changed from a single `dict | None` to a `dict[str, dict]` keyed by device_id.
+  Each coordinator reads only its own device's cached frame via
+  `get_latest_power_flow(device_id=...)`. Cross-device data no longer overwrites.
+
+- **Device key registry (`PersistentE2ESession._device_key_registry`):**
+  Class-level `{home_id: {device_id: chat_secret}}` dict populated by each
+  coordinator during `_read_power_flow`. The stream drain loop references it
+  for try-all-keys decryption.
+
+- **TLV raw-hex logging on cross-device decrypt hit:** When a packet is
+  successfully decrypted with an alternate device's key, the first 48 bytes
+  of the raw packet are logged as hex — enabling future development of a
+  cleartext TLV parser to skip the try-all-keys loop.
+
 ## v1.0.0-beta15e
 
 ### Added
