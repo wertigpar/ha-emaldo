@@ -991,9 +991,17 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # on reconnect (a concurrent REST e2e_login rotates it; re-handshaking
         # with the stale secret would 21204 forever).
         def _creds_provider(*, force_refresh: bool = False) -> dict:
-            return client.get_e2e_credentials(
-                home_id, device_id, model, force_refresh=force_refresh
-            )
+            try:
+                return client.get_e2e_credentials(
+                    home_id, device_id, model, force_refresh=force_refresh
+                )
+            except EmaldoAuthError:
+                # REST session token expired — force fresh login and retry.
+                self._parent._reset_client()
+                _fresh = self._parent._ensure_client()
+                return _fresh.get_e2e_credentials(
+                    home_id, device_id, model, force_refresh=True,
+                )
 
         self._session = PersistentE2ESession(
             creds,
