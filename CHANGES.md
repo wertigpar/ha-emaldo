@@ -50,7 +50,27 @@
   Rejections are now coalesced into a single periodic line (60s window) that
   reports the event count plus one sample payload, so the #41 signal is
   preserved without the flood. The first rejection in a window is logged
-  immediately so a genuine single event is never swallowed.
+   immediately so a genuine single event is never swallowed.
+
+- **Stream thread self-deadlock on home secret callback (#47 emergency charge hang):**
+  ``_refresh_creds_locked`` called ``_creds_provider`` while holding
+  ``self._lock``. The provider chain (``_get_home_e2e`` → home secret callbacks
+  → ``rekey_home()``) tried to re-acquire ``self._lock`` on the same thread —
+  a classic self-deadlock with a non-reentrant ``threading.Lock``. Once
+  deadlocked, every ``send_command()`` (emergency charge ON/OFF, REGULATE_FREQ)
+  blocked forever trying to acquire the same lock. Fix: release ``self._lock``
+  before calling ``_creds_provider``, re-acquire after, with ``self._closed``
+  check on resume.
+
+- **``UnboundLocalError`` in ``decrypt_response`` on module-level rate-limit
+  globals:** the ``DECRYPTED-BUT-REJECTED`` rate-limiting counters
+  (``_decrypt_rejected_count``, ``_decrypt_rejected_window_start``,
+  ``_decrypt_rejected_sample``) were assigned inside the function body,
+  making Python treat them as local variables. First access threw
+  ``UnboundLocalError`` on any code path that entered the DEBUG rate-limit
+  block (``_try_parse_battery``, ``_try_parse_power_flow``). This broke E2E
+  sensors, battery module scanning, and schedule overrides. Fix: add
+  ``global`` declaration for the three module-level variables.
 
 ## v1.0.0-beta15i-diagnostic2
 
