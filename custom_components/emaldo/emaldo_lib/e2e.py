@@ -404,6 +404,22 @@ def decrypt_response(
                             len(decrypted), data.hex(),
                         )
                     return decrypted
+                # Decryption succeeded but the payload validator (or accepted
+                # headers) rejected it. This is the critical signal for the
+                # load-dependent #41 stall: the AES layer is fine (the key works
+                # — battery % keeps updating) yet the 0x30 power-flow payload
+                # format/values fall outside what the validator accepts under
+                # high load. Without this log we cannot tell a wrong-IV failure
+                # from a validator rejection, so we were hunting the wrong root
+                # cause. Capture the decrypted payload to inspect its real
+                # length/structure (e.g. >24-byte extended format).
+                if _LOGGER.isEnabledFor(logging.DEBUG):
+                    _LOGGER.debug(
+                        "decrypt_response: DECRYPTED-BUT-REJECTED nonce=%s "
+                        "offset=%d key_len=%d payload_len=%d payload_hex=%s",
+                        nonce.hex(), offset, len(key),
+                        len(decrypted), decrypted.hex(),
+                    )
             except (ValueError, KeyError):
                 continue
 
