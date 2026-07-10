@@ -360,6 +360,8 @@ def decrypt_response(
     Returns:
         Decrypted payload bytes, or *None* on failure.
     """
+    global _decrypt_rejected_count, _decrypt_rejected_window_start, _decrypt_rejected_sample
+
     if payload_validator is None and accepted_headers is None:
         accepted_headers = _DEFAULT_HEADERS
 
@@ -3993,14 +3995,25 @@ class PersistentE2ESession:
             return
         needs_force = self._stream_needs_creds_refresh
         self._stream_needs_creds_refresh = False
+        # Release lock before calling creds_provider to prevent self-deadlock:
+        # _creds_provider → _get_home_e2e → fires home_secret_callbacks →
+        # rekey_home() → tries self._lock (already held by stream thread).
+        # Re-acquire after the call completes (#47).
+        self._lock.release()
         try:
             fresh = self._creds_provider(force_refresh=needs_force)
         except Exception as err:  # noqa: BLE001 - best effort
+            self._lock.acquire()
+            if self._closed:
+                return
             if self._log:
                 self._log(f"Stream creds refresh failed: {err}")
             # Re-arm the flag so the next reconnect retries the forced refresh.
             if needs_force:
                 self._stream_needs_creds_refresh = True
+            return
+        self._lock.acquire()
+        if self._closed:
             return
         if fresh:
             self._creds = fresh
