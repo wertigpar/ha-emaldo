@@ -1,5 +1,46 @@
 # Changes
 
+## v1.0.0-beta15h
+
+### Fixed
+- **Stream credential refresh no longer crashes on stale REST session
+  (`EmaldoAuthError` in `_creds_provider`):** the stream thread's credential
+  refresh captured a reference to `SharedEmaldoClient` at construction time. If
+  the REST session expired (S390 error from `api.emaldo.com`), calling
+  `get_e2e_credentials()` on the stale client raised `EmaldoAuthError` — which
+  propagated through the refresh callback into the stream thread's catch-all,
+  where it was swallowed as a generic `Stream creds refresh failed` every 2-3
+  seconds. No fresh E2E credentials ever reached the stream. Now
+  `_creds_provider` catches `EmaldoAuthError`, calls `_reset_client()` +
+  `_ensure_client()` for a fresh REST login, and retries. Confirmed by log:
+  zero "Stream creds refresh failed" after fix.
+
+- **Dual-unit 21204 loop not broken by device-only credential refresh
+  (#47 JanBaecklund):** when two Power-Stores share an Emaldo account, either
+  device's `e2e_login(force_home_refresh=True)` rotates the home-level secret
+  server-side. The other device derives its `chat_secret` from the now-stale
+  cached home secret, producing a credential the relay rejects with 21204.
+  Device-only refreshes (`force_home_refresh=False`) keep returning bad
+  chat_secrets in this case. `_get_e2e_credentials` now escalates to
+  `force_home_refresh=True` after 3+ consecutive force-refreshes in under 60
+  seconds (detected by the cache entry's generation counter), so a persistently
+  rejected device eventually re-joins the home. Recovery after a relay wedge
+  drops from ~90s to ~14s.
+
+- **Single-device 21204 / 100% decrypt failure in legacy fallback (#47
+  InterceptorDK):** after the relay server-side change at solar-start, PowerFlow
+  responses omitted the `\x10\xa3` response-IV marker — `decrypt_response` used
+  only the request nonce (from `\x90\xa3`) as AES-CBC IV, which failed padding
+  and returned `None`. Three-pronged fix:
+  1. `decrypt_response` now accepts a `fallback_ivs` parameter — callers pass
+     the session nonce (`session_nonce`) as an additional IV candidate, tried
+     after marker-extracted nonces.
+  2. Fallback to `home_chat_secret` when device `chat_secret` fails decryption
+     (the relay may now encrypt responses with the home-level key instead of
+     the per-device key).
+  3. Diagnostics now log `key_len`, marker presence, and all tried nonce hex
+     in the debug-level "decrypt_response" message.
+
 ## v1.0.0-beta15g
 
 ### Fixed
