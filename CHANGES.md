@@ -42,6 +42,16 @@
   callback per session, capturing the session reference at registration time.
   ``_invalidate_session_ref`` unregisters the callback on session teardown.
 
+- **``DECRYPTED-BUT-REJECTED`` debug logging rate-limited (#41):** the
+  diagnostic log in ``decrypt_response`` previously emitted one line per
+  (nonce, offset) candidate where AES decrypted cleanly but the payload
+  validator rejected it — ~14 lines *per key* per non-power-flow packet
+  (relay ACKs, status pushes), flooding the log on any debug-enabled install.
+  Rejections are now coalesced into a single periodic line (60s window) that
+  reports the event count plus one sample payload, so the #41 signal is
+  preserved without the flood. The first rejection in a window is logged
+  immediately so a genuine single event is never swallowed.
+
 ## v1.0.0-beta15i-diagnostic2
 
 ### Added
