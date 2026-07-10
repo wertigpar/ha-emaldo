@@ -1,5 +1,20 @@
 # Changes
 
+## v1.0.0-beta15i-diagnostic2
+
+### Added
+- **Decrypted-but-rejected payload logging (#41):** the previous diagnostic
+  build could not distinguish a *wrong-IV* decrypt failure from a *successful
+  decrypt whose payload the validator rejected*. Since hardware limits cap
+  real power at ~20 kW (far below the 200 kW ``_POWER_FLOW_MAX_RAW_HECTOWATTS``
+  gate), the load-dependent stall is almost certainly a **validator/format
+  rejection of a correctly-decrypted high-load payload** (e.g. an extended
+  >24-byte 0x30 frame when batteries/cabinets are active) — not a crypto
+  problem. ``decrypt_response`` now logs ``DECRYPTED-BUT-REJECTED`` with
+  ``payload_len`` and ``payload_hex`` whenever AES decrypts cleanly but
+  ``payload_validator``/accepted headers reject it. This is the evidence that
+  breaks the tie between the two root-cause hypotheses.
+
 ## v1.0.0-beta15i-diagnostic
 
 ### Added
