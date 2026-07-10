@@ -3087,6 +3087,31 @@ class PersistentE2ESession:
         """Remove a device's chat_secret from the registry."""
         cls._device_key_registry.get(home_id, {}).pop(device_id, None)
 
+    def rekey_home(self, home_data: dict) -> None:
+        """Update home-level credentials after a shared secret rotation (#47).
+
+        Called by the home secret callback when another device on the same
+        account has rotated the home ``end_secret`` (``/home/e2e-login/``).
+
+        Updates the in-memory ``home_end_id``, ``home_group_id``,
+        ``home_end_secret``, and ``home_chat_secret`` in ``self._creds``.
+        The next keepalive will pick up the new values automatically — no
+        UDP re-handshake needed since the relay-side ledger is already
+        updated by the ``/home/e2e-login/`` call that triggered this re-key.
+        """
+        old_id = self._creds.get("home_end_id", "?")
+        new_id = home_data.get("end_id", "")
+        with self._lock:
+            self._creds["home_end_id"] = new_id
+            self._creds["home_group_id"] = home_data.get("group_id", "")
+            self._creds["home_end_secret"] = home_data.get("end_secret", "")
+            self._creds["home_chat_secret"] = home_data.get("chat_secret", "")
+        if self._log:
+            self._log(
+                f"Rekeyed home credentials for home_id={self._home_id}: "
+                f"end_id {old_id} -> {new_id}"
+            )
+
     def __init__(
         self,
         e2e_creds: dict,
@@ -3875,6 +3900,33 @@ class PersistentE2ESession:
                 if rf is not None:
                     self._regulate_frequency_cache = rf
                     continue
+
+                # Force-logout detection (#47): the relay may send an encrypted
+                # JSON datagram {"cmd":"force-logout"} when the home end_secret
+                # was rotated by another device.  Decrypt with home_end_secret
+                # and flag a reconnect + home-level refresh.
+                home_secret = self._creds.get("home_end_secret", "")
+                if home_secret:
+                    try:
+                        decoded = decrypt_response(
+                            resp,
+                            home_secret,
+                            payload_validator=lambda d: (
+                                b"logout" in d
+                            ),
+                        )
+                        if decoded is not None:
+                            text = decoded.decode("utf-8", errors="replace")
+                            if self._log:
+                                self._log(
+                                    f"Force-logout from relay: {text}"
+                                )
+                            self._stream_flag_reconnect("force_logout")
+                            self._stream_needs_creds_refresh = True
+                            break
+                    except Exception:
+                        pass
+
                 # A datagram we received but could not classify — track it so a
                 # "frames=0 but packets>0" situation is visible in diagnostics.
                 self._stream_drain_unparsed += 1

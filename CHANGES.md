@@ -1,5 +1,47 @@
 # Changes
 
+## v1.0.0-beta16
+
+### Fixed
+- **Dual-device home-secret rotation ping-pong permanently broken (#47):**
+  the shared ``/home/e2e-login/`` endpoint rotates the account-wide
+  ``home_end_secret`` server-side on every call. When two devices shared one
+  account, Device A's escalation (3+ urgent credential refreshes in under 60s)
+  called ``e2e_login(force_home_refresh=True)``, rotating the home secret.
+  Device B's session then received a ``force-logout`` JSON datagram from the
+  relay (home-end-secret mismatch) → 21204 storm → Device B escalated in turn,
+  rotating the secret back → reciprocal 21204 on Device A → infinite ping-pong.
+  Three-part fix:
+  1. **Per-home serialization lock** in ``_get_home_e2e``: concurrent
+     ``/home/e2e-login/`` calls for the same ``home_id`` are serialized by a
+     per-home ``threading.Lock``. A 5-second grace window prevents back-to-back
+     rotations when two devices escalate simultaneously — the second device
+     reuses the cache instead of calling the API again.
+  2. **Home secret rotation callbacks:** ``_get_home_e2e`` fires registered
+     callbacks on every rotation (and on cache-reuse for sessions that
+     registered late). Each live ``PersistentE2ESession`` updates its in-memory
+     home credentials via ``rekey_home()`` — the next keepalive automatically
+     carries the new secret, so the relay never detects a mismatch and never
+     sends ``force-logout``. The mutual ping-pong is eliminated at source.
+  3. **Force-logout detection in stream drain loop:** ``_stream_drain_locked``
+     now attempts decryption with ``home_end_secret`` when a datagram matches
+     no power-flow or regulate-frequency pattern. Detects
+     ``{"cmd":"force-logout"}`` and triggers a clean reconnect with a home-level
+     credential refresh, providing a safety net if the callback re-key
+     mechanism is not yet in place during a rolling upgrade.
+
+- **``PersistentE2ESession.rekey_home()`` method added:** updates
+  ``home_end_id``, ``home_group_id``, ``home_end_secret``, and
+  ``home_chat_secret`` in the live session's ``_creds`` dict. No UDP
+  re-handshake needed — the next keepalive picks up the new values and the
+  relay-side ledger is already updated by the ``/home/e2e-login/`` call that
+  triggered the re-key.
+
+- **``EmaldoClient.register_home_secret_callback()`` added:** returns an
+  unregister callable. The coordinator's ``_ensure_session`` registers one
+  callback per session, capturing the session reference at registration time.
+  ``_invalidate_session_ref`` unregisters the callback on session teardown.
+
 ## v1.0.0-beta15i-diagnostic2
 
 ### Added
