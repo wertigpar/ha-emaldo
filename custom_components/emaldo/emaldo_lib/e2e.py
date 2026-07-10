@@ -30,6 +30,21 @@ from .exceptions import EmaldoE2EError
 
 _LOGGER = logging.getLogger(__name__)
 
+# Rate-limited diagnostic for DECRYPTED-BUT-REJECTED events in decrypt_response.
+# A "decrypted but rejected" event is when AES decrypts cleanly but the payload
+# validator / accepted headers reject it — the #41 signal. The search loop
+# produces one such event per (nonce, offset) candidate, so per-offset logging
+# floods the log on every non-power-flow packet (ACKs, status pushes). We
+# coalesce into a single periodic line that preserves the signal (event count +
+# a sample payload) without the flood. The first event in a window is logged
+# immediately so a genuine single rejection is never swallowed; subsequent
+# events in the same window are counted and flushed at window expiry.
+_decrypt_rejected_lock = threading.Lock()
+_decrypt_rejected_count = 0
+_decrypt_rejected_window_start = 0.0
+_decrypt_rejected_sample: tuple[str, int, int, str] | None = None
+_DECRYPT_REJECTED_WINDOW_S = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -409,17 +424,40 @@ def decrypt_response(
                 # load-dependent #41 stall: the AES layer is fine (the key works
                 # — battery % keeps updating) yet the 0x30 power-flow payload
                 # format/values fall outside what the validator accepts under
-                # high load. Without this log we cannot tell a wrong-IV failure
-                # from a validator rejection, so we were hunting the wrong root
-                # cause. Capture the decrypted payload to inspect its real
-                # length/structure (e.g. >24-byte extended format).
+                # high load. We must NOT lose this signal, but per-offset logging
+                # floods the log on every non-power-flow packet (ACKs, status
+                # pushes). Coalesce into the rate-limited diagnostic below.
                 if _LOGGER.isEnabledFor(logging.DEBUG):
-                    _LOGGER.debug(
-                        "decrypt_response: DECRYPTED-BUT-REJECTED nonce=%s "
-                        "offset=%d key_len=%d payload_len=%d payload_hex=%s",
-                        nonce.hex(), offset, len(key),
-                        len(decrypted), decrypted.hex(),
-                    )
+                    with _decrypt_rejected_lock:
+                        is_first = _decrypt_rejected_count == 0
+                        _decrypt_rejected_count += 1
+                        _decrypt_rejected_sample = (
+                            nonce.hex(), len(key),
+                            len(decrypted), decrypted.hex(),
+                        )
+                        now = time.monotonic()
+                        if is_first or (
+                            now - _decrypt_rejected_window_start
+                            >= _DECRYPT_REJECTED_WINDOW_S
+                        ):
+                            n = _decrypt_rejected_count
+                            sample = _decrypt_rejected_sample
+                            _decrypt_rejected_count = 0
+                            _decrypt_rejected_window_start = now
+                            _decrypt_rejected_sample = None
+                            _flush = True
+                        else:
+                            n = None
+                            sample = None
+                            _flush = False
+                    if _flush and sample is not None:
+                        _LOGGER.debug(
+                            "decrypt_response: DECRYPTED-BUT-REJECTED x%d "
+                            "(window=%.0fs, sample nonce=%s key_len=%d "
+                            "payload_len=%d payload_hex=%s)",
+                            n, _DECRYPT_REJECTED_WINDOW_S,
+                            sample[0], sample[1], sample[2], sample[3],
+                        )
             except (ValueError, KeyError):
                 continue
 
