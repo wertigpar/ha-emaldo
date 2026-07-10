@@ -55,7 +55,7 @@ devices are uniquely identified by `(home_id, device_id)`.
 
 ### E2E Session (UDP)
 
-**Current (beta15g) architecture — shared session, reverse-engineered from relay
+**Current (beta15i) architecture — shared session, reverse-engineered from relay
 behavior:**
 
 ```

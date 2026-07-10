@@ -65,12 +65,13 @@ SCHEMA_SET_SLOT_RANGE = vol.Schema(
         vol.Required("start_time"): cv.string,
         vol.Required("end_time"): cv.string,
         vol.Required("action"): vol.In(VALID_ACTIONS),
-        vol.Optional("high_marker", default=DEFAULT_MARKER_HIGH): vol.All(
+        vol.Optional("high_marker"): vol.All(
             int, vol.Range(min=1, max=100)
         ),
-        vol.Optional("low_marker", default=DEFAULT_MARKER_LOW): vol.All(
+        vol.Optional("low_marker"): vol.All(
             int, vol.Range(min=1, max=100)
         ),
+        vol.Optional("battery_range_override"): cv.boolean,
         vol.Optional("device_id"): cv.string,
     }
 )
@@ -81,12 +82,13 @@ SCHEMA_APPLY_BULK_SCHEDULE = vol.Schema(
             [vol.All(int, vol.Range(min=0, max=255))],
             vol.Length(min=96, max=96),
         ),
-        vol.Optional("high_marker", default=DEFAULT_MARKER_HIGH): vol.All(
+        vol.Optional("high_marker"): vol.All(
             int, vol.Range(min=1, max=100)
         ),
-        vol.Optional("low_marker", default=DEFAULT_MARKER_LOW): vol.All(
+        vol.Optional("low_marker"): vol.All(
             int, vol.Range(min=1, max=100)
         ),
+        vol.Optional("battery_range_override"): cv.boolean,
         vol.Optional("device_id"): cv.string,
     }
 )
@@ -120,12 +122,13 @@ SCHEMA_RESET_TO_INTERNAL = vol.Schema(
         vol.Optional("start_time"): cv.string,
         vol.Optional("end_time"): cv.string,
         vol.Optional("all", default=False): cv.boolean,
-        vol.Optional("high_marker", default=DEFAULT_MARKER_HIGH): vol.All(
+        vol.Optional("high_marker"): vol.All(
             int, vol.Range(min=1, max=100)
         ),
-        vol.Optional("low_marker", default=DEFAULT_MARKER_LOW): vol.All(
+        vol.Optional("low_marker"): vol.All(
             int, vol.Range(min=1, max=100)
         ),
+        vol.Optional("battery_range_override"): cv.boolean,
         vol.Optional("device_id"): cv.string,
     }
 )
@@ -249,13 +252,14 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
     start_slot = _time_to_slot(call.data["start_time"])
     end_slot = _time_to_slot(call.data["end_time"])
     action = call.data["action"]
-    high = call.data["high_marker"]
-    low = call.data["low_marker"]
-
-    slot_value = encode_override_action(action, low, high)
+    high = call.data.get("high_marker")
+    low = call.data.get("low_marker")
+    bro = call.data.get("battery_range_override")
 
     # Read current overrides, then patch the range
     def _do_override():
+        nonlocal high, low, bro
+        resolved = False
         last_err = None
         for attempt in range(3):
             try:
@@ -265,6 +269,19 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
                 current = client.get_overrides(hid, did, model)
+
+                # Resolve omitted header fields from device state (first attempt)
+                if not resolved:
+                    if high is None:
+                        high = current["high_marker"] if current else DEFAULT_MARKER_HIGH
+                    if low is None:
+                        low = current["low_marker"] if current else DEFAULT_MARKER_LOW
+                    if bro is None:
+                        bro = current.get("battery_range_override", False) if current else False
+                    resolved = True
+
+                slot_value = encode_override_action(action, low, high)
+
                 if current:
                     slots = list(current["slots"])
                 else:
@@ -276,6 +293,7 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 if client.set_override(
                     hid, did, model, bytes(slots),
                     high_marker=high, low_marker=low,
+                    battery_range_override=bro,
                 ):
                     _LOGGER.info(
                         "Override set: slots %d-%d = %s", start_slot, end_slot, action
@@ -329,14 +347,17 @@ async def async_handle_apply_bulk_schedule(
     """Handle the apply_bulk_schedule service call."""
     device_id = call.data.get("device_id")
     slot_values = call.data["slots"]
-    high = call.data["high_marker"]
-    low = call.data["low_marker"]
+    high = call.data.get("high_marker")
+    low = call.data.get("low_marker")
+    bro = call.data.get("battery_range_override")
     _LOGGER.debug(
         "apply_bulk_schedule called: device_id=%s, data_keys=%s",
         device_id, list(call.data.keys()),
     )
 
     def _do_bulk():
+        nonlocal high, low, bro
+        resolved = False
         last_err = None
         for attempt in range(3):
             try:
@@ -345,9 +366,29 @@ async def async_handle_apply_bulk_schedule(
                 )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
+                # Resolve omitted header fields from device state (first attempt)
+                if not resolved and (high is None or low is None or bro is None):
+                    current = client.get_overrides(hid, did, model)
+                    if current:
+                        if high is None:
+                            high = current["high_marker"]
+                        if low is None:
+                            low = current["low_marker"]
+                        if bro is None:
+                            bro = current.get("battery_range_override", False)
+                    else:
+                        if high is None:
+                            high = DEFAULT_MARKER_HIGH
+                        if low is None:
+                            low = DEFAULT_MARKER_LOW
+                        if bro is None:
+                            bro = False
+                    resolved = True
+
                 if client.set_override(
                     hid, did, model, bytes(slot_values),
                     high_marker=high, low_marker=low,
+                    battery_range_override=bro,
                 ):
                     _LOGGER.info(
                         "Bulk override applied (%d slots)", len(slot_values)
@@ -415,10 +456,13 @@ async def async_handle_reset_to_internal(
     # If no time range given, reset all
     if not start_time and not end_time:
         reset_all = True
-    high = call.data["high_marker"]
-    low = call.data["low_marker"]
+    high = call.data.get("high_marker")
+    low = call.data.get("low_marker")
+    bro = call.data.get("battery_range_override")
 
     def _do_reset():
+        nonlocal high, low, bro
+        resolved = False
         last_err = None
         for attempt in range(3):
             try:
@@ -428,8 +472,30 @@ async def async_handle_reset_to_internal(
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
                 if reset_all:
+                    # Resolve omitted header fields from device state
+                    if not resolved:
+                        if high is None or low is None or bro is None:
+                            current = client.get_overrides(hid, did, model)
+                            if current:
+                                if high is None:
+                                    high = current["high_marker"]
+                                if low is None:
+                                    low = current["low_marker"]
+                                if bro is None:
+                                    bro = current.get("battery_range_override", False)
+                            else:
+                                if high is None:
+                                    high = DEFAULT_MARKER_HIGH
+                                if low is None:
+                                    low = DEFAULT_MARKER_LOW
+                                if bro is None:
+                                    bro = False
+                        resolved = True
+
                     if client.reset_overrides(
-                        hid, did, model, high_marker=high, low_marker=low
+                        hid, did, model,
+                        high_marker=high, low_marker=low,
+                        battery_range_override=bro,
                     ):
                         _LOGGER.info("All overrides reset to internal")
                         return True
@@ -449,12 +515,21 @@ async def async_handle_reset_to_internal(
                     else:
                         slots = [SLOT_NO_OVERRIDE] * 96
 
+                    # Resolve omitted header fields from device state
+                    if high is None:
+                        high = current["high_marker"] if current else DEFAULT_MARKER_HIGH
+                    if low is None:
+                        low = current["low_marker"] if current else DEFAULT_MARKER_LOW
+                    if bro is None:
+                        bro = current.get("battery_range_override", False) if current else False
+
                     for i in range(start_slot, min(end_slot, 96)):
                         slots[i] = SLOT_NO_OVERRIDE
 
                     if client.set_override(
                         hid, did, model, bytes(slots),
                         high_marker=high, low_marker=low,
+                        battery_range_override=bro,
                     ):
                         _LOGGER.info(
                             "Overrides reset: slots %d-%d", start_slot, end_slot
