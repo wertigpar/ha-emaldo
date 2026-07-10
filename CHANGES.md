@@ -27,7 +27,7 @@
   rejected device eventually re-joins the home. Recovery after a relay wedge
   drops from ~90s to ~14s.
 
-- **Single-device 21204 / 100% decrypt failure in legacy fallback (#47
+- **Single-device 21204 / 100% decrypt failure in legacy fallback (#41
   InterceptorDK):** after the relay server-side change at solar-start, PowerFlow
   responses omitted the `\x10\xa3` response-IV marker — `decrypt_response` used
   only the request nonce (from `\x90\xa3`) as AES-CBC IV, which failed padding
