@@ -923,9 +923,22 @@ class EmaldoClient:
                 # Let the home TTL (30 min) handle natural rotation; a device-
                 # only credential refresh is sufficient to recover from a
                 # transient 21204.
+                #
+                # Escalation (#47 dual-unit): if force_refresh keeps being
+                # called (N+ generations in <60s), the home secret was likely
+                # rotated by another device's e2e_login.  Device-only refreshes
+                # will keep returning a chat_secret the relay rejects (21204).
+                # After N consecutive urgent refreshes, escalate to home-level
+                # so this device can re-join the home.
+                _do_home_refresh = (
+                    force_refresh
+                    and entry is not None
+                    and entry.generation >= 3
+                    and (now - entry.created_at) < 60
+                )
                 creds = self.e2e_login(
                     home_id, device_id, model,
-                    force_home_refresh=False,
+                    force_home_refresh=_do_home_refresh,
                 )
                 generation = entry.generation + 1 if entry else 1
                 entry = E2ECredentialCacheEntry(

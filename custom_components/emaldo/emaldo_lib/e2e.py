@@ -321,6 +321,7 @@ def decrypt_response(
     *,
     accepted_headers: set[tuple[int, int]] | None = None,
     payload_validator: Callable[[bytes], bool] | None = None,
+    fallback_ivs: list[bytes] | None = None,
 ) -> bytes | None:
     """Decrypt the encrypted payload from an E2E response packet.
 
@@ -337,6 +338,9 @@ def decrypt_response(
         payload_validator: Optional callable that receives the decrypted
             payload and returns *True* if valid.  When provided, this
             replaces the *accepted_headers* check.
+        fallback_ivs: Optional list of additional IVs to try after marker-
+            extracted nonces (#47 beta15h).  Used when the relay response
+            format changed and no longer includes ``\\x10\\xa3`` markers.
 
     Returns:
         Decrypted payload bytes, or *None* on failure.
@@ -366,9 +370,20 @@ def decrypt_response(
                 "in %d-byte response, hex=%s",
                 len(data), data[:128].hex(),
             )
-        return None
+        # Try fallback IVs even without markers (#47 beta15h)
+        if fallback_ivs:
+            nonces = list(fallback_ivs)
+        else:
+            return None
 
-    for nonce in nonces:
+    # Include caller-provided fallback IVs if response markers exist
+    all_ivs = list(nonces)
+    if fallback_ivs:
+        for fb in fallback_ivs:
+            if fb not in all_ivs:
+                all_ivs.append(fb)
+
+    for nonce in all_ivs:
         for offset in range(len(data) - 16, 39, -1):
             remaining = len(data) - offset
             if remaining % 16 != 0:
@@ -387,8 +402,12 @@ def decrypt_response(
     if _LOGGER.isEnabledFor(logging.DEBUG) and nonces:
         _LOGGER.debug(
             "decrypt_response: %d nonce(s) tried but decryption/validation "
-            "failed for all offsets (resp %dB, hex=%s)",
-            len(nonces), len(data), data[:128].hex(),
+            "failed for all offsets (key_len=%d, resp %dB, "
+            "has_90a3=%s has_10a3=%s, nonces=%s hex=%s)",
+            len(all_ivs), len(key), len(data),
+            b"\x90\xa3" in data, b"\x10\xa3" in data,
+            [n.hex() for n in all_ivs],
+            data[:128].hex(),
         )
     return None
 
@@ -1350,7 +1369,19 @@ def read_power_flow(
         decrypted = decrypt_response(
             resp, e2e_creds["chat_secret"],
             payload_validator=_is_power_flow_payload,
+            fallback_ivs=[session_nonce.encode()],
         )
+        if decrypted is None:
+            # Fallback: home-level chat_secret (#47 beta15h)
+            home_secret = e2e_creds.get("home_chat_secret", "")
+            if home_secret and home_secret != e2e_creds.get("chat_secret", ""):
+                if log:
+                    log("  decrypt with chat_secret failed, trying home_chat_secret")
+                decrypted = decrypt_response(
+                    resp, home_secret,
+                    payload_validator=_is_power_flow_payload,
+                    fallback_ivs=[session_nonce.encode()],
+                )
         if decrypted is not None and log:
             _log_power_flow_raw(decrypted, log)
         elif decrypted is None and log:
@@ -1372,7 +1403,16 @@ def read_power_flow(
                 decrypted = decrypt_response(
                     resp, e2e_creds["chat_secret"],
                     payload_validator=_is_power_flow_payload,
+                    fallback_ivs=[session_nonce.encode()],
                 )
+                if decrypted is None:
+                    home_secret = e2e_creds.get("home_chat_secret", "")
+                    if home_secret and home_secret != e2e_creds.get("chat_secret", ""):
+                        decrypted = decrypt_response(
+                            resp, home_secret,
+                            payload_validator=_is_power_flow_payload,
+                            fallback_ivs=[session_nonce.encode()],
+                        )
                 if decrypted is not None and log:
                     _log_power_flow_raw(decrypted, log)
                 elif decrypted is None and log:
@@ -3968,6 +4008,7 @@ class PersistentE2ESession:
             decrypted = decrypt_response(
                 resp, key,
                 payload_validator=_is_power_flow_payload,
+                fallback_ivs=[self._session_nonce.encode()],
             )
         except Exception as exc:  # noqa: BLE001 - best-effort parse
             if self._log:
@@ -3975,6 +4016,23 @@ class PersistentE2ESession:
                     f"  _try_parse_power_flow: decrypt_response raised: {exc}"
                 )
             return None
+        if decrypted is None:
+            # Fallback: home-level chat_secret (#47 beta15h)
+            home_secret = self._creds.get("home_chat_secret", "")
+            if home_secret and home_secret != key:
+                if self._log:
+                    self._log(
+                        f"  _try_parse_power_flow: trying home_chat_secret "
+                        f"(device key failed, resp {len(resp)}B)"
+                    )
+                try:
+                    decrypted = decrypt_response(
+                        resp, home_secret,
+                        payload_validator=_is_power_flow_payload,
+                        fallback_ivs=[self._session_nonce.encode()],
+                    )
+                except Exception:  # noqa: BLE001 - best-effort parse
+                    pass
         if decrypted is None:
             if self._log:
                 self._log(
