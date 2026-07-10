@@ -15,10 +15,13 @@ Usage::
 """
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
+
+_LOGGER = logging.getLogger(__name__)
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -165,6 +168,16 @@ class EmaldoClient:
         # per account keeps one home generation valid for all device sessions.
         self._home_e2e_cache: dict[str, tuple[dict, float]] = {}
         self._home_e2e_ttl = 30 * 60  # seconds
+        # Per-home serialization lock: prevents concurrent /home/e2e-login/
+        # calls for the same home_id from racing and each rotating the shared
+        # home end_secret server-side, which would kill the OTHER device's
+        # live session on multi-device accounts (#47).
+        self._home_e2e_locks: dict[str, threading.Lock] = {}
+        # Home secret rotation callbacks: registered by live
+        # PersistentE2ESession instances so they can re-key their home-level
+        # credentials (home_end_id/group_id/end_secret) when the shared home
+        # secret is rotated, instead of having the relay force-logout them.
+        self._home_secret_callbacks: dict[str, list[Callable[[dict], None]]] = {}
 
     # ------------------------------------------------------------------
     # Session management
@@ -743,6 +756,8 @@ class EmaldoClient:
         login (which rotates the per-device ``chat_secret``) stays per-call.
         """
         now = time.monotonic()
+
+        # Fast path: check cache brief under global e2e_lock.
         with self._e2e_lock:
             cached = self._home_e2e_cache.get(home_id)
             if (
@@ -752,19 +767,104 @@ class EmaldoClient:
             ):
                 return dict(cached[0])
 
+        # Slow path: acquire per-home lock to serialize concurrent
+        # /home/e2e-login/ calls for the same home_id across
+        # threads/coordinator instances (#47).
+        home_lock = self._home_e2e_locks.setdefault(home_id, threading.Lock())
+        with home_lock:
+            # Double-check cache: another thread may have refreshed while we
+            # were waiting on the per-home lock.  If the cache was updated
+            # within the last 5 s we reuse it even when *force_refresh* is
+            # set — this prevents back-to-back /home/e2e-login/ rotations
+            # when two devices on the same account both escalate (#47).
+            with self._e2e_lock:
+                cached = self._home_e2e_cache.get(home_id)
+                if cached is not None:
+                    age = time.monotonic() - cached[1]
+                    if (
+                        not force_refresh
+                        and age <= self._home_e2e_ttl
+                    ):
+                        return dict(cached[0])
+                    if force_refresh and age < 5:
+                        _LOGGER.debug(
+                            "Home e2e cache %ds fresh — reusing for home_id=%s",
+                            int(age), home_id,
+                        )
+                        # Fire callbacks so late-registered sessions still
+                        # learn about the new secret.
+                        _callbacks = list(
+                            self._home_secret_callbacks.get(home_id, [])
+                        )
+                        # Release per-home lock before firing to avoid
+                        # deadlock (callbacks may acquire e2e locks).
+                        # (will be released by `with` context manager exit)
+                        for cb in _callbacks:
+                            try:
+                                cb(dict(cached[0]))
+                            except Exception:
+                                _LOGGER.exception(
+                                    "Home secret callback failed for "
+                                    "home_id=%s",
+                                    home_id,
+                                )
+                        return dict(cached[0])
+
             home_result = self.api_request(
                 "/home/e2e-login/", json_data={"home_id": home_id}
             )
             home_data = home_result.get("Result", {})
             if not isinstance(home_data, dict) or "end_id" not in home_data:
                 raise EmaldoE2EError(f"Home e2e-login failed: {home_result}")
-            self._home_e2e_cache[home_id] = (dict(home_data), now)
-            return dict(home_data)
+
+            with self._e2e_lock:
+                self._home_e2e_cache[home_id] = (dict(home_data), time.monotonic())
+
+            # Collect callbacks while still holding per-home lock so a
+            # concurrent re-register cannot mutate the list mid-iteration.
+            callbacks = list(self._home_secret_callbacks.get(home_id, []))
+
+        # Fire callbacks outside the `with home_lock:` block (but still
+        # inside the slow-path block — same indentation level) to avoid
+        # deadlock (callbacks may acquire e2e locks themselves).
+        for cb in callbacks:
+            try:
+                cb(dict(home_data))
+            except Exception:
+                _LOGGER.exception(
+                    "Home secret callback failed for home_id=%s", home_id
+                )
+
+        return dict(home_data)
 
     def invalidate_home_e2e(self, home_id: str) -> None:
         """Drop the cached account-level home login (forces a fresh fetch)."""
         with self._e2e_lock:
             self._home_e2e_cache.pop(home_id, None)
+
+    def register_home_secret_callback(
+        self, home_id: str, callback: Callable[[dict], None]
+    ) -> Callable[[], None]:
+        """Register a callback invoked when the home secret is rotated.
+
+        The callback receives the fresh ``/home/e2e-login/`` result dict.
+        Returns an unregister callable.
+        """
+        self._home_secret_callbacks.setdefault(home_id, []).append(callback)
+        _LOGGER.debug(
+            "Home secret callback registered for home_id=%s (%d total)",
+            home_id, len(self._home_secret_callbacks[home_id]),
+        )
+
+        def _unregister():
+            try:
+                self._home_secret_callbacks[home_id].remove(callback)
+                if not self._home_secret_callbacks[home_id]:
+                    del self._home_secret_callbacks[home_id]
+            except (KeyError, ValueError):
+                pass
+
+        return _unregister
 
     def e2e_login(
         self,

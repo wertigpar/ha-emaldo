@@ -13,7 +13,7 @@ from collections import deque
 from datetime import datetime, timedelta
 import logging
 import struct
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -678,6 +678,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         self._session: PersistentE2ESession | None = None
         self._session_binding: tuple[str, str, str] | None = None
+        self._unregister_home_secret: Callable[[], None] | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
         self._consecutive_read_errors: int = 0
@@ -876,6 +877,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Drop local references to the active E2E session and binding."""
         self._session = None
         self._session_binding = None
+        # Unregister home secret rotation callback so old session is not
+        # re-keyed after replacement (#47).
+        if self._unregister_home_secret is not None:
+            try:
+                self._unregister_home_secret()
+            except Exception:  # noqa: BLE001
+                pass
+            self._unregister_home_secret = None
         # Restart per-session stream counter tracking from zero so the next
         # session's counters accumulate correctly into the cumulative totals.
         self._last_stream_frames_seen = 0
@@ -1016,6 +1025,20 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._set_shared_session(self._session)
 
         self._session_binding = binding
+
+        # Register home secret rotation callback so this session re-keys its
+        # home credentials when another device on the same account rotates
+        # the shared home end_secret (#47).  The lambda captures the current
+        # session reference via a default argument so it is unaffected by
+        # future self._session reassignments.
+        _s = self._session
+        self._unregister_home_secret = client.register_home_secret_callback(
+            self._parent.home_id,
+            lambda home_data, s=_s: (
+                s.rekey_home(home_data) if s is not None and not s.closed else None
+            ),
+        )
+
         if self._stream_mode:
             # Subscribe-and-stream: a background thread owns the power-flow
             # subscription and keepalive cadence (beta13d). The coordinator's
