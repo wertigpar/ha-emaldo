@@ -1,5 +1,37 @@
 # Changes
 
+## v1.0.0-beta15i-diagnostic
+
+### Added
+- **Diagnostic logging for decrypt failure analysis (#41 #47):**
+  ``decrypt_response`` now logs success with nonce, offset, key length, and
+  **full untruncated response hex** on successful decrypt. ``read_power_flow``
+  and ``_try_parse_power_flow`` emit full response hex via ``_LOGGER.debug``
+  on every decrypt failure. This enables analysis of the new relay response
+  format (``e3`` header, ``90b7`` CT tag, extra ``a0`` byte) without
+  truncation at byte 128.
+
+## v1.0.0-beta15i
+
+### Fixed
+- **Schedule services no longer overwrite Battery Range settings on omitted
+  fields (#50):** ``set_slot_range``, ``apply_bulk_schedule``, and
+  ``reset_to_internal`` previously injected ``high_marker=72`` /
+  ``low_marker=20`` (from ``vol.Optional(default=...)``) and
+  ``battery_range_override=False`` into the E2E override packet whenever
+  the caller omitted those fields — silently disabling Battery Range Override
+  and resetting the user's reserve markers. The schema defaults are removed;
+  omitted fields now fall back to the **current device state** (read via
+  ``get_overrides()`` before writing), preserving whatever the user has
+  configured. The ``battery_range_override`` field is also exposed as an
+  optional schema field across all three services for callers that explicitly
+  want to change it.
+
+- **``set_override`` docstring corrected (#50 follow-up):** the docstring
+  claimed ``False`` "leaves the AI Battery Range setting unchanged" — it
+  actually writes byte 2 = 0x00, which actively disables Battery Range
+  Override. Updated to state the real behaviour.
+
 ## v1.0.0-beta15h
 
 ### Fixed

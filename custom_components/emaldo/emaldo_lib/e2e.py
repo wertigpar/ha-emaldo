@@ -392,22 +392,40 @@ def decrypt_response(
                 cipher = AES.new(key_bytes, AES.MODE_CBC, iv=nonce)
                 decrypted = unpad(cipher.decrypt(data[offset:]), AES.block_size)
                 if payload_validator is not None:
-                    if payload_validator(decrypted):
-                        return decrypted
-                elif len(decrypted) >= 2 and (decrypted[0], decrypted[1]) in accepted_headers:
+                    valid = payload_validator(decrypted)
+                else:
+                    valid = len(decrypted) >= 2 and (decrypted[0], decrypted[1]) in accepted_headers
+                if valid:
+                    if _LOGGER.isEnabledFor(logging.DEBUG):
+                        _LOGGER.debug(
+                            "decrypt_response: SUCCESS nonce=%s offset=%d "
+                            "key_len=%d payload=%dB resp_full_hex=%s",
+                            nonce.hex(), offset, len(key),
+                            len(decrypted), data.hex(),
+                        )
                     return decrypted
             except (ValueError, KeyError):
                 continue
 
     if _LOGGER.isEnabledFor(logging.DEBUG) and nonces:
+        def _positions(marker: bytes) -> list[int]:
+            out = []
+            idx = 0
+            while idx < len(data) - 1:
+                pos = data.find(marker, idx)
+                if pos < 0:
+                    break
+                out.append(pos)
+                idx = pos + 1
+            return out
         _LOGGER.debug(
             "decrypt_response: %d nonce(s) tried but decryption/validation "
             "failed for all offsets (key_len=%d, resp %dB, "
-            "has_90a3=%s has_10a3=%s, nonces=%s hex=%s)",
+            "90a3_pos=%s 10a3_pos=%s, nonces=%s resp_full_hex=%s)",
             len(all_ivs), len(key), len(data),
-            b"\x90\xa3" in data, b"\x10\xa3" in data,
+            _positions(b"\x90\xa3"), _positions(b"\x10\xa3"),
             [n.hex() for n in all_ivs],
-            data[:128].hex(),
+            data.hex(),
         )
     return None
 
@@ -1363,6 +1381,11 @@ def read_power_flow(
             has_90a3 = b"\x90\xa3" in resp
             has_10a3 = b"\x10\xa3" in resp
             log(f"  nonce markers: 90a3={has_90a3} 10a3={has_10a3}")
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "read_power_flow: full resp (%dB) hex=%s",
+                    len(resp), resp.hex(),
+                )
         if not resp:
             return None
 
@@ -1386,6 +1409,11 @@ def read_power_flow(
             _log_power_flow_raw(decrypted, log)
         elif decrypted is None and log:
             log(f"  decrypt_response returned None (resp {len(resp)}B)")
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "read_power_flow: decrypt None resp (%dB) hex=%s",
+                    len(resp), resp.hex(),
+                )
         result = parse_power_flow(decrypted)
         if result is not None:
             return result
@@ -1417,6 +1445,11 @@ def read_power_flow(
                     _log_power_flow_raw(decrypted, log)
                 elif decrypted is None and log:
                     log(f"  legacy drain #{drain_idx}: decrypt=None")
+                    if _LOGGER.isEnabledFor(logging.DEBUG):
+                        _LOGGER.debug(
+                            "read_power_flow: legacy drain #%d resp (%dB) hex=%s",
+                            drain_idx, len(resp), resp.hex(),
+                        )
                 result = parse_power_flow(decrypted)
                 if result is not None:
                     return result
@@ -4015,6 +4048,11 @@ class PersistentE2ESession:
                 self._log(
                     f"  _try_parse_power_flow: decrypt_response raised: {exc}"
                 )
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "  _try_parse_power_flow: decrypt exception resp (%dB) hex=%s",
+                    len(resp), resp.hex(),
+                )
             return None
         if decrypted is None:
             # Fallback: home-level chat_secret (#47 beta15h)
@@ -4038,6 +4076,11 @@ class PersistentE2ESession:
                 self._log(
                     f"  _try_parse_power_flow: decrypt_response=None "
                     f"(resp {len(resp)}B)"
+                )
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "  _try_parse_power_flow: decrypt=None resp (%dB) hex=%s",
+                    len(resp), resp.hex(),
                 )
             return None
         if self._log:

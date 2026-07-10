@@ -1065,8 +1065,9 @@ class EmaldoClient:
             high_marker: High battery marker percentage.
             low_marker: Low battery marker percentage.
             battery_range_override: When ``True`` activates the app's
-                "Battery Range = override" mode (byte 2 of payload). Default
-                ``False`` leaves the AI Battery Range setting unchanged.
+                "Battery Range = override" mode (byte 2 of payload = 0x01).
+                ``False`` writes byte 2 = 0x00, which disables Battery Range
+                Override and reverts to AI-chosen range.
             log: Optional log callback ``log(message: str)``.
 
         Returns:
