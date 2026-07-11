@@ -2,7 +2,8 @@
 ## 1. Transport
 
 - **UDP**, raw MSCT binary frames (NOT KCP)
-- **Relay**: `e2e2.emaldo.com:1050` (IP `35.187.68.18`)
+- **Relay**: `e2e2.emaldo.com:1050` (IP `35.187.68.18`) — hostname is API-returned
+  by ``e2e-user-login``; ``e2e2`` is the default fallback when the API omits it.
 - No TCP fallback; all E2E traffic goes through the cloud relay to the device
 
 ---
@@ -26,6 +27,7 @@
 |-----|---------------------|----------|
 | `end_secret` | `home_end_secret` / `sender_end_secret` | Alive packets (relay auth) |
 | `chat_secret` | `chat_secret` | Heartbeat, wake, all device commands |
+| `home_chat_secret` | `home_chat_secret` | Fallback AES key for power-flow decrypt (shared across devices on the same home) |
 
 ---
 
@@ -43,6 +45,7 @@ All obtained via `EmaldoClient.e2e_login()` (REST API call to `/bmt/search-bmt/`
 | `home_end_id` | `str (32 chars)` | Home hub endpoint ID |
 | `home_group_id` | `str (32 chars)` | Home hub group ID |
 | `home_end_secret` | `str (32 chars)` | Home hub end secret |
+| `home_chat_secret` | `str (32 chars)` | Shared AES fallback key for power-flow decrypt |
 | `chat_secret` | `str (32 chars)` | AES key for all device communication |
 
 ---
@@ -120,7 +123,9 @@ Uses `chat_secret`.
 
 ### 4.7 Override Packet (special)
 
-Type `0x1A`. Has a slightly different structure: uses `0x84 0xF1 0x00 0x00 0x00 0x01` (4-byte PROXY) and no APP_ID. Payload format:
+Type `0x1A`. Has a slightly different structure: uses `0x84 0xF1 0x00 0x00 0x00 0x01`
+(4-byte PROXY) and the MSGID tag uses a different prefix (`0xA0 0x9B 0xF6` instead of
+`0x9B 0xF6`). APP_ID **is** present. Payload format:
 
 ```
 byte 0:   high_marker     (battery % charge cutoff, default 72)
@@ -205,6 +210,43 @@ rebuilds it.
 **Diagnostics:** a live session exposes `last_rtt_ms` (last UDP round-trip),
 `last_keepalive_failure_reason`, and `last_power_flow_diag` (per-read counters:
 initial timeout / session-expired / non-matching, plus drained-packet counts).
+
+### 5.4 Multi-Device Session Management (#47)
+
+**Problem:** ``/home/e2e-login/`` rotates the shared ``home_end_secret``
+server-side on every call. When two devices on the same account both need fresh
+credentials, they can race: Device A's refresh rotates the secret → Device B's
+live session receives a ``force-logout`` from the relay → Device B calls
+``/home/e2e-login/`` to recover → secret rotates back → Device A gets
+``force-logout`` → infinite ping-pong (mutual 21204 storm).
+
+**Per-home serialization lock:** ``EmaldoClient._get_home_e2e()`` serializes
+concurrent ``/home/e2e-login/`` calls per ``home_id`` using a
+``threading.Lock``. A 5-second grace window (``_home_e2e_cache`` age < 5 s)
+reuses cached credentials when ``force_refresh`` is requested, preventing
+back-to-back rotations when two devices escalate simultaneously. The home login
+result has its own 30-minute TTL, separate from the per-device 10-minute
+``e2e_login`` cache.
+
+**Home secret rotation callbacks:** Registered by each live
+``PersistentE2ESession`` via ``register_home_secret_callback()``. When
+``_get_home_e2e()`` returns fresh data (cache miss, or force-refresh), it fires
+all registered callbacks. Each callback calls ``session.rekey_home(home_data)``
+to update the in-memory ``home_end_id``, ``home_group_id``,
+``home_end_secret``, and ``home_chat_secret`` without a UDP re-handshake. The
+callbacks are fired outside the per-home lock to avoid deadlock with the
+session's own lock.
+
+**Force-logout datagram detection:** The relay may send an encrypted JSON
+datagram ``{"cmd":"force-logout"}`` when the home ``end_secret`` was rotated by
+another device. The stream drain loop decrypts it with the cached
+``home_end_secret``, flags a reconnect with ``_stream_needs_creds_refresh =
+True``, and the session re-keys on the next handshake.
+
+**Callback cleanup:** ``_invalidate_session_ref()`` calls the unregister
+callable returned by ``register_home_secret_callback()``, ensuring a stale
+session is not re-keyed after the coordinator has moved to a replacement
+session.
 
 ---
 
@@ -425,7 +467,8 @@ bytes 1–4: start_unix     (LE u32; unix timestamp)
 bytes 5–8: end_unix       (LE u32; unix timestamp)
 9 zero bytes = cancel
 ```
-Default window when enabling: now → top-of-current-hour + 48h.
+Default window when enabling: now → now + 1h (coordinator fallback) or
+top-of-current-hour + 48h (standalone firmware default).
 
 ### `0x80` set_manual_selling (6 bytes)
 

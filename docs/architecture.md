@@ -51,11 +51,15 @@ devices are uniquely identified by `(home_id, device_id)`.
 - **One REST session** per config entry, shared by all devices.
 - The `SharedEmaldoClient` caches the auth token so per-device `e2e_login` calls
   reuse the same home-level login without rotating the shared home secret.
-- Credentials are cached with a 10-minute TTL; force-refresh on confirmed failures.
+- Two-tier credential caching: per-device credentials (`e2e_login`) cached **10
+  minutes**, account-level home login (`/home/e2e-login/`) cached **30 minutes**
+  with a per-home serialization lock to prevent concurrent rotation on
+  multi-device accounts (#47). Force-refresh on confirmed failures via
+  `_needs_fresh_creds`.
 
 ### E2E Session (UDP)
 
-**Current (beta15i) architecture — shared session, reverse-engineered from relay
+**Current (beta16) architecture — shared session, reverse-engineered from relay
 behavior:**
 
 ```
@@ -63,7 +67,7 @@ behavior:**
            │
            │ owns
            ▼
-         PersistentE2ESession ───── e2e3.emaldo.com:1050  (UDP)
+         PersistentE2ESession ───── e2e2.emaldo.com:1050  (UDP)
            │                           │
            │  Socket + stream thread   │  push frames from ALL devices
            │  + keepalive + drain      │  in the home arrive here
@@ -116,11 +120,14 @@ Each coordinator reads only its own device's cached frame:
 │                   E2E Credentials per Device              │
 │                                                          │
 │  {                                                        │
-│    "host":               "e2e3.emaldo.com",               │
+│    "host":               "e2e2.emaldo.com" (or API-      │
+│                          returned, with e2e2 fallback),  │
 │    "port":               1050,                            │
 │    "home_end_id":        shared across all devices,       │
 │    "home_group_id":      shared across all devices,       │
 │    "home_end_secret":    shared across all devices,       │
+│    "home_chat_secret":   shared across all devices        │
+│                          (fallback for power-flow decrypt)│
 │    "sender_end_id":      unique per device,               │
 │    "sender_group_id":    unique per device,               │
 │    "sender_end_secret":  unique per device,               │
@@ -153,6 +160,33 @@ Each coordinator reads only its own device's cached frame:
   own socket, never send `Alive(home)`, never start their own keepalive loop.
   This prevents the relay collision that occurred when two devices on the same
   home both sent `Alive(home)` repeatedly.
+- **Per-home E2E credential lock (#47)** — ``/home/e2e-login/`` rotates the
+  shared ``home_end_secret`` server-side on every call. A per-home
+  ``threading.Lock`` serializes concurrent calls so two devices on the same
+  account cannot race and rotate the secret back and forth. The result is cached
+  for 30 minutes; a 5-second grace window reuses the cache when
+  ``force_refresh`` is requested within that window after a previous refresh.
+- **Home secret rotation callbacks (#47)** — ``_get_home_e2e()`` fires
+  registered callbacks after a fresh ``/home/e2e-login/`` so live sessions can
+  re-key their in-memory credentials (``home_end_id``, ``home_group_id``,
+  ``home_end_secret``, ``home_chat_secret``) via ``rekey_home()`` without a UDP
+  re-handshake. Callbacks are fired outside the per-home lock to avoid deadlock.
+- **Force-logout detection (#47)** — the relay may send an encrypted JSON
+  datagram ``{"cmd":"force-logout"}`` when another device rotates the home
+  ``end_secret``. The stream drain loop decrypts with ``home_end_secret``,
+  flags a reconnect with forced credential refresh, and the session re-keys via
+  the rotation callback on the next handshake.
+- **Callback cleanup** — ``_invalidate_session_ref()`` calls the unregister
+  callable returned by ``register_home_secret_callback()`` so an old session is
+  not re-keyed after the coordinator has moved on to a replacement session.
+- **Thread safety** — ``_ensure_session()`` sets ``_session_binding`` before
+  entering the frame-wait loop and uses a local ``_session`` reference inside
+  the loop, so a concurrent thread cannot set ``self._session`` to ``None``
+  between the check and the use (#47 RC5).
+- **Legacy fallback mode** — if the persistent stream delivers zero usable power
+  flow frames (restrictive NAT/firewall dropping device push datagrams), the
+  coordinator falls back to beta9-style one-shot reads: fresh socket, full
+  handshake, single 0x30 read, socket teardown per poll cycle.
 
 ## HA Integration Structure
 

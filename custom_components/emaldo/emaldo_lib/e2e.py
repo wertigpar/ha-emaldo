@@ -4072,8 +4072,15 @@ class PersistentE2ESession:
         # Deadline reached: perform the actual rebuild.
         self._stream_reconnect_not_before = None
         try:
-            self._refresh_creds_locked()
+            # Try re-handshake with current creds first (#47 beta16b).
+            # If handshake succeeds, creds are still valid — skip the
+            # expensive cloud force_refresh that can trigger dual-unit
+            # home-secret rotation ping-pong.
             self._reconnect()
+            if self._last_handshake_response != "ok":
+                # Stale creds — fetch fresh ones and reconnect again.
+                self._refresh_creds_locked()
+                self._reconnect()
             self._stream_needs_reconnect = False
             self._last_subscribe_monotonic = None  # force immediate re-subscribe
             self._last_keepalive_monotonic = time.perf_counter()
