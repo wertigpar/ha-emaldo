@@ -445,7 +445,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if rt is None:
                         return False
                     session = rt._ensure_session()  # noqa: SLF001
-                    resp = session.send_command(0x01, payload)
+                    client = self._ensure_client()
+                    own_creds = client.get_e2e_credentials(
+                        self.home_id, self._device_id, self._model,
+                    )
+                    resp = session.send_command_for_creds(0x01, payload, own_creds)
                     if resp is None:
                         _LOGGER.debug(
                             "[EmergencyCharge] %s stream cmd: timeout / no response "
@@ -1281,7 +1285,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         for attempt in range(2):
             try:
                 session = self._ensure_session()
-                session.send_command(0x41, payload)
+                cl = self._parent._ensure_client()
+                own_creds = cl.get_e2e_credentials(
+                    self._parent.home_id, self._parent._device_id,
+                    self._parent._model,
+                )
+                session.send_command_for_creds(0x41, payload, own_creds)
                 return
             except EmaldoAuthError:
                 # REST token expired — force full re-login on next _ensure_session
@@ -1307,9 +1316,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         for attempt in range(2):
             try:
                 session = self._ensure_session()
-                user_id: str = session._creds.get("user_id", "")  # noqa: SLF001
+                cl = self._parent._ensure_client()
+                own_creds = cl.get_e2e_credentials(
+                    self._parent.home_id, self._parent._device_id,
+                    self._parent._model,
+                )
+                user_id: str = own_creds.get("user_id", "")
                 payload = _build_vpp_payload(enabled, user_id)
-                session.send_command(_VIRTUALPOWERPLANT_SET_TYPE, payload)
+                session.send_command_for_creds(_VIRTUALPOWERPLANT_SET_TYPE, payload, own_creds)
                 return
             except EmaldoAuthError:
                 self._parent._reset_client()  # noqa: SLF001
@@ -1337,7 +1351,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         for attempt in range(2):
             try:
                 session = self._ensure_session()
-                session.send_command(_SELLING_PROTECTION_SET_TYPE, payload)
+                cl = self._parent._ensure_client()
+                own_creds = cl.get_e2e_credentials(
+                    self._parent.home_id, self._parent._device_id,
+                    self._parent._model,
+                )
+                session.send_command_for_creds(_SELLING_PROTECTION_SET_TYPE, payload, own_creds)
                 return
             except EmaldoAuthError:
                 self._parent._reset_client()  # noqa: SLF001
@@ -1365,7 +1384,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         for attempt in range(2):
             try:
                 session = self._ensure_session()
-                session.send_command(0x80, payload)
+                cl = self._parent._ensure_client()
+                own_creds = cl.get_e2e_credentials(
+                    self._parent.home_id, self._parent._device_id,
+                    self._parent._model,
+                )
+                session.send_command_for_creds(0x80, payload, own_creds)
                 return
             except EmaldoAuthError:
                 self._parent._reset_client()  # noqa: SLF001

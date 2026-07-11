@@ -681,15 +681,21 @@ def _has_reasonable_power_flow_values(payload: bytes) -> bool:
     to stay far below 200 kW per channel, so values beyond that are treated as
     corrupt or misclassified payloads rather than published as multi-megawatt
     sensor spikes.
+
+    Non-entity auxiliary fields (ip2_w, op2_w) are not validated — they carry
+    raw watts and are not mapped to HA sensors (#41).
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
     signed_offsets = (0, 2, 4, 6, 8, 10)
     for offset in signed_offsets:
-        if abs(struct.unpack_from("<h", payload, offset)[0]) > _POWER_FLOW_MAX_RAW_HECTOWATTS:
-            return False
-
-    unsigned_offsets = (12, 14)
-    for offset in unsigned_offsets:
-        if struct.unpack_from("<H", payload, offset)[0] > _POWER_FLOW_MAX_RAW_HECTOWATTS:
+        val = struct.unpack_from("<h", payload, offset)[0]
+        if abs(val) > _POWER_FLOW_MAX_RAW_HECTOWATTS:
+            _log.debug(
+                "PowerFlow reasonability fail: signed offset=%d value=%d "
+                "exceeds max=%d raw_hectowatts",
+                offset, val, _POWER_FLOW_MAX_RAW_HECTOWATTS,
+            )
             return False
 
     if len(payload) >= 18:
@@ -698,7 +704,13 @@ def _has_reasonable_power_flow_values(payload: bytes) -> bool:
     if len(payload) >= 20 and payload[19] not in (0, 1):
         return False
     if len(payload) >= 22:
-        if abs(struct.unpack_from("<h", payload, 20)[0]) > _POWER_FLOW_MAX_RAW_HECTOWATTS:
+        val = struct.unpack_from("<h", payload, 20)[0]
+        if abs(val) > _POWER_FLOW_MAX_RAW_HECTOWATTS:
+            _log.debug(
+                "PowerFlow reasonability fail: dual_power offset=%d value=%d "
+                "exceeds max=%d raw_hectowatts",
+                20, val, _POWER_FLOW_MAX_RAW_HECTOWATTS,
+            )
             return False
 
     return True
@@ -738,8 +750,8 @@ def parse_power_flow(payload: bytes) -> dict | None:
     6-7     2     addition_load_w         signed short – additional load
     8-9     2     other_load_w            signed short – other load
     10-11   2     ev_w                    signed short – EV charger
-    12-13   2     ip2_w                   unsigned short – input port 2
-    14-15   2     op2_w                   unsigned short – output port 2
+    12-13   2     ip2_w                   unsigned short – input port 2 (raw W)
+    14-15   2     op2_w                   unsigned short – output port 2 (raw W)
     16      1     grid_valid              bool – grid CT sensor present
     17      1     bsensor_valid           bool – battery sensor present
     18      1     solar_efficiency        enum – solar efficiency type
@@ -764,8 +776,8 @@ def parse_power_flow(payload: bytes) -> dict | None:
     addition_load_w = struct.unpack_from("<h", payload, 6)[0] * _scale
     other_load_w = struct.unpack_from("<h", payload, 8)[0] * _scale
     ev_w = struct.unpack_from("<h", payload, 10)[0] * _scale
-    ip2_w = struct.unpack_from("<H", payload, 12)[0] * _scale
-    op2_w = struct.unpack_from("<H", payload, 14)[0] * _scale
+    ip2_w = struct.unpack_from("<H", payload, 12)[0]  # raw watts, not hectowatts
+    op2_w = struct.unpack_from("<H", payload, 14)[0]  # raw watts, not hectowatts
 
     # Extended fields (bytes 16-21) may be absent in older firmware
     length = len(payload)
@@ -4555,6 +4567,25 @@ class PersistentE2ESession:
                 raise EmaldoE2EError("Session is not connected")
             pkt = build_subscription_packet(
                 self._creds, msg_type, self._session_nonce, payload=payload,
+            )
+            return self._send_raw(pkt, f"Command(0x{msg_type:02x})")
+
+    def send_command_for_creds(self, msg_type: int, payload: bytes, target_creds: dict) -> bytes | None:
+        """Send a write command using *target_creds* instead of own credentials.
+
+        Uses the established session socket but encrypts the packet with
+        *target_creds* (different ``chat_secret`` / ``sender_end_id``) so the
+        relay routes the command to the correct device when the session is
+        shared across multiple devices on one home.
+
+        Does NOT send ``Alive(home)`` — the session must already be alive.
+        Returns the relay's response bytes, or *None* on timeout / closed session.
+        """
+        with self._lock:
+            if self._sock is None or self._closed:
+                raise EmaldoE2EError("Session is not connected")
+            pkt = build_subscription_packet(
+                target_creds, msg_type, self._session_nonce, payload=payload,
             )
             return self._send_raw(pkt, f"Command(0x{msg_type:02x})")
 

@@ -1,5 +1,37 @@
 # Changes
 
+## v1.0.0-beta16e
+
+### Fixed
+- **ip2_w/op2_w sanity check rejecting whole PowerFlow frame for unpublished
+  auxiliary fields:** the ``_has_reasonable_power_flow_values`` validator checked
+  offsets 12/14 (ip2_w, op2_w) against the 2000-hectowatt threshold, despite
+  these fields carrying raw watts (not hectowatts) and being unmapped to any HA
+  sensor. A power-flow packet with op2_w > 2000 raw W was discarded entirely —
+  battery_w, solar_w, grid_w were all lost. **Fix:** removed offsets 12/14 from
+  the unsigned_offsets validation block. Non-entity auxiliary fields are no longer
+  checked. Remaining validated fields now emit ``_log.debug`` on each failure
+  with offset, value, and threshold for easier root-cause analysis. The ``* _scale``
+  multiplier is also removed from ip2_w/op2_w parsing — they now store raw watts
+  in the result dict, matching their actual wire encoding.
+
+- **Shared session emergency charge routed to wrong device in dual-device setup
+  (#47 JanBaecklund):** both devices on one account were ``is_primary=True``
+  (separate config entries). The shared session (created by PS1) was used by both
+  devices. ``send_command()`` encrypted every command with ``self._creds`` (PS1's
+  ``chat_secret``), so PS2's emergency charge, third-party PV, sell-back, sell
+  limit, and manual selling commands were all sent with PS1's identity — the
+  relay applied them to PS1. Power-flow reads worked correctly because
+  ``read_power_flow_for_creds()`` already accepted per-device credentials. The
+  user observed: activating emergency charge on PS2 physically started charging
+  PS1, with no visible change in HA.
+  **Fix:** added ``send_command_for_creds()`` to ``PersistentE2ESession`` — same
+  pattern as the existing ``read_power_flow_for_creds()``, but for write
+  commands. All 5 call sites updated to fetch the calling device's own E2E
+  credentials and pass them explicitly. ``_write_sell_back_to_grid`` also fixed
+  to read ``user_id`` from the device's own creds instead of the session's
+  (previous: always used primary device's ``user_id`` for VPP payload).
+
 ## v1.0.0-beta16d
 
 ### Fixed
