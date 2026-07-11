@@ -160,6 +160,11 @@ Each coordinator reads only its own device's cached frame:
   own socket, never send `Alive(home)`, never start their own keepalive loop.
   This prevents the relay collision that occurred when two devices on the same
   home both sent `Alive(home)` repeatedly.
+  **Important:** commands sent through the shared session must use each device's
+  own ``chat_secret`` / ``sender_end_id`` — use
+  ``send_command_for_creds(msg_type, payload, own_creds)`` instead of
+  ``send_command(msg_type, payload)``, which otherwise encrypts with the session
+  owner's credentials and routes the command to the wrong device.
 - **Per-home E2E credential lock (#47)** — ``/home/e2e-login/`` rotates the
   shared ``home_end_secret`` server-side on every call. A per-home
   ``threading.Lock`` serializes concurrent calls so two devices on the same

@@ -294,8 +294,8 @@ All payloads are little-endian unless noted.
 | 6–7 | `s16` | `addition_load_w` | ×100 W |
 | 8–9 | `s16` | `other_load_w` | ×100 W |
 | 10–11 | `s16` | `ev_w` | ×100 W |
-| 12–13 | `u16` | `ip2_w` | ×100 W (unsigned) |
-| 14–15 | `u16` | `op2_w` | ×100 W (unsigned) |
+| 12–13 | `u16` | `ip2_w` | raw W (unsigned, not ×100) |
+| 14–15 | `u16` | `op2_w` | raw W (unsigned, not ×100) |
 | 16 | `u8` | `grid_valid` | 1 = CT sensor present |
 | 17 | `u8` | `bsensor_valid` | 1 = battery sensor present |
 | 18 | `u8` | `solar_efficiency` | enum |
