@@ -1,5 +1,30 @@
 # Changes
 
+## v1.0.0-beta16c
+
+### Fixed
+- **Stream reconnect silently marked successful after second handshake also
+  failed with 21204 — single-device accounts never recovered (#41 InterceptorDK,
+  #47 JanBaecklund):** ``_stream_reconnect_locked`` tried re-handshake with
+  current creds, then (on failure) refreshed creds and tried again. The second
+  ``_reconnect()`` result was never checked. ``_do_handshake`` does not raise
+  on 21204 — it records the response. So code fell through to
+  ``_stream_needs_reconnect = False`` even with a dead session. The stream then
+  sat healthy-flagged while no frames arrived. The ``_stream_needs_creds_refresh``
+  flag was consumed by ``_refresh_creds_locked`` on the first attempt, so every
+  subsequent retry used ``force_refresh=False`` → cached stale creds → still
+  21204. The generation counter could never reach the home-refresh escalation
+  threshold (≥3 within 60s). **Fix:** after the second ``_reconnect()``, check
+  ``_last_handshake_response``. If still not ``"ok"``, re-arm
+  ``_stream_needs_creds_refresh`` and raise ``EmaldoE2ESessionExpired`` so the
+  retry cycle continues with ``force_refresh=True``. The next iteration
+  increments the generation counter; after 3+ iterations within 60s the
+  escalation triggers ``force_home_refresh=True`` → rotates stale
+  ``home_end_secret`` → fresh handshake succeeds. Clear
+  ``_stream_needs_creds_refresh`` on successful reconnect to prevent stale flag
+  from bleeding into non-21204 reconnect reasons. Based on beta13n's
+  ``EmaldoE2ESessionExpired`` raising pattern (same file, line 400+).
+
 ## v1.0.0-beta16b
 
 ### Fixed

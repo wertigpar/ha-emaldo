@@ -26,7 +26,7 @@ from .const import (
     SLOT_NO_OVERRIDE,
     get_app_id,
 )
-from .exceptions import EmaldoE2EError
+from .exceptions import EmaldoE2EError, EmaldoE2ESessionExpired
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -4081,6 +4081,15 @@ class PersistentE2ESession:
                 # Stale creds — fetch fresh ones and reconnect again.
                 self._refresh_creds_locked()
                 self._reconnect()
+                if self._last_handshake_response != "ok":
+                    # Second attempt also failed — re-arm the forced-refresh
+                    # flag so the next retry escalates the generation counter
+                    # and triggers a home-level secret rotation (#41 #47).
+                    self._stream_needs_creds_refresh = True
+                    raise EmaldoE2ESessionExpired(
+                        "Reconnect with refreshed creds also failed"
+                    )
+            self._stream_needs_creds_refresh = False
             self._stream_needs_reconnect = False
             self._last_subscribe_monotonic = None  # force immediate re-subscribe
             self._last_keepalive_monotonic = time.perf_counter()
