@@ -1,5 +1,24 @@
 # Changes
 
+## v1.0.0-beta16d
+
+### Fixed
+- **120s home secret grace window blocked escalation recovery — 2-min death
+  cycle (#47 JanBaecklund):** RC3 extended the home E2E cache grace window from
+  5s → 120s to prevent dual-unit ping-pong. This was too aggressive: the
+  escalation mechanism sets ``force_home_refresh=True`` after ≥3 generation
+  increments within 60s, but ``_get_home_e2e(force_refresh=True)`` at line 789
+  blocked the API call when cache age < 120s. The home secret was never rotated,
+  so every in-place reconnect (interval ~2s) got 21204 again. The device was
+  stuck in a 110–120s death cycle until the cache aged past 120s. During the
+  dead window, emergency charge commands failed — the stream path returned
+  CONN_NOT_ESTABLISHED and the legacy standalone path's session was invalidated
+  by concurrent stream storm activity. **Fix:** reduce grace window back to 5s.
+  With RC1 (re-handshake first) and RC4 (escalation + re-arm) in place, the 5s
+  window is sufficient to prevent race conditions between concurrent device
+  refreshes without blocking recovery. The escalation generation counter (≥3 in
+  60s) provides the rate limiting that prevents reciprocal ping-pong.
+
 ## v1.0.0-beta16c
 
 ### Fixed
