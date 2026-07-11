@@ -1,5 +1,36 @@
 # Changes
 
+## v1.0.0-beta16b
+
+### Fixed
+- **`_creds_provider` stale client reference caused REST auth cascade (#47
+  JanBaecklund):** the `_creds_provider` closure captured the `EmaldoClient`
+  reference at session creation time and never reassigned it. After a REST token
+  expiry, `_reset_client()` replaced `self._parent._client` with a new instance,
+  but `_creds_provider` still held the old one. Every subsequent forced-credential
+  refresh then hit `EmaldoAuthError` on the stale client, triggering another
+  `_reset_client()` + `_ensure_client()` — an infinite forced-login loop that
+  produced 12+ logins per minute. The server rate-limited the account, returning
+  -12 on all REST endpoints for ~60s, causing 21 authentication failures in a 2h
+  window. **Fix:** replace the captured `client` with
+  `self._parent._ensure_client()` on every call, so the latest client reference
+  is always used.
+
+- **Dual-unit 21204 home-secret rotation ping-pong still not fully broken
+  (#47 JanBaecklund):** the per-home lock + 5s cache cooldown (beta16) serializes
+  concurrent `/home/e2e-login/` calls, but sequential kills still occurred:
+  Device A's `_stream_reconnect_locked` calls `_refresh_creds_locked` →
+  `force_refresh=True` → `e2e_login(force_home_refresh=True)` when the
+  generation counter ≥3 in under 60s. This rotates the account-wide
+  `home_end_secret`, expiring Device B's session → B reconnects with
+  force_refresh → rotates secret back → ping-pong. The stream was forced to
+  fetch fresh cloud credentials on every 21204, regardless of whether the
+  existing credentials were still valid. **Fix:** in `_stream_reconnect_locked`,
+  try a full re-handshake with the current credentials first (UDP-only, no cloud
+  API call). Only if the handshake returns non-`"ok"` (session expired 21204)
+  does the code fall back to `_refresh_creds_locked` + a second reconnect. In
+  the common case (creds still valid) the entire reconnect stays UDP-local.
+
 ## v1.0.0-beta16
 
 ### Fixed
