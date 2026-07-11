@@ -25,11 +25,16 @@
   `home_end_secret`, expiring Device B's session → B reconnects with
   force_refresh → rotates secret back → ping-pong. The stream was forced to
   fetch fresh cloud credentials on every 21204, regardless of whether the
-  existing credentials were still valid. **Fix:** in `_stream_reconnect_locked`,
-  try a full re-handshake with the current credentials first (UDP-only, no cloud
-  API call). Only if the handshake returns non-`"ok"` (session expired 21204)
-  does the code fall back to `_refresh_creds_locked` + a second reconnect. In
-  the common case (creds still valid) the entire reconnect stays UDP-local.
+  existing credentials were still valid. **RC1 fix:** in
+  `_stream_reconnect_locked`, try a full re-handshake with the current
+  credentials first (UDP-only, no cloud API call). Only if the handshake returns
+  non-`"ok"` does the code fall back to `_refresh_creds_locked` + a second
+  reconnect. In the common case (creds still valid) the entire reconnect stays
+  UDP-local. **RC3 fix:** extend the ``_get_home_e2e`` cache grace window from
+  5s to 120s so Device B's escalation reuses Device A's refreshed home secret
+  instead of making its own API call that would rotate the secret back. JanBaecklund
+  beta16b log confirmed: 50+ 21204 events in 3 min despite RC1 fix; the 5s
+  window was far too short for the ~2 min ping-pong cycle.
 
 ## v1.0.0-beta16
 

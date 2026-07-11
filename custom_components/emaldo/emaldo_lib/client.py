@@ -786,9 +786,11 @@ class EmaldoClient:
                         and age <= self._home_e2e_ttl
                     ):
                         return dict(cached[0])
-                    if force_refresh and age < 5:
+                    if force_refresh and age < 120:
                         _LOGGER.debug(
-                            "Home e2e cache %ds fresh — reusing for home_id=%s",
+                            "Home e2e cache %ds fresh — reusing for home_id=%s "
+                            "(age < 120s window, skipping rotation to avoid "
+                            "dual-unit ping-pong)",
                             int(age), home_id,
                         )
                         # Fire callbacks so late-registered sessions still
