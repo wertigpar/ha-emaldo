@@ -5,7 +5,6 @@ Exposes Third-party PV toggle and AI Battery Range override toggle.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -90,20 +89,28 @@ class EmaldoThirdPartyPVSwitch(
         return self.coordinator.data.get("thirdparty_pv_on")
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable third-party PV."""
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_thirdparty_pv, True  # noqa: SLF001
+        """Enable third-party PV, verifying the device confirms it (#51)."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_thirdparty_pv_verified, True  # noqa: SLF001
         )
-        await asyncio.sleep(1.5)
-        await self.coordinator.async_request_refresh()
+        if confirmed is not None and self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["thirdparty_pv_on"] = confirmed
+            self.coordinator.async_set_updated_data(updated)
+        else:
+            await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable third-party PV."""
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_thirdparty_pv, False  # noqa: SLF001
+        """Disable third-party PV, verifying the device confirms it (#51)."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_thirdparty_pv_verified, False  # noqa: SLF001
         )
-        await asyncio.sleep(1.5)
-        await self.coordinator.async_request_refresh()
+        if confirmed is not None and self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["thirdparty_pv_on"] = confirmed
+            self.coordinator.async_set_updated_data(updated)
+        else:
+            await self.coordinator.async_request_refresh()
 
 
 class EmaldoSellBackToGridSwitch(
@@ -146,23 +153,23 @@ class EmaldoSellBackToGridSwitch(
         return self.coordinator.data.get("sell_back_to_grid_on")
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Allow grid export (enable sell-back to grid)."""
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_sell_back_to_grid, True  # noqa: SLF001
+        """Allow grid export (enable sell-back to grid), verifying the device confirms it (#51)."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_back_to_grid_verified, True  # noqa: SLF001
         )
-        if self.coordinator.data is not None:
+        if confirmed is not None and self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
-            updated["sell_back_to_grid_on"] = True
+            updated["sell_back_to_grid_on"] = confirmed
             self.coordinator.async_set_updated_data(updated)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Block grid export (disable sell-back to grid)."""
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_sell_back_to_grid, False  # noqa: SLF001
+        """Block grid export (disable sell-back to grid), verifying the device confirms it (#51)."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_back_to_grid_verified, False  # noqa: SLF001
         )
-        if self.coordinator.data is not None:
+        if confirmed is not None and self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
-            updated["sell_back_to_grid_on"] = False
+            updated["sell_back_to_grid_on"] = confirmed
             self.coordinator.async_set_updated_data(updated)
 
 
@@ -212,25 +219,25 @@ class EmaldoSellLimitSwitch(
         return int(self.coordinator.data.get("sell_limit_threshold") or 0)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Activate sell limit with the last-known threshold."""
+        """Activate sell limit with the last-known threshold, verifying the device confirms it (#51)."""
         threshold = self._current_threshold()
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_sell_limit, True, threshold  # noqa: SLF001
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_limit_verified, True, threshold  # noqa: SLF001
         )
-        if self.coordinator.data is not None:
+        if confirmed is not None and self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
-            updated["sell_limit_on"] = True
+            updated["sell_limit_on"] = confirmed
             self.coordinator.async_set_updated_data(updated)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Deactivate sell limit (keep threshold for future re-activation)."""
+        """Deactivate sell limit, verifying the device confirms it (#51) (keeps threshold for future re-activation)."""
         threshold = self._current_threshold()
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_sell_limit, False, threshold  # noqa: SLF001
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_sell_limit_verified, False, threshold  # noqa: SLF001
         )
-        if self.coordinator.data is not None:
+        if confirmed is not None and self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
-            updated["sell_limit_on"] = False
+            updated["sell_limit_on"] = confirmed
             self.coordinator.async_set_updated_data(updated)
 
 
