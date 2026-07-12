@@ -290,9 +290,11 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 for i in range(start_slot, min(end_slot, 96)):
                     slots[i] = slot_value
 
-                if client.set_override(
-                    hid, did, model, bytes(slots),
-                    high_marker=high, low_marker=low,
+                rt = _get_target_set(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )["realtime"]
+                if rt._send_override_via_stream(
+                    bytes(slots), high_marker=high, low_marker=low,
                     battery_range_override=bro,
                 ):
                     _LOGGER.info(
@@ -385,9 +387,11 @@ async def async_handle_apply_bulk_schedule(
                             bro = False
                     resolved = True
 
-                if client.set_override(
-                    hid, did, model, bytes(slot_values),
-                    high_marker=high, low_marker=low,
+                rt = _get_target_set(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )["realtime"]
+                if rt._send_override_via_stream(
+                    bytes(slot_values), high_marker=high, low_marker=low,
                     battery_range_override=bro,
                 ):
                     _LOGGER.info(
@@ -492,8 +496,11 @@ async def async_handle_reset_to_internal(
                                     bro = False
                         resolved = True
 
-                    if client.reset_overrides(
-                        hid, did, model,
+                    rt = _get_target_set(
+                        hass, coordinator_key="schedule", device_id=device_id,
+                    )["realtime"]
+                    if rt._send_override_via_stream(
+                        bytes([SLOT_NO_OVERRIDE] * 96),
                         high_marker=high, low_marker=low,
                         battery_range_override=bro,
                     ):
@@ -526,9 +533,11 @@ async def async_handle_reset_to_internal(
                     for i in range(start_slot, min(end_slot, 96)):
                         slots[i] = SLOT_NO_OVERRIDE
 
-                    if client.set_override(
-                        hid, did, model, bytes(slots),
-                        high_marker=high, low_marker=low,
+                    rt = _get_target_set(
+                        hass, coordinator_key="schedule", device_id=device_id,
+                    )["realtime"]
+                    if rt._send_override_via_stream(
+                        bytes(slots), high_marker=high, low_marker=low,
                         battery_range_override=bro,
                     ):
                         _LOGGER.info(

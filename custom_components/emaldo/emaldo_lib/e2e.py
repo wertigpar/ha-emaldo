@@ -45,6 +45,12 @@ _decrypt_rejected_window_start = 0.0
 _decrypt_rejected_sample: tuple[str, int, int, str] | None = None
 _DECRYPT_REJECTED_WINDOW_S = 60.0
 
+# Cumulative count of power-flow packets dropped by _has_reasonable_power_flow_values.
+_power_flow_sanity_drops: int = 0
+
+def get_power_flow_sanity_drops() -> int:
+    return _power_flow_sanity_drops
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,6 +79,24 @@ def encrypt_payload(plaintext: bytes, key: str, nonce: str) -> bytes:
 # ---------------------------------------------------------------------------
 # Packet builders
 # ---------------------------------------------------------------------------
+
+def build_override_payload(
+    high_marker: int = DEFAULT_MARKER_HIGH,
+    low_marker: int = DEFAULT_MARKER_LOW,
+    battery_range_override: bool = False,
+    slot_values: bytes = b"",
+) -> bytes:
+    """Build raw (unencrypted) override payload for type 0x1A command.
+
+    Returns 4-byte header ``[high_marker, low_marker, enable_flag, n_slots]``
+    followed by *slot_values*.  Caller encrypts and wraps in a subscription
+    or override packet.
+    """
+    n_slots = len(slot_values)
+    assert n_slots in (96, 192)
+    enable_byte = 0x01 if battery_range_override else 0x00
+    return bytes([high_marker, low_marker, enable_byte, n_slots]) + slot_values
+
 
 def build_override_packet(
     e2e_creds: dict,
@@ -107,15 +131,14 @@ def build_override_packet(
     if msg_id is None:
         msg_id = generate_msg_id()
 
-    n_slots = len(slot_values)
-    assert n_slots in (96, 192)
     assert len(nonce) == 16
     assert len(msg_id) == 27
 
-    # Payload: 4-byte header + slot bytes
-    # Header: [high_marker, low_marker, enable_flag, slot_count]
-    enable_byte = 0x01 if battery_range_override else 0x00
-    override_payload = bytes([high_marker, low_marker, enable_byte, n_slots]) + slot_values
+    override_payload = build_override_payload(
+        high_marker=high_marker, low_marker=low_marker,
+        battery_range_override=battery_range_override,
+        slot_values=slot_values,
+    )
     encrypted = encrypt_payload(override_payload, e2e_creds["chat_secret"], nonce)
 
     pkt = bytes([0xD9, 0xA0, 0xA0])
@@ -685,6 +708,7 @@ def _has_reasonable_power_flow_values(payload: bytes) -> bool:
     Non-entity auxiliary fields (ip2_w, op2_w) are not validated — they carry
     raw watts and are not mapped to HA sensors (#41).
     """
+    global _power_flow_sanity_drops
     import logging as _logging
     _log = _logging.getLogger(__name__)
     signed_offsets = (0, 2, 4, 6, 8, 10)
@@ -696,10 +720,12 @@ def _has_reasonable_power_flow_values(payload: bytes) -> bool:
                 "exceeds max=%d raw_hectowatts",
                 offset, val, _POWER_FLOW_MAX_RAW_HECTOWATTS,
             )
+            _power_flow_sanity_drops += 1
             return False
 
     if len(payload) >= 18:
         if payload[16] not in (0, 1) or payload[17] not in (0, 1):
+            _power_flow_sanity_drops += 1
             return False
     if len(payload) >= 20 and payload[19] not in (0, 1):
         return False
@@ -711,6 +737,7 @@ def _has_reasonable_power_flow_values(payload: bytes) -> bool:
                 "exceeds max=%d raw_hectowatts",
                 20, val, _POWER_FLOW_MAX_RAW_HECTOWATTS,
             )
+            _power_flow_sanity_drops += 1
             return False
 
     return True

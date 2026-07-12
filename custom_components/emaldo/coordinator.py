@@ -28,9 +28,11 @@ from .emaldo_lib import (
 )
 from .emaldo_lib.exceptions import EmaldoE2EError
 from .emaldo_lib.e2e import (
+    build_override_payload,
     build_subscription_packet,
     decrypt_response,
     generate_nonce,
+    get_power_flow_sanity_drops,
     _run_session,
     parse_ev_charging_info,
     set_ev_charging_mode_smart,
@@ -65,6 +67,7 @@ from .const import (
     STREAM_STALL_FULL_RESET_SECONDS,
     STREAM_FIRST_FRAME_WAIT,
 )
+from .emaldo_lib.const import DEFAULT_MARKER_HIGH, DEFAULT_MARKER_LOW
 from .realtime_sanity import (
     REALTIME_POWER_ABS_MAX_W,
     get_invalid_realtime_power_channels,
@@ -788,6 +791,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_powerflow_drain_session_expired: int = 0
         self.stats_powerflow_drain_timeouts: int = 0
         self.stats_powerflow_drain_exhausted: int = 0
+        self.stats_powerflow_sanity_drops: int = 0
+        self._last_powerflow_sanity_drops: int = 0
         self.stats_powerflow_last_diag: dict[str, int | bool] = {}
         # -- Cumulative subscribe-and-stream counters (survive reconnects) --
         self.stats_stream_frames_total: int = 0
@@ -819,6 +824,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Full-reset escalations (stream_stall_reset / poll_stall_reset) since
         # the last successful read. Any successful read resets this to 0.
         self._stall_resets_without_success: int = 0
+        # Outcome of the most recent session-routed override (type 0x1A) write,
+        # or *None* if none attempted yet.  Set by :meth:`_send_override_via_stream`.
+        self.stats_override_last_result: dict | None = None
 
     # -- Proxy properties so sensors can share one class across coordinators --
 
@@ -1074,6 +1082,75 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 _time.sleep(0.2)
         return self._session
 
+    def _send_override_via_stream(
+        self,
+        slot_values: bytes,
+        *,
+        high_marker: int = DEFAULT_MARKER_HIGH,
+        low_marker: int = DEFAULT_MARKER_LOW,
+        battery_range_override: bool = False,
+    ) -> bool:
+        """Send override slots on persistent session socket (type 0x1A).
+
+        Uses the existing E2E session instead of opening a competing one-shot
+        UDP socket, avoiding the ``Alive(home)`` collision that caused the
+        relay to reject commands with ``CONN_NOT_ESTABLISHED``.
+
+        Returns True if the relay acknowledged the override, False otherwise.
+        """
+        try:
+            session = self._ensure_session()
+            client = self._parent._ensure_client()
+            own_creds = client.get_e2e_credentials(
+                self._parent.home_id,
+                self._parent._device_id,  # noqa: SLF001
+                self._parent._model,  # noqa: SLF001
+            )
+            payload = build_override_payload(
+                high_marker=high_marker, low_marker=low_marker,
+                battery_range_override=battery_range_override,
+                slot_values=slot_values,
+            )
+            resp = session.send_command_for_creds(0x1A, payload, own_creds)
+            if resp is None:
+                _LOGGER.debug(
+                    "[Override] stream cmd: timeout/no-response "
+                    "device=%s is_primary=%s",
+                    self._parent._device_id, self._is_primary,
+                )
+                self.stats_override_last_result = {
+                    "success": False, "failure_reason": "timeout",
+                }
+                return False
+            if b"CONN_NOT_ESTABLISHED" in resp:
+                _LOGGER.debug(
+                    "[Override] stream cmd: CONN_NOT_ESTABLISHED "
+                    "device=%s is_primary=%s",
+                    self._parent._device_id, self._is_primary,
+                )
+                self.stats_override_last_result = {
+                    "success": False, "failure_reason": "conn_not_established",
+                }
+                return False
+            _LOGGER.debug(
+                "[Override] stream cmd: OK resp_len=%s "
+                "device=%s is_primary=%s",
+                len(resp), self._parent._device_id, self._is_primary,
+            )
+            self.stats_override_last_result = {
+                "success": True, "failure_reason": None,
+            }
+            return True
+        except Exception:
+            _LOGGER.debug(
+                "[Override] stream cmd: exception device=%s",
+                self._parent._device_id, exc_info=True,
+            )
+            self.stats_override_last_result = {
+                "success": False, "failure_reason": "exception",
+            }
+            return False
+
     def _read_power_flow(self) -> dict | None:
         """Synchronous helper that runs in the executor."""
         if self._legacy_fallback_active:
@@ -1167,6 +1244,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self.stats_e2e_rtt_min_ms = rtt_ms
             if self.stats_e2e_rtt_max_ms is None or rtt_ms > self.stats_e2e_rtt_max_ms:
                 self.stats_e2e_rtt_max_ms = rtt_ms
+        cur = get_power_flow_sanity_drops()
+        delta = cur - self._last_powerflow_sanity_drops
+        if delta > 0:
+            self.stats_powerflow_sanity_drops += delta
+        self._last_powerflow_sanity_drops = cur
         if data is None and session.closed:
             # Session died mid-read — force recreation on next call
             self._invalidate_session_ref()
