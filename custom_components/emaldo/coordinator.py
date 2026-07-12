@@ -1353,6 +1353,62 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "e2e_rtt_last_ms": self.stats_e2e_rtt_last_ms,
         }
 
+    #: Tolerate this many device-convergence retries before giving up and
+    #: logging a warning (#51). Separate from the transport-level retry
+    #: already inside each ``_write_*`` method — this retries the whole
+    #: write+read-back cycle when the command was transmitted successfully
+    #: but the device state never confirms the requested value.
+    _WRITE_VERIFY_RETRIES = 2
+    #: Delay between a write and reading back confirmed state, giving the
+    #: relay/device time to apply the command before we check.
+    _WRITE_VERIFY_DELAY_S = 1.0
+
+    def _write_verified(
+        self,
+        write_fn: Callable[[], None],
+        read_fn: Callable[[], dict | None],
+        result_key: str,
+        expected: Any,
+        label: str,
+    ) -> Any:
+        """Write a command and confirm the device actually applied it (#51).
+
+        Several switch commands were previously fire-and-forget: once the
+        write call returned without raising, the caller assumed success —
+        even though a command can be transmitted successfully and still
+        never take effect on the device. This retries the write up to
+        ``_WRITE_VERIFY_RETRIES`` times if the confirmed state read back via
+        ``read_fn`` does not match ``expected``, and logs a warning instead
+        of silently reporting success when it never converges.
+
+        Returns the last confirmed value (which may differ from
+        ``expected``), or ``None`` if no read ever succeeded, so callers can
+        reflect the real device state instead of assuming the write worked.
+        """
+        import time
+
+        confirmed_value = None
+        for attempt in range(self._WRITE_VERIFY_RETRIES + 1):
+            write_fn()
+            time.sleep(self._WRITE_VERIFY_DELAY_S)
+            confirmed = read_fn()
+            if confirmed is not None:
+                confirmed_value = confirmed.get(result_key)
+                if confirmed_value == expected:
+                    return confirmed_value
+            if attempt < self._WRITE_VERIFY_RETRIES:
+                _LOGGER.debug(
+                    "%s not yet confirmed (attempt %d/%d, target=%s, read=%s)",
+                    label, attempt + 1, self._WRITE_VERIFY_RETRIES + 1,
+                    expected, confirmed_value,
+                )
+        _LOGGER.warning(
+            "%s command was not confirmed by the device after %d attempts "
+            "(target=%s, last confirmed=%s)",
+            label, self._WRITE_VERIFY_RETRIES + 1, expected, confirmed_value,
+        )
+        return confirmed_value
+
     def _write_thirdparty_pv(self, enabled: bool) -> None:
         """Send SET_THIRDPARTYPV_ON (0x41) via the existing persistent session.
 
@@ -1385,6 +1441,21 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._invalidate_session_ref()
                 if attempt == 1:
                     raise
+
+    def _write_thirdparty_pv_verified(self, enabled: bool) -> Any:
+        """Write third-party PV state and confirm the device applied it (#51).
+
+        ``_read_power_flow`` decodes ``thirdparty_pv_on`` from the regular
+        realtime power-flow packet, so it doubles as a fresh confirmation
+        read with no separate device query needed.
+        """
+        return self._write_verified(
+            lambda: self._write_thirdparty_pv(enabled),
+            self._read_power_flow,
+            "thirdparty_pv_on",
+            enabled,
+            "Third-party PV",
+        )
 
     def _write_sell_back_to_grid(self, enabled: bool) -> None:
         """Enable or disable grid export (sell-back to grid) via set_virtualpowerplant.
@@ -1422,6 +1493,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         session = self._ensure_session()
         return session.read_virtualpowerplant()
 
+    def _write_sell_back_to_grid_verified(self, enabled: bool) -> Any:
+        """Write sell-back-to-grid state and confirm the device applied it (#51)."""
+        return self._write_verified(
+            lambda: self._write_sell_back_to_grid(enabled),
+            self._read_virtualpowerplant,
+            "sell_back_to_grid_on",
+            enabled,
+            "Sell-back-to-grid",
+        )
+
     def _write_sell_limit(self, enabled: bool, threshold: int) -> None:
         """Set sell-limit protection (set_sellingprotection, type 0x5E).
 
@@ -1454,6 +1535,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Read sell-limit (selling protection) state via the persistent session."""
         session = self._ensure_session()
         return session.read_selling_protection()
+
+    def _write_sell_limit_verified(self, enabled: bool, threshold: int) -> Any:
+        """Write sell-limit state and confirm the device applied it (#51)."""
+        return self._write_verified(
+            lambda: self._write_sell_limit(enabled, threshold),
+            self._read_sell_limit,
+            "selling_protection_on",
+            enabled,
+            "Sell limit",
+        )
 
     def _write_manual_selling(self, on: bool, target_kwh: int) -> None:
         """Enable or disable manual energy selling (type 0x80).
