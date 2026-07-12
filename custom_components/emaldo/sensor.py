@@ -1136,11 +1136,15 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             "powerflow_drain_session_expired": c.stats_powerflow_drain_session_expired,
             "powerflow_drain_timeouts": c.stats_powerflow_drain_timeouts,
             "powerflow_drain_exhausted": c.stats_powerflow_drain_exhausted,
+            "powerflow_sanity_drops": c.stats_powerflow_sanity_drops,
             "powerflow_last_diag": c.stats_powerflow_last_diag,
             "undecryptable_polls": getattr(c, "stats_undecryptable_polls", 0),
             "legacy_fallback_active": getattr(c, "_legacy_fallback_active", False),
             "last_handshake_response": getattr(
                 c, "stats_last_handshake_response", None
+            ),
+            "override_last_result": getattr(
+                c, "stats_override_last_result", None
             ),
             "stall_snapshot": getattr(c, "_stall_snapshot", None),
             "last_success": _to_iso(c.stats_last_success),

@@ -1,5 +1,28 @@
 # Changes
 
+## v1.0.0-beta16f
+
+### Fixed
+- **Override (set_slot_range / apply_bulk_schedule / reset_to_internal) rejects
+  with "Command causes failure" in dual-device setup (#47):** ``set_override``
+  used the one-shot ``send_override`` function which opens a new UDP socket,
+  sends ``Alive(home)``/``Wake``/``Heartbeat`` with a fresh nonce, and closes.
+  The ``Alive(home)`` from the competing socket disrupted the persistent session's
+  stream connection, causing the relay to reject commands with
+  ``CONN_NOT_ESTABLISHED`` (observed in JanBaecklund log: `"command causes
+  failure"` at 09:52:57). ``send_override``'s ``return resp is not None`` masked
+  the rejection — any non-None response including ``cmd not allowed`` returned
+  ``True``.
+  **Fix:** added ``build_override_payload()`` to extract the raw (unencrypted)
+  override payload from ``build_override_packet()``. Added
+  ``_send_override_via_stream()`` to ``EmaldoRealtimeCoordinator`` — uses
+  the persistent session's established socket and ``send_command_for_creds()``
+  to send type-0x1A override, exactly mirroring the beta16e emergency-charge
+  fix. All 3 service handlers (``set_slot_range``, ``apply_bulk_schedule``,
+  ``reset_to_internal``) updated to call the session-routed path. Added
+  ``stats_override_last_result`` diagnostic attribute surfaced in the realtime
+  status sensor for debugging.
+
 ## v1.0.0-beta16e
 
 ### Fixed
