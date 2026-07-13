@@ -943,8 +943,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     "home_chat_secret", creds["home_chat_secret"]
                 )
                 _LOGGER.debug(
-                    "Secondary device %s: using primary-managed home secret",
-                    device_id,
+                    "[OptC-diag] Secondary %s: using primary-managed home secret "
+                    "end=%s...", device_id,
+                    (home_secrets.get("home_end_secret", "") or "")[:8],
+                )
+            else:
+                _LOGGER.debug(
+                    "[OptC-diag] Secondary %s: home_secrets dict empty for home=%s "
+                    "— no override applied", device_id, home_id,
                 )
 
         PersistentE2ESession.register_device_key(
@@ -973,6 +979,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     "home_end_secret": new_creds.get("home_end_secret", ""),
                     "home_chat_secret": new_creds.get("home_chat_secret", ""),
                 }
+                _LOGGER.debug(
+                    "[OptC-diag] _creds_provider primary: published home_secret "
+                    "for home=%s end=%s... device=%s",
+                    home_id,
+                    (new_creds.get("home_end_secret", "") or "")[:8],
+                    device_id,
+                )
             else:
                 # Secondary overrides home secret from primary's published value
                 home_secrets = self.hass.data.get(DOMAIN, {}).get(
@@ -984,6 +997,19 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     )
                     new_creds["home_chat_secret"] = home_secrets.get(
                         "home_chat_secret", new_creds["home_chat_secret"]
+                    )
+                    _LOGGER.debug(
+                        "[OptC-diag] _creds_provider secondary: overriding "
+                        "for home=%s device=%s end_from=%s... end_to=%s...",
+                        home_id, device_id,
+                        (new_creds.get("home_end_secret", "") or "")[:8],
+                        (home_secrets.get("home_end_secret", "") or "")[:8],
+                    )
+                else:
+                    _LOGGER.debug(
+                        "[OptC-diag] _creds_provider secondary: no home_secrets "
+                        "for home=%s device=%s — no override",
+                        home_id, device_id,
                     )
             return new_creds
 
