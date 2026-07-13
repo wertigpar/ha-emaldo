@@ -179,7 +179,7 @@ def _iter_device_sets(entry_data: dict[str, Any]) -> list[dict[str, Any]]:
 def _get_entry_data(hass: HomeAssistant) -> dict[str, Any]:
     """Return only config-entry data dicts, excluding internal metadata keys starting with '_'.
 
-    Internal keys like ``_home_sessions`` and ``_home_session_owners`` are
+    Internal keys like ``_device_sessions`` and ``_home_secrets`` are
     stored at the same level as entry data in ``hass.data[DOMAIN]``. All
     iteration over config entries must filter them out to avoid ``KeyError``
     crashes and false-positive warnings.
