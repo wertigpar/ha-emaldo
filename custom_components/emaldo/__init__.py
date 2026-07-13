@@ -52,6 +52,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Emaldo from a config entry."""
+    _LOGGER.info(
+        "[Build] beta16h-A — Option A: one-shot command socket (no Alive(home))"
+    )
     _LOGGER.debug(
         "Setting up Emaldo config entry: entry_id=%s home_id=%s pinned_device_id=%s",
         entry.entry_id,

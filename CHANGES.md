@@ -1,5 +1,42 @@
 # Changes
 
+## v1.0.0-beta16h-A
+
+### Changed
+- **One-shot command socket — no ``Alive(home)`` on command path (#47, Option
+  A):** beta16g's "wire creds merge" approach (Candidate A) failed because
+  the relay session is device-scoped per TCP socket: cross-device commands on
+  a shared socket are rejected regardless of wire-level impersonation.
+  ``send_command_for_creds`` on the shared persistent session always returns
+  ``CONN_NOT_ESTABLISHED`` for the secondary device.
+  **Fix:** ``_send_override_via_stream`` and ``_send_emergency_charge_via_stream``
+  now open a throwaway UDP socket, send the encrypted command packet as the
+  **target device's own identity** (own ``sender_end_id``/``chat_secret``),
+  read one response, and close.  No ``Alive(home)`` → no relay collision.
+  The persistent shared session is retained for keepalive and power-flow reads
+  only.
+
+### Added
+- ``e2e.py::send_override_oneshot()`` — standalone override on fresh UDP
+  socket using ``build_override_packet`` (no preamble).
+- ``e2e.py::send_command_oneshot()`` — generic E2E command on fresh UDP
+  socket using ``build_subscription_packet`` with ``request_mode=True`` (no
+  preamble).
+
+### Test aim
+Confirm the secondary device can send overrides and emergency-charge commands
+via a one-shot socket that identifies as the secondary itself. Expected
+behaviour: both devices override successfully; ``CONN_NOT_ESTABLISHED`` rate
+→ 0 for commands; emergency-charge ON/OFF works for both.
+
+### Next steps depending on result
+- **Option A works → success.** Land ``beta16h-A``. Architectural fix proven.
+- **Option A rejected (relay requires ``Alive`` preamble before commands) →**
+  ``beta16h-optB``: encrypt command with ``home_chat_secret`` on the shared
+  session (Candidate B).
+- **Both A and B rejected →** ``beta16h-optC``: per-device sessions + single
+  ``Alive(home)``.
+
 ## v1.0.0-beta16g
 
 ### Changed

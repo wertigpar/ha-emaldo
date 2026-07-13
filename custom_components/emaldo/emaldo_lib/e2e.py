@@ -1630,6 +1630,81 @@ def send_override(
         sock.close()
 
 
+def send_override_oneshot(
+    e2e_creds: dict,
+    slot_values: bytes,
+    *,
+    high_marker: int = DEFAULT_MARKER_HIGH,
+    low_marker: int = DEFAULT_MARKER_LOW,
+    battery_range_override: bool = False,
+    timeout: float = 3.0,
+) -> bytes | None:
+    """Send override via throwaway UDP socket — no Alive(home) preamble.
+
+    Opens fresh socket, sends ``build_override_packet`` as *e2e_creds*
+    identity, reads one response, closes.  No Alive/Heartbeat/Wake sent.
+    The relay must accept a standalone encrypted packet.
+
+    Returns raw response bytes, or *None* on timeout.
+    """
+    nonce = generate_nonce()
+    override_pkt = build_override_packet(
+        e2e_creds, slot_values, nonce=nonce,
+        high_marker=high_marker, low_marker=low_marker,
+        battery_range_override=battery_range_override,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    try:
+        sock.sendto(override_pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            return resp
+        except socket.timeout:
+            return None
+    finally:
+        sock.close()
+
+
+def send_command_oneshot(
+    e2e_creds: dict,
+    msg_type: int,
+    payload: bytes,
+    *,
+    timeout: float = 3.0,
+) -> bytes | None:
+    """Send arbitrary E2E command via throwaway UDP socket — no Alive preamble.
+
+    Opens fresh socket, sends ``build_subscription_packet`` (direct-request
+    mode, 0x10) as *e2e_creds* identity, reads one response, closes.
+
+    Returns raw response bytes, or *None* on timeout.
+    """
+    nonce = generate_nonce()
+    pkt = build_subscription_packet(
+        e2e_creds, msg_type, nonce, payload=payload, request_mode=True,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    try:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            return resp
+        except socket.timeout:
+            return None
+    finally:
+        sock.close()
+
+
 def send_sell(
     e2e_creds: dict,
     duration_seconds: int,

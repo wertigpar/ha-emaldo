@@ -28,13 +28,14 @@ from .emaldo_lib import (
 )
 from .emaldo_lib.exceptions import EmaldoE2EError
 from .emaldo_lib.e2e import (
-    build_override_payload,
     build_subscription_packet,
     decrypt_response,
     generate_nonce,
     get_power_flow_sanity_drops,
     _run_session,
     parse_ev_charging_info,
+    send_command_oneshot,
+    send_override_oneshot,
     set_ev_charging_mode_smart,
     set_ev_charging_mode_instant,
     EV_MODE_INSTANT_FULL,
@@ -431,52 +432,46 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _send_emergency_charge_via_stream(
         self, payload: bytes, label: str,
     ) -> bool:
-        """Send E2E command on the persistent stream socket.
+        """Send E2E command via one-shot UDP — no shared session.
 
-        Ensures the stream session exists (creates if needed) and sends the
-        command through it, avoiding the second-socket conflict entirely.
+        Opens a throwaway socket, sends the emergency-charge command as
+        **this** device's identity (own ``sender_end_id``/``chat_secret``),
+        reads one response, closes.  No ``Alive(home)`` → no relay collision
+        with the other device.
 
         Returns True if relay acknowledged, False otherwise.
         """
         try:
-            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
-            if not entry_data:
+            client = self._ensure_client()
+            own_creds = client.get_e2e_credentials(
+                self.home_id, self._device_id, self._model,
+            )
+            resp = send_command_oneshot(
+                own_creds, 0x01, payload,
+            )
+            if resp is None:
+                _LOGGER.debug(
+                    "[EmergencyCharge] %s oneshot: timeout / no response "
+                    "device=%s",
+                    label, self._device_id,
+                )
                 return False
-            for item in entry_data.get("devices", [entry_data]):
-                if item.get("power") is self:
-                    rt = item.get("realtime")
-                    if rt is None:
-                        return False
-                    session = rt._ensure_session()  # noqa: SLF001
-                    client = self._ensure_client()
-                    own_creds = client.get_e2e_credentials(
-                        self.home_id, self._device_id, self._model,
-                    )
-                    resp = session.send_command_for_creds(0x01, payload, own_creds)
-                    if resp is None:
-                        _LOGGER.debug(
-                            "[EmergencyCharge] %s stream cmd: timeout / no response "
-                            "device=%s is_primary=%s",
-                            label, self._device_id, getattr(rt, "_is_primary", True),
-                        )
-                        return False
-                    if b"CONN_NOT_ESTABLISHED" in resp:
-                        _LOGGER.debug(
-                            "[EmergencyCharge] %s stream cmd: CONN_NOT_ESTABLISHED "
-                            "device=%s is_primary=%s",
-                            label, self._device_id, getattr(rt, "_is_primary", True),
-                        )
-                        return False
-                    _LOGGER.debug(
-                        "[EmergencyCharge] %s stream cmd: OK resp_len=%s "
-                        "device=%s is_primary=%s",
-                        label, len(resp), self._device_id,
-                        getattr(rt, "_is_primary", True),
-                    )
-                    return True
+            if b"CONN_NOT_ESTABLISHED" in resp:
+                _LOGGER.debug(
+                    "[EmergencyCharge] %s oneshot: CONN_NOT_ESTABLISHED "
+                    "device=%s",
+                    label, self._device_id,
+                )
+                return False
+            _LOGGER.debug(
+                "[EmergencyCharge] %s oneshot: OK resp_len=%s "
+                "device=%s",
+                label, len(resp), self._device_id,
+            )
+            return True
         except Exception:
             _LOGGER.debug(
-                "[EmergencyCharge] %s stream cmd: exception", label, exc_info=True,
+                "[EmergencyCharge] %s oneshot: exception", label, exc_info=True,
             )
         return False
 
@@ -1090,31 +1085,32 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         low_marker: int = DEFAULT_MARKER_LOW,
         battery_range_override: bool = False,
     ) -> bool:
-        """Send override slots on persistent session socket (type 0x1A).
+        """Send override slots via one-shot UDP — no shared session.
 
-        Uses the existing E2E session instead of opening a competing one-shot
-        UDP socket, avoiding the ``Alive(home)`` collision that caused the
-        relay to reject commands with ``CONN_NOT_ESTABLISHED``.
+        Opens a throwaway socket, sends the override packet as **this**
+        device's identity (its own ``sender_end_id``/``chat_secret``),
+        reads one response, closes.  No ``Alive(home)`` → no relay collision
+        with the other device.
 
-        Returns True if the relay acknowledged the override, False otherwise.
+        Returns True if relay acknowledged, False otherwise.
         """
         try:
-            session = self._ensure_session()
             client = self._parent._ensure_client()
             own_creds = client.get_e2e_credentials(
                 self._parent.home_id,
                 self._parent._device_id,  # noqa: SLF001
                 self._parent._model,  # noqa: SLF001
             )
-            payload = build_override_payload(
-                high_marker=high_marker, low_marker=low_marker,
+            resp = send_override_oneshot(
+                own_creds,
+                slot_values,
+                high_marker=high_marker,
+                low_marker=low_marker,
                 battery_range_override=battery_range_override,
-                slot_values=slot_values,
             )
-            resp = session.send_command_for_creds(0x1A, payload, own_creds)
             if resp is None:
                 _LOGGER.debug(
-                    "[Override] stream cmd: timeout/no-response "
+                    "[Override] oneshot: timeout/no-response "
                     "device=%s is_primary=%s",
                     self._parent._device_id, self._is_primary,
                 )
@@ -1124,7 +1120,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 return False
             if b"CONN_NOT_ESTABLISHED" in resp:
                 _LOGGER.debug(
-                    "[Override] stream cmd: CONN_NOT_ESTABLISHED "
+                    "[Override] oneshot: CONN_NOT_ESTABLISHED "
                     "device=%s is_primary=%s",
                     self._parent._device_id, self._is_primary,
                 )
@@ -1133,7 +1129,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 }
                 return False
             _LOGGER.debug(
-                "[Override] stream cmd: OK resp_len=%s "
+                "[Override] oneshot: OK resp_len=%s "
                 "device=%s is_primary=%s",
                 len(resp), self._parent._device_id, self._is_primary,
             )
@@ -1143,7 +1139,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return True
         except Exception:
             _LOGGER.debug(
-                "[Override] stream cmd: exception device=%s",
+                "[Override] oneshot: exception device=%s",
                 self._parent._device_id, exc_info=True,
             )
             self.stats_override_last_result = {
