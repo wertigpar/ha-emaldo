@@ -261,6 +261,7 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        slots = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -324,6 +325,21 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
             if attempt < 2:
                 time.sleep(1)
         _LOGGER.error("Failed to set override after 3 attempts: %s", last_err)
+        # Legacy one-shot fallback (#47 Option C)
+        if slots is not None:
+            try:
+                fb_coord, fb_client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )
+                if fb_client.set_override(
+                    fb_coord.home_id, fb_coord._device_id, fb_coord._model,
+                    bytes(slots), high_marker=high, low_marker=low,
+                    battery_range_override=bro,
+                ):
+                    _LOGGER.info("Override set via legacy one-shot fallback")
+                    return True
+            except Exception:
+                _LOGGER.debug("Legacy one-shot fallback also failed")
         return False
 
     await hass.async_add_executor_job(_do_override)
@@ -424,6 +440,20 @@ async def async_handle_apply_bulk_schedule(
         _LOGGER.error(
             "Failed to apply bulk override after 3 attempts: %s", last_err
         )
+        # Legacy one-shot fallback (#47 Option C)
+        try:
+            fb_coord, fb_client = _get_coordinator_and_client(
+                hass, coordinator_key="schedule", device_id=device_id,
+            )
+            if fb_client.set_override(
+                fb_coord.home_id, fb_coord._device_id, fb_coord._model,
+                bytes(slot_values), high_marker=high, low_marker=low,
+                battery_range_override=bro,
+            ):
+                _LOGGER.info("Bulk override applied via legacy one-shot fallback")
+                return True
+        except Exception:
+            _LOGGER.debug("Legacy one-shot fallback also failed")
         return False
 
     await hass.async_add_executor_job(_do_bulk)
@@ -468,6 +498,7 @@ async def async_handle_reset_to_internal(
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        slots = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -566,6 +597,22 @@ async def async_handle_reset_to_internal(
             if attempt < 2:
                 time.sleep(1)
         _LOGGER.error("Failed to reset overrides after 3 attempts: %s", last_err)
+        # Legacy one-shot fallback (#47 Option C)
+        if reset_all or slots is not None:
+            slot_bytes = bytes([SLOT_NO_OVERRIDE] * 96) if reset_all else bytes(slots)
+            try:
+                fb_coord, fb_client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )
+                if fb_client.set_override(
+                    fb_coord.home_id, fb_coord._device_id, fb_coord._model,
+                    slot_bytes, high_marker=high, low_marker=low,
+                    battery_range_override=bro,
+                ):
+                    _LOGGER.info("Overrides reset via legacy one-shot fallback")
+                    return True
+            except Exception:
+                _LOGGER.debug("Legacy one-shot fallback also failed")
         return False
 
     await hass.async_add_executor_job(_do_reset)

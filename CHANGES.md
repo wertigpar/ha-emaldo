@@ -1,5 +1,41 @@
 # Changes
 
+## v1.0.0-beta16h-C2
+
+### Changed (#47 Option C — follow-up)
+- **Override legacy one-shot fallback in all 4 service paths**
+  (set_slot_range, apply_bulk_schedule, reset_to_internal reset-all +
+  partial). After 3 failed stream attempts, falls back to
+  `client.set_override(...)` on a fresh socket — mirrors the working
+  emergency-charge pattern. Fixes override loss during 21204 windows
+  (beta16h-C log: 5 "Failed to set/reset override after 3 attempts").
+- **Added [OptC-diag] coordination diagnostics** (primary election,
+  `_creds_provider` primary publish / secondary override, secondary
+  home_secrets-empty) to investigate why home-secret coordination
+  isn't stopping the dual-unit 21204 storm.
+
+### Test aim
+In two-unit setup (single-unit baseline confirmed clean), capture
+`[OptC-diag]` log output to determine why home-secret coordination
+doesn't engage during the 21204 storm. Key diagnostics:
+- `[OptC-diag]_creds_provider primary: published home_secret` (primary)
+- `[OptC-diag]_creds_provider secondary: overriding` or `no home_secrets` (secondary)
+- `[OptC-diag] Secondary ... using primary-managed home secret` or `empty` (secondary `_ensure_session`)
+- `[OptC-diag] primary_election` (both units, once per startup)
+
+### Next steps depending on result
+- **If primary publishes + secondary overrides but 21204 continues**:
+  root cause is elsewhere (e.g. session short-circuit, stale device
+  session). Extend diagnostics.
+- **If primary publishes + secondary logs `no home_secrets`**:
+  shared `_home_secrets` dict not populated before secondary session
+  creation → race condition or `_creds_provider` not firing. Fix timing.
+- **If primary never publishes**: `_creds_provider` not called on
+  primary → stale `_participant_session` or `_creds_provider` closure
+  captured wrong client. Fix call path.
+- **If storm stops**: remove all `[OptC-diag]` logs, clean up, ship
+  final.
+
 ## v1.0.0-beta16g
 
 ### Changed

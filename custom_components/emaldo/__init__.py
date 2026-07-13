@@ -137,6 +137,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             _ptracker.setdefault(home_id, device["id"])
             is_primary = _ptracker[home_id] == device["id"]
+            _LOGGER.debug(
+                "[OptC-diag] primary_election: home=%s elected_primary=%s "
+                "this_device=%s is_primary=%s",
+                home_id, _ptracker[home_id], device["id"], is_primary,
+            )
             realtime = EmaldoRealtimeCoordinator(hass, entry, power, is_primary=is_primary)
             setattr(realtime, "_legacy_uid_mode", getattr(power, "_legacy_uid_mode", False))
             _LOGGER.info(
