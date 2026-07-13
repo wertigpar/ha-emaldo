@@ -41,6 +41,49 @@ both devices → ~equal & high (>50% single-attempt).
   (the relay may expect the home-level session key). Switch in both
   ``send_command_for_creds`` and ``_read_power_flow_locked``.
 
+## v1.0.0-beta16h-C
+
+### Changed (Option C — per-device E2E sessions + home-secret coordination)
+
+- **Architecture: single shared E2E session → per-device sessions (#47).**
+  Three previous command-path fixes all failed because the relay binds its TCP
+  socket to ONE device after ``Alive(home)``+``Alive(device)`` handshake. A
+  second device cannot send commands through that socket, even with wire-credential
+  merging (beta16g) or a fresh one-shot socket (beta16f, beta16h-A).
+  **Fix:** each device now creates its own ``PersistentE2ESession``, established
+  as itself via its own ``Alive(home)``+``Alive(device)``+``Wake``+``Heartbeat``
+  handshake sequence. The primary device publishes the current ``home_end_secret``
+  to a shared ``hass.data[DATA]`` dict; secondary devices override their REST-fetched
+  home secret with the primary's published value, preventing the 21204 ping-pong
+  that occurred when two devices independently rotated the shared home secret.
+
+- **Deterministic per-home primary election.** Previously ``is_primary = i == 0``
+  assumed the first device in the config entry's device list was always primary.
+  With multiple config entries sharing one home_id, each entry's first device became
+  primary — producing two primaries for the same home.
+  **Fix:** the first ``device_id`` registered per ``home_id`` (across all config entries)
+  wins, using a persistent ``hass.data[DOMAIN]["home_primaries"]`` tracker.
+
+- **Emergency charge: removed secondary-device restriction.** The legacy standalone
+  fallback (standalone E2E socket) was blocked for secondary devices to avoid
+  ``Alive(home)`` collision with the old shared session. With per-device sessions,
+  each device owns its E2E socket — both stream path and legacy fallback are safe
+  for any device.
+
+- **Stream power-flow read simplified.** Primary and secondary no longer use
+  different ``read_power_flow`` paths; both call ``session.read_power_flow()``
+  on their own per-device session.
+
+### Test aim
+Confirm both devices can send overrides and emergency-charge commands through their
+own E2E sessions without ``CONN_NOT_ESTABLISHED``. Expected: both devices achieve
+high (>90%) single-attempt command delivery; no 21204 storm.
+
+### Next steps depending on result
+- **If both devices reliable → land beta16h-C.** Version ``1.0.0-beta16h-C``.
+- **If 21204 returns → check home_secret coordination** (primary publish vs secondary
+  override not working correctly in ``_creds_provider`` or ``_ensure_session``).
+
 ## v1.0.0-beta16f
 
 ### Fixed
