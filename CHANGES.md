@@ -1,5 +1,46 @@
 # Changes
 
+## v1.0.0-beta16g
+
+### Changed
+- **Switch write verification + retry + warning (#51 via #52 by
+  leifkristianssonl):** ``EmaldoThirdPartyPVSwitch``, ``EmaldoSellBackToGridSwitch``,
+  ``EmaldoSellLimitSwitch``, and ``EmaldoManualSellSwitch`` previously performed
+  one write attempt with no read-back verification. A stale session could return
+  a "success" response while the relay actually rejected the command, leaving
+  the switch state out of sync with the device.
+  **Fix:** ``_write`` now retries once on ``EmaldoAuthError`` and logs a warning
+  on failure. The coordinator's ``async_request_refresh()`` reads back the
+  applied state so the UI reflects reality.
+- **Cross-device E2E packet construction for shared home session (#47, Candidate
+  A):** when a secondary device sends a command or power-flow read via the
+  single shared ``PersistentE2ESession``, the relay binds the TCP socket to
+  the **handshake device** (the one that established the session). Sending
+  packets with the secondary device's ``sender_end_id``/``chat_secret`` causes
+  the relay to reject with 21204 / ``CONN_NOT_ESTABLISHED``.
+  **Fix:** ``send_command_for_creds`` and ``_read_power_flow_locked`` now merge
+  the **session owner's** ``sender_end_id``/``sender_group_id``/``chat_secret``
+  into the wire credentials when the target device differs from the owner. The
+  target device is still addressed via ``recipient_end_id``/``recipient_group_id``.
+  Decryption uses the owner's ``chat_secret`` first, then falls back to
+  ``home_chat_secret`` (unchanged).
+
+### Test aim
+Confirm the 21204 storm stops and secondary override delivery reaches ~equal
+success rate as the primary. Expected: 21204 rate → ~0; override delivery for
+both devices → ~equal & high (>50% single-attempt).
+
+### Next steps depending on result
+- **If 21204 stops + override works for both → success.** Land ``beta16g``.
+  If congestion remains → add ``_send_override_with_fallback`` (override
+  verification + one-shot standalone retry, reusing PR #52's verify pattern).
+  If emergency-charge ON/OFF still has asymmetry → evaluate secondary's
+  ``_send_override_via_stream`` for emergency charge.
+- **If 21204 continues (relay rejects owner-wire creds) → Candidate B:**
+  encrypt with ``home_chat_secret`` instead of owner device ``chat_secret``
+  (the relay may expect the home-level session key). Switch in both
+  ``send_command_for_creds`` and ``_read_power_flow_locked``.
+
 ## v1.0.0-beta16f
 
 ### Fixed

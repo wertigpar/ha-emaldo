@@ -3488,6 +3488,14 @@ class PersistentE2ESession:
         on 21204 (only the primary device re-handshakes).
         """
         actual_creds = creds if creds is not None else self._creds
+        # Cross-device read over a shared session: present as session owner
+        # on the wire (relay binds socket to handshake device), keep target
+        # recipient for routing (#47).
+        if creds is not None and self._creds is not None and creds.get("sender_end_id") != self._creds.get("sender_end_id"):
+            actual_creds = dict(creds)
+            actual_creds["sender_end_id"] = self._creds["sender_end_id"]
+            actual_creds["sender_group_id"] = self._creds["sender_group_id"]
+            actual_creds["chat_secret"] = self._creds["chat_secret"]
         is_own_creds = creds is None
         self._last_power_flow_diag = {
             "initial_timeout": 0,
@@ -4611,8 +4619,17 @@ class PersistentE2ESession:
         with self._lock:
             if self._sock is None or self._closed:
                 raise EmaldoE2EError("Session is not connected")
+            # On a shared home session the relay binds the socket to the
+            # handshake device. Cross-device commands must use the session
+            # owner's sender fields + chat_secret for the relay to accept;
+            # the target device is addressed via recipient_end_id (#47).
+            wire_creds = dict(target_creds)
+            if self._creds is not None and target_creds.get("sender_end_id") != self._creds.get("sender_end_id"):
+                wire_creds["sender_end_id"] = self._creds["sender_end_id"]
+                wire_creds["sender_group_id"] = self._creds["sender_group_id"]
+                wire_creds["chat_secret"] = self._creds["chat_secret"]
             pkt = build_subscription_packet(
-                target_creds, msg_type, self._session_nonce, payload=payload,
+                wire_creds, msg_type, self._session_nonce, payload=payload,
             )
             return self._send_raw(pkt, f"Command(0x{msg_type:02x})")
 
