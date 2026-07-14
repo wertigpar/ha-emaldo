@@ -922,13 +922,32 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         binding = (home_id, device_id, model)
 
         creds = client.get_e2e_credentials(
-            home_id, device_id, model, force_refresh=self._needs_fresh_creds
+            home_id, device_id, model, force_refresh=self._needs_fresh_creds,
+            allow_home_refresh=self._is_primary,
         )
         if self._needs_fresh_creds:
             _LOGGER.info(
                 "E2E session rebuild after failure — forced fresh credentials"
             )
         self._needs_fresh_creds = False
+
+        # Primary publishes home secret proactively at session creation,
+        # so the shared dict is populated before secondary's _ensure_session
+        # runs (#47 Phase 4).
+        if self._is_primary:
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                "_home_secrets", {}
+            )[home_id] = {
+                "home_end_secret": creds.get("home_end_secret", ""),
+                "home_chat_secret": creds.get("home_chat_secret", ""),
+            }
+            _LOGGER.debug(
+                "[OptC-diag] Primary %s: published home_secret at "
+                "session creation — end=%s... home=%s",
+                device_id,
+                (creds.get("home_end_secret", "") or "")[:8],
+                home_id,
+            )
 
         # For secondary: override home secret from primary-managed shared dict
         if not self._is_primary:
@@ -965,11 +984,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             try:
                 new_creds = self._parent._ensure_client().get_e2e_credentials(
                     home_id, device_id, model, force_refresh=force_refresh,
+                    allow_home_refresh=self._is_primary,
                 )
             except EmaldoAuthError:
                 self._parent._reset_client()
                 new_creds = self._parent._ensure_client().get_e2e_credentials(
                     home_id, device_id, model, force_refresh=True,
+                    allow_home_refresh=self._is_primary,
                 )
             # Primary publishes home secret to shared dict after each refresh
             if self._is_primary:
