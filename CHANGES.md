@@ -1,5 +1,39 @@
 # Changes
 
+## v1.0.0-beta16h-C3
+
+### Changed (#47 Phase 4 — secondary must never rotate home secret)
+
+- **Root cause identified:** 21204 storm persists because BOTH devices
+  independently escalate to ``force_home_refresh=True`` (per-device generation
+  counters in ``client.py`` escalation). Each rotation desyncs the other →
+  permanent ping-pong. The OptC coordination failed because (a) primary
+  published only inside ``_creds_provider`` (reactive, ~90s late at startup),
+  and (b) the secondary itself kept rotating via its own escalation, defeating
+  the override.
+- **Fix 1 — primary publishes proactively at session creation:**
+  ``_ensure_session`` now publishes ``home_end_secret``/``home_chat_secret``
+  to the shared ``_home_secrets`` dict immediately after fetching credentials
+  (not only in ``_creds_provider``). The dict is populated before the
+  secondary's ``_ensure_session`` runs (~164ms later), so the secondary has
+  the correct value from the start.
+- **Fix 2 — secondary never rotates the shared home secret:**
+  Added ``allow_home_refresh`` parameter to ``get_e2e_credentials`` /
+  ``_get_e2e_credentials``. Secondary passes ``allow_home_refresh=False``,
+  forcing ``_do_home_refresh = _do_home_refresh AND allow_home_refresh``.
+  Only the primary can escalate to ``force_home_refresh=True``; the secondary
+  always reuses the primary's published value.
+- **Files changed:** ``coordinator.py`` (proactive publish + pass-through
+  ``allow_home_refresh``), ``client.py`` (new parameter + escalation guard).
+
+### Test aim
+In two-unit setup, expect: 21204 → ~0; primary publishes once at startup
++ on genuine TTL expiry only; no ``force_home_refresh`` ever fires from
+secondary; override delivery same as single-unit. Monitor ``[OptC-diag]``
+logs for ``primary: published home_secret at session creation`` (startup),
+``_creds_provider secondary: overriding``, and absence of ``home_secrets
+dict empty`` on secondary startup.
+
 ## v1.0.0-beta16h-C2
 
 ### Changed (#47 Option C — follow-up)

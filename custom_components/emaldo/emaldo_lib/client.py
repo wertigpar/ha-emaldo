@@ -980,6 +980,7 @@ class EmaldoClient:
         model: str,
         *,
         force_refresh: bool = False,
+        allow_home_refresh: bool = True,
     ) -> dict:
         """Public accessor for the shared, cached E2E credentials.
 
@@ -990,9 +991,14 @@ class EmaldoClient:
         one cached credential generation keeps a single ``chat_secret`` valid
         for all consumers (refreshed only on the TTL or an explicit
         ``force_refresh`` after a confirmed session expiry).
+
+        If *allow_home_refresh* is ``False`` (secondary device), the escalation
+        to ``force_home_refresh=True`` is suppressed — the secondary must never
+        rotate the shared home secret independently (#47 Phase 4).
         """
         return self._get_e2e_credentials(
-            home_id, device_id, model, force_refresh=force_refresh
+            home_id, device_id, model,
+            force_refresh=force_refresh, allow_home_refresh=allow_home_refresh,
         )
 
     def _get_e2e_credentials(
@@ -1002,6 +1008,7 @@ class EmaldoClient:
         model: str,
         *,
         force_refresh: bool = False,
+        allow_home_refresh: bool = True,
     ) -> dict:
         """Return cached E2E credentials, refreshing them when needed."""
         now = time.monotonic()
@@ -1032,11 +1039,16 @@ class EmaldoClient:
                 # will keep returning a chat_secret the relay rejects (21204).
                 # After N consecutive urgent refreshes, escalate to home-level
                 # so this device can re-join the home.
+                #
+                # allow_home_refresh=False (secondary device, #47 Phase 4):
+                # the secondary must never rotate the shared home secret
+                # independently — it always uses the primary's published value.
                 _do_home_refresh = (
                     force_refresh
                     and entry is not None
                     and entry.generation >= 3
                     and (now - entry.created_at) < 60
+                    and allow_home_refresh
                 )
                 creds = self.e2e_login(
                     home_id, device_id, model,
