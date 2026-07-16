@@ -261,6 +261,7 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        last_reason = None
         slots = None
         for attempt in range(3):
             try:
@@ -304,8 +305,12 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                     return True
                 # Transient relay/device rejection (e.g. status 21204) — reset
                 # the session and retry.
+                last_reason = rt.stats_override_last_result.get(
+                    "failure_reason"
+                )
                 _LOGGER.debug(
-                    "Override not applied (attempt %d/3), retrying", attempt + 1
+                    "Override not applied (attempt %d/3, reason=%s), retrying",
+                    attempt + 1, last_reason,
                 )
                 coord._reset_client()
             except EmaldoAuthError as err:
@@ -324,7 +329,11 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 coord._reset_client()
             if attempt < 2:
                 time.sleep(1)
-        _LOGGER.error("Failed to set override after 3 attempts: %s", last_err)
+        _LOGGER.error(
+            "Failed to set override after 3 attempts: %s%s",
+            last_err,
+            f" (reason={last_reason})" if last_err is None else "",
+        )
         # Legacy one-shot fallback (#47 Option C)
         if slots is not None:
             try:
@@ -377,6 +386,7 @@ async def async_handle_apply_bulk_schedule(
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        last_reason = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -416,9 +426,13 @@ async def async_handle_apply_bulk_schedule(
                     return True
                 # Transient relay/device rejection (e.g. status 21204) — reset
                 # the session and retry.
+                last_reason = rt.stats_override_last_result.get(
+                    "failure_reason"
+                )
                 _LOGGER.debug(
-                    "Bulk override not applied (attempt %d/3), retrying",
-                    attempt + 1
+                    "Bulk override not applied (attempt %d/3, reason=%s), "
+                    "retrying",
+                    attempt + 1, last_reason,
                 )
                 coord._reset_client()
             except EmaldoAuthError as err:
@@ -438,7 +452,9 @@ async def async_handle_apply_bulk_schedule(
             if attempt < 2:
                 time.sleep(1)
         _LOGGER.error(
-            "Failed to apply bulk override after 3 attempts: %s", last_err
+            "Failed to apply bulk override after 3 attempts: %s%s",
+            last_err,
+            f" (reason={last_reason})" if last_err is None else "",
         )
         # Legacy one-shot fallback (#47 Option C)
         try:
@@ -498,6 +514,7 @@ async def async_handle_reset_to_internal(
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        last_reason = None
         slots = None
         for attempt in range(3):
             try:
@@ -537,9 +554,13 @@ async def async_handle_reset_to_internal(
                     ):
                         _LOGGER.info("All overrides reset to internal")
                         return True
+                    last_reason = rt.stats_override_last_result.get(
+                        "failure_reason"
+                    )
                     _LOGGER.debug(
-                        "Reset-all not applied (attempt %d/3), retrying",
-                        attempt + 1
+                        "Reset-all not applied (attempt %d/3, reason=%s), "
+                        "retrying",
+                        attempt + 1, last_reason,
                     )
                     coord._reset_client()
                 else:
@@ -575,9 +596,13 @@ async def async_handle_reset_to_internal(
                             "Overrides reset: slots %d-%d", start_slot, end_slot
                         )
                         return True
+                    last_reason = rt.stats_override_last_result.get(
+                        "failure_reason"
+                    )
                     _LOGGER.debug(
-                        "Partial reset not applied (attempt %d/3), retrying",
-                        attempt + 1
+                        "Partial reset not applied (attempt %d/3, reason=%s), "
+                        "retrying",
+                        attempt + 1, last_reason,
                     )
                     coord._reset_client()
             except EmaldoAuthError as err:
@@ -596,7 +621,11 @@ async def async_handle_reset_to_internal(
                 coord._reset_client()
             if attempt < 2:
                 time.sleep(1)
-        _LOGGER.error("Failed to reset overrides after 3 attempts: %s", last_err)
+        _LOGGER.error(
+            "Failed to reset overrides after 3 attempts: %s%s",
+            last_err,
+            f" (reason={last_reason})" if last_err is None else "",
+        )
         # Legacy one-shot fallback (#47 Option C)
         if reset_all or slots is not None:
             slot_bytes = bytes([SLOT_NO_OVERRIDE] * 96) if reset_all else bytes(slots)

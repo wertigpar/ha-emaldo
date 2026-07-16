@@ -1,5 +1,77 @@
 # Changes
 
+## v1.0.0-beta16h-C4
+
+### Fixed
+
+- **Override (set_slot_range / apply_bulk_schedule / reset_to_internal)
+  CONN_NOT_ESTABLISHED after periodic relay 21204 (#47 C4):** the override
+  session path (`_send_override_via_stream`) silently returned False on
+  timeout/CONN_NOT_ESTABLISHED without invalidating the dead session. The
+  3-attempt retry loop called `coord._reset_client()` (REST client) but the
+  realtime coordinator's cached session was never invalidated — every retry
+  reused the same relay-dead socket. After 3 failures the legacy one-shot
+  fallback succeeded (non-fatal), but the 3-attempt failure cascade added
+  ~3s latency to every override that hit the ~2-3s relay-expiry window.
+  **Fix:** on CONN_NOT_ESTABLISHED or timeout, `_send_override_via_stream`
+  now calls `session.close()`, `_pop_device_session()`,
+  `_invalidate_session_ref()`, and sets `_needs_fresh_creds = True` so the
+  next retry builds a fresh session with fresh credentials. The retry loop's
+  `coord._reset_client()` is then redundant for the E2E case (but harmless).
+- **Files changed:** `coordinator.py` (override session invalidation).
+- **`stream_reconnect_reasons` diagnostic mismatch vs `stream_reconnects`
+  counter (#47 beta16h-C4 diagnostics):** two layered bugs made the sensor
+  look contradictory. (1) The reasons dict incremented only inside
+  `_stream_flag_reconnect` when `not self._stream_needs_reconnect`, but the
+  reconnect counter increments on every actual rebuild in
+  `_stream_reconnect_locked`. While a reconnect retries with the flag already
+  set, the counter climbs but the reason is never re-recorded — so the sensor
+  showed e.g. `stream_reconnects: 60` with `stream_reconnect_reasons:
+  {session_expired_21204: 2}`, making a healthy stream look like a 2-reason
+  storm. The 128 MB field log confirmed the real reason was 21204 on 7708 of
+  9347 diagnostic lines. (2) The sensor compared two different scopes:
+  `stream_reconnects` is a **coordinator-cumulative** total
+  (`stats_stream_reconnects_total`, rolled up across session recreations in
+  `_accumulate_stream_stats`), while `stream_reconnect_reasons` was read from
+  the **per-session** `stream_diagnostics()` dict, which resets to `{}` on
+  every session teardown — so even after fix (1) the live session showed
+  `stream_reconnects: 29` with `stream_reconnect_reasons: {}`.
+  **Fix:** (a) `_stream_flag_reconnect` now always records
+  `_stream_last_reconnect_reason`; the per-rebuild reason count is incremented
+  in `_stream_reconnect_locked` next to the reconnect counter, so the per-session
+  dict tracks rebuilds 1:1. (b) The coordinator now accumulates the reason
+  breakdown **cumulatively** (`_merge_stream_reasons` + flush at
+  `_invalidate_session_ref` teardown), mirroring `_accumulate_stream_stats`, and
+  the sensor reads the cumulative `stats_stream_reconnect_reasons` /
+  `stats_stream_last_reconnect_reason`. The two now share scope and stay in
+  lockstep. No reconnect/backoff/credential behavior change.
+- **Files changed:** `emaldo_lib/e2e.py` (`_stream_flag_reconnect`,
+  `_stream_reconnect_locked`), `coordinator.py` (`_merge_stream_reasons`,
+  `_invalidate_session_ref`, `_accumulate_stream_stats`), `sensor.py`
+  (cumulative stream reconnect-reason attributes).
+
+- **`e2e_rtt_*` diagnostic stayed `null` / 0 in stream mode (#47 beta16h-C4
+  RTT gap):** the session measures UDP RTT on every `_send_raw` exchange
+  (handshake/keepalive/command) and stores it in `_last_rtt_ms`, but the
+  coordinator's RTT-sampling block lived only in the **legacy** (non-stream)
+  read path. In stream mode `_read_power_flow_primary` returns the cached
+  frame *before* reaching that block, so `stats_e2e_rtt_samples` never
+  incremented and the sensor showed `e2e_rtt_last_ms: null`,
+  `e2e_rtt_samples: 0` — even though the log contained 52 `rtt=` lines proving
+  RTT was being measured. The same early return also left the legacy
+  `powerflow_drain_*` / `powerflow_initial_*` accumulators at 0 in stream mode
+  (those are covered by `stream_diagnostics()` so no data is actually lost).
+  **Fix:** extracted `_sample_session_rtt(session)` and call it in **both**
+  paths (stream branch + legacy branch). Purely diagnostic — copies an
+  already-computed value, sends no packets, no protocol/timing change.
+- **Files changed:** `coordinator.py` (`_sample_session_rtt`, stream + legacy
+  RTT sampling in `_read_power_flow_primary`).
+
+### Changed
+
+- **Decrypt diagnostic relabeled `DECRYPTED-BUT-REJECTED` → `DECRYPTED non-data push` (#41 logging clarity):** the rate-limited debug line fired whenever AES decrypted a packet but the payload was not a power-flow/battery frame. Most such packets are relay status/control JSON (e.g. `{"__time":...,"domain":"eu_x_02"}`, `cmd not allowed`) delivered on the same socket — they are *handled* (decrypted + identified) and ignored, not *rejected* as errors. The old label sounded like a failure to anyone without full context. The sample payload is now classified: printable ASCII/JSON → `text/status push: '<preview>'`; otherwise → `binary (not power-flow/battery)`. No behavior change — purely diagnostic wording.
+- **Files changed:** `emaldo_lib/e2e.py` (`decrypt_response` diagnostic + `_classify_decrypted_payload` helper).
+
 ## v1.0.0-beta16h-C3
 
 ### Changed (#47 Phase 4 — secondary must never rotate home secret)
