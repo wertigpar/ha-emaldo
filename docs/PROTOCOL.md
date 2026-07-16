@@ -182,36 +182,50 @@ reset the session timer.
 
 Recommended keepalive interval: **≤10 seconds** between sends.
 
-After session expiry, do **not** attempt to reconnect immediately. Wait for the
-relay reject window (~30 s) to pass before starting a new handshake.
+After session expiry, the integration applies an **adaptive backoff**
+(`RECONNECT_BACKOFF_SECONDS`, ≈2 s base, escalated on repeated failures) before
+re-handshaking on the same socket, rather than waiting out the full reject
+window. It first retries with the current credentials (UDP-only), and only
+refreshes cloud credentials if the re-handshake still returns non-`ok`.
 
 ### 5.3 Persistent Session Polling
 
 For real-time monitoring, opening a fresh socket and running the full handshake
-on every read is too expensive. `PersistentE2ESession` (in `emaldo/e2e.py`)
+on every read is too expensive. `PersistentE2ESession` (in `emaldo_lib/e2e.py`)
 performs the handshake **once**, keeps a single UDP socket open, and re-uses it
 for each subsequent read (e.g. `0x30` power flow), completing in one
 request/response round trip.
 
-When polling a single long-lived socket, the relay drops the session after
-roughly **10 seconds** of inactivity (versus the ~30 s TTL for the full
-handshake flow). To keep the socket alive, send a keepalive (a fresh
-`alive(home) + alive(device) + heartbeat`) every **~7 seconds** from a
-background thread/task (`DEFAULT_KEEPALIVE_INTERVAL = 7`).
+**Per-device sessions (#47 Option C / beta16h-C3):** each device on a home
+creates its *own* `PersistentE2ESession` (its own socket, its own stream
+thread) and establishes it as itself via its own
+`Alive(home)+Alive(device)+Wake+Heartbeat`. The relay pushes frames for *all*
+home devices to every open socket, so each session also receives the other
+device's frames — but it only decrypts its own device's frames (the others
+fail decryption and are classified as status/control pushes). This avoids the
+relay `Alive(home)` collision that occurred with a single shared session.
+
+To keep the socket alive, send a keepalive (a fresh
+`alive(home) + alive(device) + heartbeat`) every **~7 seconds** from the
+session's background stream thread (`DEFAULT_KEEPALIVE_INTERVAL = 7`).
 
 **21204 recovery (in place):** if a read or keepalive observes a `21204`
 (session expired), the session re-handshakes on the **same** socket. Because the
-relay rejects re-handshakes made immediately after expiry, it waits
-`RECONNECT_BACKOFF_SECONDS` (≈2 s) before rebuilding. The keepalive path stays
-non-blocking and never sleeps/re-handshakes itself — it returns `False` on
-21204 so the caller tears the dead session down and the next `read_power_flow`
-rebuilds it.
+relay rejects re-handshakes made immediately after expiry, it applies an
+adaptive backoff (`RECONNECT_BACKOFF_SECONDS`, ≈2 s base, escalated on
+repeated failures) before rebuilding. On a 21204 the session first tries a
+re-handshake with the *current* credentials (UDP-only, no cloud call); only if
+that still returns non-`ok` does it refresh credentials and retry. A successful
+reconnect clears the escalation streak.
 
 **Diagnostics:** a live session exposes `last_rtt_ms` (last UDP round-trip),
 `last_keepalive_failure_reason`, and `last_power_flow_diag` (per-read counters:
 initial timeout / session-expired / non-matching, plus drained-packet counts).
+It also tracks `stream_reconnects` / `stream_reconnect_reasons` (cumulative
+reconnect-cause breakdown) surfaced via the "Realtime connection" diagnostic
+sensor.
 
-### 5.4 Multi-Device Session Management (#47)
+### 5.4 Multi-Device Session Management (#47 — per-device sessions + home-secret coordination)
 
 **Problem:** ``/home/e2e-login/`` rotates the shared ``home_end_secret``
 server-side on every call. When two devices on the same account both need fresh
@@ -220,8 +234,21 @@ live session receives a ``force-logout`` from the relay → Device B calls
 ``/home/e2e-login/`` to recover → secret rotates back → Device A gets
 ``force-logout`` → infinite ping-pong (mutual 21204 storm).
 
-**Per-home serialization lock:** ``EmaldoClient._get_home_e2e()`` serializes
-concurrent ``/home/e2e-login/`` calls per ``home_id`` using a
+**Per-device sessions (Option C / beta16h-C3):** each device owns its own
+``PersistentE2ESession`` and its own socket, so there is no shared-session
+``Alive(home)`` collision. The remaining risk is the home-secret rotation
+ping-pong, addressed by the coordination below.
+
+**Primary publishes, secondary never rotates:** only the **primary** device
+(per-home deterministic election across all config entries sharing a home_id)
+publishes ``home_end_secret`` / ``home_chat_secret`` to a shared dict at
+session creation. Secondary devices override their REST-fetched home secret
+with the primary's published value and pass ``allow_home_refresh=False``, so
+they can **never** escalate to ``force_home_refresh=True``. Only the primary can
+rotate the shared home secret; the secondary always reuses the primary's value.
+
+**Per-home serialization lock:** ``EmaldoClient._get_home_e2e()`` still
+serializes concurrent ``/home/e2e-login/`` calls per ``home_id`` using a
 ``threading.Lock``. A 5-second grace window (``_home_e2e_cache`` age < 5 s)
 reuses cached credentials when ``force_refresh`` is requested, preventing
 back-to-back rotations when two devices escalate simultaneously. The home login
@@ -571,7 +598,7 @@ Hardcoded in APK, extracted via `emaldo/extract_keys.py`:
 
 ## 14. Implementation Notes
 
-- **Credential freshness**: Always call `e2e_login()` fresh; never re-use cached E2E credentials from a previous session. The relay validates credentials and returns 212B if they are stale.
+- **Credential freshness**: Per-device `e2e_login()` results are cached for **10 minutes** and reused across reads/reconnects (the relay validates credentials and returns 21204/`CONN_NOT_ESTABLISHED` if they are genuinely stale). A 21204 triggers an in-place re-handshake with current creds first; cloud credential refresh (`force_refresh`) only happens if that fails. Account-level `/home/e2e-login/` is cached 30 minutes with a per-home serialization lock so concurrent multi-device refreshes don't ping-pong-rotate the shared home secret (#47).
 - **Command timing**: Wait ≥200ms after heartbeat before sending commands, or the relay may reject them.
 - **Fire-and-forget**: Commands like `0x41` (third-party PV), `0x05` (sell-back-to-grid), and `0x5E` (sell limit) have `setIsNeedResult=false` in the APK — they send no application-level response payload. Only a relay ACK (~161B) is returned.
 - **State lag**: After a write command, wait ≥1–2s before reading back state via a subscribe command — the device takes time to apply changes.

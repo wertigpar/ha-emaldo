@@ -92,32 +92,40 @@ behavior:**
                      Never sends Alive(home), never closes session.
 ```
 
-**Flow detail for multi-device:**
+**Flow detail for multi-device (per-device sessions, #47 Option C / beta16h-C3):**
 
 ```
-Relay pushes encrypted 0x30 frames for ALL devices of this home
-to EVERY open session socket. The primary's stream receives frames
-from both PS1 and PS2 interleaved.
+Each device creates its OWN PersistentE2ESession (its own UDP socket,
+established as itself via its own Alive(home)+Alive(device)+Wake+Heartbeat).
+The relay pushes 0x30 frames for ALL devices of the home to EVERY open
+session socket, so each device's stream also receives the OTHER device's
+frames — but each session decrypts only its own device's frames (the other
+device's packets fail decryption and are ignored / identified as non-data
+pushes).
 
-Frame from PS1:
-  recvfrom() → try own chat_secret (PS1's secret) → decrypt OK
-  → store under device_id=PS1 → continue
+PS1 session socket:
+  recvfrom() → try own chat_secret (PS1) → decrypt OK → cache(PS1)
+  recvfrom() → try own chat_secret (PS1) → PS2 frame decrypt FAILS
+               → ignored (or classified as status/control push)
 
-Frame from PS2:
-  recvfrom() → try own chat_secret (PS1's secret) → decrypt fails
-  → try alt chat_secret (PS2's secret, from _device_key_registry)
-  → decrypt OK → store under device_id=PS2 → continue
+PS2 session socket:
+  recvfrom() → try own chat_secret (PS2) → decrypt OK → cache(PS2)
 
 Each coordinator reads only its own device's cached frame:
   PS1 coordinator: get_latest_power_flow(device_id=PS1) → PS1 data
   PS2 coordinator: get_latest_power_flow(device_id=PS2) → PS2 data
+
+Commands: a device sends through its OWN session. If a command must be
+routed to a different device (cross-device), the session merges the TARGET
+device's sender_end_id/groupId/chat_secret into the wire packet via
+send_command_for_creds() while still addressing it by recipient_end_id.
 ```
 
 **Sessions and credentials detail:**
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                   E2E Credentials per Device              │
+│              E2E Credentials per Device (Session)         │
 │                                                          │
 │  {                                                        │
 │    "host":               "e2e2.emaldo.com" (or API-      │
@@ -138,10 +146,17 @@ Each coordinator reads only its own device's cached frame:
 │  home_* fields identify the HOME to the relay.            │
 │  sender_* + chat_secret identify the DEVICE.             │
 │                                                          │
-│  One session socket → one handshake with one device's     │
-│  creds. But the relay pushes frames for ALL devices on    │
-│  that home to the socket. The drain loop tries each       │
-│  registered chat_secret until one decrypts the packet.    │
+│  One session socket per device → one handshake per device│
+│  with that device's own creds. The relay nonetheless      │
+│  pushes frames for all home devices to every socket; each│
+│  session decrypts only its own device's frames.           │
+│                                                          │
+│  Home-secret coordination (#47 C3): the PRIMARY publishes │
+│  home_end_secret/home_chat_secret to a shared dict at     │
+│  session creation; SECONDARY overrides its fetched home   │
+│  secret with the primary's value and NEVER rotates it     │
+│  (allow_home_refresh=False). This breaks the dual-unit    │
+│  21204 ping-pong.                                         │
 └──────────────────────────────────────────────────────────┘
 ```
 
