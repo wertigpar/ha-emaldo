@@ -129,7 +129,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 setattr(power, "_legacy_uid_mode", False)
                 await power.async_config_entry_first_refresh()
 
-            is_primary = i == 0
+            # Deterministic per-home primary: first device_id encountered wins.
+            # Sequential HA config-entry setup guarantees first entry = first
+            # device registered per home (#47 Option C).
+            _ptracker = hass.data.setdefault(DOMAIN, {}).setdefault(
+                "_home_primaries", {}
+            )
+            _ptracker.setdefault(home_id, device["id"])
+            is_primary = _ptracker[home_id] == device["id"]
             realtime = EmaldoRealtimeCoordinator(hass, entry, power, is_primary=is_primary)
             setattr(realtime, "_legacy_uid_mode", getattr(power, "_legacy_uid_mode", False))
             _LOGGER.info(

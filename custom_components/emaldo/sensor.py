@@ -1083,12 +1083,16 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             stream_diag = getattr(c, "_stream_diag", None) or {}
             stream_attrs["stream_drain_packets"] = stream_diag.get("drain_packets")
             stream_attrs["stream_drain_unparsed"] = stream_diag.get("drain_unparsed")
-            stream_attrs["stream_last_reconnect_reason"] = stream_diag.get(
-                "last_reconnect_reason"
+            stream_attrs["stream_last_reconnect_reason"] = getattr(
+                c, "stats_stream_last_reconnect_reason", None
             )
-            stream_attrs["stream_reconnect_reasons"] = stream_diag.get(
-                "reconnect_reasons", {}
-            )
+            stream_attrs["stream_reconnect_reasons"] = {
+                k: v
+                for k, v in getattr(
+                    c, "stats_stream_reconnect_reasons", {}
+                ).items()
+                if v > 0
+            }
             session = getattr(c, "_session", None)
             if session is not None and getattr(session, "streaming", False):
                 stream_attrs["stream_frames_received_session"] = getattr(

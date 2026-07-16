@@ -179,7 +179,7 @@ def _iter_device_sets(entry_data: dict[str, Any]) -> list[dict[str, Any]]:
 def _get_entry_data(hass: HomeAssistant) -> dict[str, Any]:
     """Return only config-entry data dicts, excluding internal metadata keys starting with '_'.
 
-    Internal keys like ``_home_sessions`` and ``_home_session_owners`` are
+    Internal keys like ``_device_sessions`` and ``_home_secrets`` are
     stored at the same level as entry data in ``hass.data[DOMAIN]``. All
     iteration over config entries must filter them out to avoid ``KeyError``
     crashes and false-positive warnings.
@@ -261,6 +261,8 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        last_reason = None
+        slots = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -303,8 +305,12 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                     return True
                 # Transient relay/device rejection (e.g. status 21204) — reset
                 # the session and retry.
+                last_reason = rt.stats_override_last_result.get(
+                    "failure_reason"
+                )
                 _LOGGER.debug(
-                    "Override not applied (attempt %d/3), retrying", attempt + 1
+                    "Override not applied (attempt %d/3, reason=%s), retrying",
+                    attempt + 1, last_reason,
                 )
                 coord._reset_client()
             except EmaldoAuthError as err:
@@ -323,7 +329,26 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 coord._reset_client()
             if attempt < 2:
                 time.sleep(1)
-        _LOGGER.error("Failed to set override after 3 attempts: %s", last_err)
+        _LOGGER.error(
+            "Failed to set override after 3 attempts: %s%s",
+            last_err,
+            f" (reason={last_reason})" if last_err is None else "",
+        )
+        # Legacy one-shot fallback (#47 Option C)
+        if slots is not None:
+            try:
+                fb_coord, fb_client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )
+                if fb_client.set_override(
+                    fb_coord.home_id, fb_coord._device_id, fb_coord._model,
+                    bytes(slots), high_marker=high, low_marker=low,
+                    battery_range_override=bro,
+                ):
+                    _LOGGER.info("Override set via legacy one-shot fallback")
+                    return True
+            except Exception:
+                _LOGGER.debug("Legacy one-shot fallback also failed")
         return False
 
     await hass.async_add_executor_job(_do_override)
@@ -361,6 +386,7 @@ async def async_handle_apply_bulk_schedule(
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        last_reason = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -400,9 +426,13 @@ async def async_handle_apply_bulk_schedule(
                     return True
                 # Transient relay/device rejection (e.g. status 21204) — reset
                 # the session and retry.
+                last_reason = rt.stats_override_last_result.get(
+                    "failure_reason"
+                )
                 _LOGGER.debug(
-                    "Bulk override not applied (attempt %d/3), retrying",
-                    attempt + 1
+                    "Bulk override not applied (attempt %d/3, reason=%s), "
+                    "retrying",
+                    attempt + 1, last_reason,
                 )
                 coord._reset_client()
             except EmaldoAuthError as err:
@@ -422,8 +452,24 @@ async def async_handle_apply_bulk_schedule(
             if attempt < 2:
                 time.sleep(1)
         _LOGGER.error(
-            "Failed to apply bulk override after 3 attempts: %s", last_err
+            "Failed to apply bulk override after 3 attempts: %s%s",
+            last_err,
+            f" (reason={last_reason})" if last_err is None else "",
         )
+        # Legacy one-shot fallback (#47 Option C)
+        try:
+            fb_coord, fb_client = _get_coordinator_and_client(
+                hass, coordinator_key="schedule", device_id=device_id,
+            )
+            if fb_client.set_override(
+                fb_coord.home_id, fb_coord._device_id, fb_coord._model,
+                bytes(slot_values), high_marker=high, low_marker=low,
+                battery_range_override=bro,
+            ):
+                _LOGGER.info("Bulk override applied via legacy one-shot fallback")
+                return True
+        except Exception:
+            _LOGGER.debug("Legacy one-shot fallback also failed")
         return False
 
     await hass.async_add_executor_job(_do_bulk)
@@ -468,6 +514,8 @@ async def async_handle_reset_to_internal(
         nonlocal high, low, bro
         resolved = False
         last_err = None
+        last_reason = None
+        slots = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -506,9 +554,13 @@ async def async_handle_reset_to_internal(
                     ):
                         _LOGGER.info("All overrides reset to internal")
                         return True
+                    last_reason = rt.stats_override_last_result.get(
+                        "failure_reason"
+                    )
                     _LOGGER.debug(
-                        "Reset-all not applied (attempt %d/3), retrying",
-                        attempt + 1
+                        "Reset-all not applied (attempt %d/3, reason=%s), "
+                        "retrying",
+                        attempt + 1, last_reason,
                     )
                     coord._reset_client()
                 else:
@@ -544,9 +596,13 @@ async def async_handle_reset_to_internal(
                             "Overrides reset: slots %d-%d", start_slot, end_slot
                         )
                         return True
+                    last_reason = rt.stats_override_last_result.get(
+                        "failure_reason"
+                    )
                     _LOGGER.debug(
-                        "Partial reset not applied (attempt %d/3), retrying",
-                        attempt + 1
+                        "Partial reset not applied (attempt %d/3, reason=%s), "
+                        "retrying",
+                        attempt + 1, last_reason,
                     )
                     coord._reset_client()
             except EmaldoAuthError as err:
@@ -565,7 +621,27 @@ async def async_handle_reset_to_internal(
                 coord._reset_client()
             if attempt < 2:
                 time.sleep(1)
-        _LOGGER.error("Failed to reset overrides after 3 attempts: %s", last_err)
+        _LOGGER.error(
+            "Failed to reset overrides after 3 attempts: %s%s",
+            last_err,
+            f" (reason={last_reason})" if last_err is None else "",
+        )
+        # Legacy one-shot fallback (#47 Option C)
+        if reset_all or slots is not None:
+            slot_bytes = bytes([SLOT_NO_OVERRIDE] * 96) if reset_all else bytes(slots)
+            try:
+                fb_coord, fb_client = _get_coordinator_and_client(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )
+                if fb_client.set_override(
+                    fb_coord.home_id, fb_coord._device_id, fb_coord._model,
+                    slot_bytes, high_marker=high, low_marker=low,
+                    battery_range_override=bro,
+                ):
+                    _LOGGER.info("Overrides reset via legacy one-shot fallback")
+                    return True
+            except Exception:
+                _LOGGER.debug("Legacy one-shot fallback also failed")
         return False
 
     await hass.async_add_executor_job(_do_reset)

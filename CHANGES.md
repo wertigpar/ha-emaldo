@@ -1,5 +1,147 @@
 # Changes
 
+## v1.0.0-beta16h-C4
+
+### Fixed
+
+- **Override (set_slot_range / apply_bulk_schedule / reset_to_internal)
+  CONN_NOT_ESTABLISHED after periodic relay 21204 (#47 C4):** the override
+  session path (`_send_override_via_stream`) silently returned False on
+  timeout/CONN_NOT_ESTABLISHED without invalidating the dead session. The
+  3-attempt retry loop called `coord._reset_client()` (REST client) but the
+  realtime coordinator's cached session was never invalidated — every retry
+  reused the same relay-dead socket. After 3 failures the legacy one-shot
+  fallback succeeded (non-fatal), but the 3-attempt failure cascade added
+  ~3s latency to every override that hit the ~2-3s relay-expiry window.
+  **Fix:** on CONN_NOT_ESTABLISHED or timeout, `_send_override_via_stream`
+  now calls `session.close()`, `_pop_device_session()`,
+  `_invalidate_session_ref()`, and sets `_needs_fresh_creds = True` so the
+  next retry builds a fresh session with fresh credentials. The retry loop's
+  `coord._reset_client()` is then redundant for the E2E case (but harmless).
+- **Files changed:** `coordinator.py` (override session invalidation).
+- **`stream_reconnect_reasons` diagnostic mismatch vs `stream_reconnects`
+  counter (#47 beta16h-C4 diagnostics):** two layered bugs made the sensor
+  look contradictory. (1) The reasons dict incremented only inside
+  `_stream_flag_reconnect` when `not self._stream_needs_reconnect`, but the
+  reconnect counter increments on every actual rebuild in
+  `_stream_reconnect_locked`. While a reconnect retries with the flag already
+  set, the counter climbs but the reason is never re-recorded — so the sensor
+  showed e.g. `stream_reconnects: 60` with `stream_reconnect_reasons:
+  {session_expired_21204: 2}`, making a healthy stream look like a 2-reason
+  storm. The 128 MB field log confirmed the real reason was 21204 on 7708 of
+  9347 diagnostic lines. (2) The sensor compared two different scopes:
+  `stream_reconnects` is a **coordinator-cumulative** total
+  (`stats_stream_reconnects_total`, rolled up across session recreations in
+  `_accumulate_stream_stats`), while `stream_reconnect_reasons` was read from
+  the **per-session** `stream_diagnostics()` dict, which resets to `{}` on
+  every session teardown — so even after fix (1) the live session showed
+  `stream_reconnects: 29` with `stream_reconnect_reasons: {}`.
+  **Fix:** (a) `_stream_flag_reconnect` now always records
+  `_stream_last_reconnect_reason`; the per-rebuild reason count is incremented
+  in `_stream_reconnect_locked` next to the reconnect counter, so the per-session
+  dict tracks rebuilds 1:1. (b) The coordinator now accumulates the reason
+  breakdown **cumulatively** (`_merge_stream_reasons` + flush at
+  `_invalidate_session_ref` teardown), mirroring `_accumulate_stream_stats`, and
+  the sensor reads the cumulative `stats_stream_reconnect_reasons` /
+  `stats_stream_last_reconnect_reason`. The two now share scope and stay in
+  lockstep. No reconnect/backoff/credential behavior change.
+- **Files changed:** `emaldo_lib/e2e.py` (`_stream_flag_reconnect`,
+  `_stream_reconnect_locked`), `coordinator.py` (`_merge_stream_reasons`,
+  `_invalidate_session_ref`, `_accumulate_stream_stats`), `sensor.py`
+  (cumulative stream reconnect-reason attributes).
+
+- **`e2e_rtt_*` diagnostic stayed `null` / 0 in stream mode (#47 beta16h-C4
+  RTT gap):** the session measures UDP RTT on every `_send_raw` exchange
+  (handshake/keepalive/command) and stores it in `_last_rtt_ms`, but the
+  coordinator's RTT-sampling block lived only in the **legacy** (non-stream)
+  read path. In stream mode `_read_power_flow_primary` returns the cached
+  frame *before* reaching that block, so `stats_e2e_rtt_samples` never
+  incremented and the sensor showed `e2e_rtt_last_ms: null`,
+  `e2e_rtt_samples: 0` — even though the log contained 52 `rtt=` lines proving
+  RTT was being measured. The same early return also left the legacy
+  `powerflow_drain_*` / `powerflow_initial_*` accumulators at 0 in stream mode
+  (those are covered by `stream_diagnostics()` so no data is actually lost).
+  **Fix:** extracted `_sample_session_rtt(session)` and call it in **both**
+  paths (stream branch + legacy branch). Purely diagnostic — copies an
+  already-computed value, sends no packets, no protocol/timing change.
+- **Files changed:** `coordinator.py` (`_sample_session_rtt`, stream + legacy
+  RTT sampling in `_read_power_flow_primary`).
+
+### Changed
+
+- **Decrypt diagnostic relabeled `DECRYPTED-BUT-REJECTED` → `DECRYPTED non-data push` (#41 logging clarity):** the rate-limited debug line fired whenever AES decrypted a packet but the payload was not a power-flow/battery frame. Most such packets are relay status/control JSON (e.g. `{"__time":...,"domain":"eu_x_02"}`, `cmd not allowed`) delivered on the same socket — they are *handled* (decrypted + identified) and ignored, not *rejected* as errors. The old label sounded like a failure to anyone without full context. The sample payload is now classified: printable ASCII/JSON → `text/status push: '<preview>'`; otherwise → `binary (not power-flow/battery)`. No behavior change — purely diagnostic wording.
+- **Files changed:** `emaldo_lib/e2e.py` (`decrypt_response` diagnostic + `_classify_decrypted_payload` helper).
+
+## v1.0.0-beta16h-C3
+
+### Changed (#47 Phase 4 — secondary must never rotate home secret)
+
+- **Root cause identified:** 21204 storm persists because BOTH devices
+  independently escalate to ``force_home_refresh=True`` (per-device generation
+  counters in ``client.py`` escalation). Each rotation desyncs the other →
+  permanent ping-pong. The OptC coordination failed because (a) primary
+  published only inside ``_creds_provider`` (reactive, ~90s late at startup),
+  and (b) the secondary itself kept rotating via its own escalation, defeating
+  the override.
+- **Fix 1 — primary publishes proactively at session creation:**
+  ``_ensure_session`` now publishes ``home_end_secret``/``home_chat_secret``
+  to the shared ``_home_secrets`` dict immediately after fetching credentials
+  (not only in ``_creds_provider``). The dict is populated before the
+  secondary's ``_ensure_session`` runs (~164ms later), so the secondary has
+  the correct value from the start.
+- **Fix 2 — secondary never rotates the shared home secret:**
+  Added ``allow_home_refresh`` parameter to ``get_e2e_credentials`` /
+  ``_get_e2e_credentials``. Secondary passes ``allow_home_refresh=False``,
+  forcing ``_do_home_refresh = _do_home_refresh AND allow_home_refresh``.
+  Only the primary can escalate to ``force_home_refresh=True``; the secondary
+  always reuses the primary's published value.
+- **Files changed:** ``coordinator.py`` (proactive publish + pass-through
+  ``allow_home_refresh``), ``client.py`` (new parameter + escalation guard).
+
+### Test aim
+In two-unit setup, expect: 21204 → ~0; primary publishes once at startup
++ on genuine TTL expiry only; no ``force_home_refresh`` ever fires from
+secondary; override delivery same as single-unit. Monitor ``[OptC-diag]``
+logs for ``primary: published home_secret at session creation`` (startup),
+``_creds_provider secondary: overriding``, and absence of ``home_secrets
+dict empty`` on secondary startup.
+
+## v1.0.0-beta16h-C2
+
+### Changed (#47 Option C — follow-up)
+- **Override legacy one-shot fallback in all 4 service paths**
+  (set_slot_range, apply_bulk_schedule, reset_to_internal reset-all +
+  partial). After 3 failed stream attempts, falls back to
+  `client.set_override(...)` on a fresh socket — mirrors the working
+  emergency-charge pattern. Fixes override loss during 21204 windows
+  (beta16h-C log: 5 "Failed to set/reset override after 3 attempts").
+- **Added [OptC-diag] coordination diagnostics** (primary election,
+  `_creds_provider` primary publish / secondary override, secondary
+  home_secrets-empty) to investigate why home-secret coordination
+  isn't stopping the dual-unit 21204 storm.
+
+### Test aim
+In two-unit setup (single-unit baseline confirmed clean), capture
+`[OptC-diag]` log output to determine why home-secret coordination
+doesn't engage during the 21204 storm. Key diagnostics:
+- `[OptC-diag]_creds_provider primary: published home_secret` (primary)
+- `[OptC-diag]_creds_provider secondary: overriding` or `no home_secrets` (secondary)
+- `[OptC-diag] Secondary ... using primary-managed home secret` or `empty` (secondary `_ensure_session`)
+- `[OptC-diag] primary_election` (both units, once per startup)
+
+### Next steps depending on result
+- **If primary publishes + secondary overrides but 21204 continues**:
+  root cause is elsewhere (e.g. session short-circuit, stale device
+  session). Extend diagnostics.
+- **If primary publishes + secondary logs `no home_secrets`**:
+  shared `_home_secrets` dict not populated before secondary session
+  creation → race condition or `_creds_provider` not firing. Fix timing.
+- **If primary never publishes**: `_creds_provider` not called on
+  primary → stale `_participant_session` or `_creds_provider` closure
+  captured wrong client. Fix call path.
+- **If storm stops**: remove all `[OptC-diag]` logs, clean up, ship
+  final.
+
 ## v1.0.0-beta16g
 
 ### Changed
@@ -40,6 +182,49 @@ both devices → ~equal & high (>50% single-attempt).
   encrypt with ``home_chat_secret`` instead of owner device ``chat_secret``
   (the relay may expect the home-level session key). Switch in both
   ``send_command_for_creds`` and ``_read_power_flow_locked``.
+
+## v1.0.0-beta16h-C
+
+### Changed (Option C — per-device E2E sessions + home-secret coordination)
+
+- **Architecture: single shared E2E session → per-device sessions (#47).**
+  Three previous command-path fixes all failed because the relay binds its TCP
+  socket to ONE device after ``Alive(home)``+``Alive(device)`` handshake. A
+  second device cannot send commands through that socket, even with wire-credential
+  merging (beta16g) or a fresh one-shot socket (beta16f, beta16h-A).
+  **Fix:** each device now creates its own ``PersistentE2ESession``, established
+  as itself via its own ``Alive(home)``+``Alive(device)``+``Wake``+``Heartbeat``
+  handshake sequence. The primary device publishes the current ``home_end_secret``
+  to a shared ``hass.data[DATA]`` dict; secondary devices override their REST-fetched
+  home secret with the primary's published value, preventing the 21204 ping-pong
+  that occurred when two devices independently rotated the shared home secret.
+
+- **Deterministic per-home primary election.** Previously ``is_primary = i == 0``
+  assumed the first device in the config entry's device list was always primary.
+  With multiple config entries sharing one home_id, each entry's first device became
+  primary — producing two primaries for the same home.
+  **Fix:** the first ``device_id`` registered per ``home_id`` (across all config entries)
+  wins, using a persistent ``hass.data[DOMAIN]["home_primaries"]`` tracker.
+
+- **Emergency charge: removed secondary-device restriction.** The legacy standalone
+  fallback (standalone E2E socket) was blocked for secondary devices to avoid
+  ``Alive(home)`` collision with the old shared session. With per-device sessions,
+  each device owns its E2E socket — both stream path and legacy fallback are safe
+  for any device.
+
+- **Stream power-flow read simplified.** Primary and secondary no longer use
+  different ``read_power_flow`` paths; both call ``session.read_power_flow()``
+  on their own per-device session.
+
+### Test aim
+Confirm both devices can send overrides and emergency-charge commands through their
+own E2E sessions without ``CONN_NOT_ESTABLISHED``. Expected: both devices achieve
+high (>90%) single-attempt command delivery; no 21204 storm.
+
+### Next steps depending on result
+- **If both devices reliable → land beta16h-C.** Version ``1.0.0-beta16h-C``.
+- **If 21204 returns → check home_secret coordination** (primary publish vs secondary
+  override not working correctly in ``_creds_provider`` or ``_ensure_session``).
 
 ## v1.0.0-beta16f
 
