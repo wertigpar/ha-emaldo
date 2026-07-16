@@ -1,5 +1,35 @@
 # Changes
 
+## v1.0.0-beta16i
+
+### Changed (#49 — Realtime connection sensor should reflect stale data)
+
+- **Root cause (issue #49):** a user reported that with the inverter off for
+  15 min, Home Assistant kept showing the last power-flow values while the
+  vendor app correctly went blank. The "Realtime connection" diagnostic sensor
+  only had two states — `connected` (driven by `coordinator.last_update_success`)
+  and `reconnecting` (on a transport `UpdateFailed`). The stream path
+  *deliberately* keeps the last-known values visible when no fresh frame
+  arrives within `STREAM_STALE_AFTER` (so a brief gap doesn't blank the
+  dashboard), and that path does **not** raise `UpdateFailed` — so
+  `last_update_success` stayed `True` and the sensor never left `connected`,
+  even after 15 min of no fresh data. The stall was captured in diagnostics
+  (`last_success` froze, `success_rate_recent` dropped, `stall_snapshot`
+  captured) but was not surfaced as a connection state.
+- **Fix:** added a third state `stale` to the "Realtime connection" sensor
+  (`sensor.py` `native_value`). It is returned when `last_update_success` is
+  `True` **but** `stats_last_success` is older than `STREAM_STALE_AFTER`
+  (28 s) — i.e. the last poll "succeeded" yet no fresh frame has arrived
+  recently. This is exactly the inverter-off / relay-stopped-pushing case the
+  reporter expected to see. Transport failures still return `reconnecting`.
+  Also added a `stream_stale` boolean attribute (`true`/`false`) for
+  automations/templates. No protocol, timing, or data-keeping behavior change
+  — the last-known values are still shown during a stall; only the *state
+  label* now distinguishes stale from connected.
+- **Files changed:** `sensor.py` (`native_value` three-state logic +
+  `stream_stale` attribute, `STREAM_STALE_AFTER` import, `import time`),
+  `manifest.json` (version bump).
+
 ## v1.0.0-beta16h-C4
 
 ### Fixed

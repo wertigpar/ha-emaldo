@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -39,7 +40,12 @@ from .emaldo_lib.const import (
     decode_slot_action,
 )
 
-from .const import DOMAIN, EV_UNSUPPORTED_MODELS, PV_UNSUPPORTED_MODELS
+from .const import (
+    DOMAIN,
+    EV_UNSUPPORTED_MODELS,
+    PV_UNSUPPORTED_MODELS,
+    STREAM_STALE_AFTER,
+)
 from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 
@@ -1029,10 +1035,26 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
 
     @property
     def native_value(self) -> str:
-        """Return current connection state."""
-        if self._coordinator.last_update_success:
-            return "connected"
-        return "reconnecting"
+        """Return current connection state.
+
+        Three states (issue #49):
+        - ``connected``: last poll succeeded and a fresh frame arrived recently.
+        - ``stale``: last poll "succeeded" but no fresh frame has arrived within
+          ``STREAM_STALE_AFTER`` (e.g. the inverter/relay stopped pushing data —
+          the integration deliberately keeps showing the last-known values, so
+          the dashboard stays populated during a brief gap). This is the state
+          the reporter expected to see when their inverter was off for 15 min.
+        - ``reconnecting``: the transport actually failed (UpdateFailed raised).
+        """
+        c = self._coordinator
+        if not c.last_update_success:
+            return "reconnecting"
+        if (
+            c.stats_last_success is not None
+            and (time.time() - c.stats_last_success) > STREAM_STALE_AFTER
+        ):
+            return "stale"
+        return "connected"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -1152,6 +1174,10 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             ),
             "stall_snapshot": getattr(c, "_stall_snapshot", None),
             "last_success": _to_iso(c.stats_last_success),
+            "stream_stale": (
+                c.stats_last_success is not None
+                and (time.time() - c.stats_last_success) > STREAM_STALE_AFTER
+            ),
             "last_failure": _to_iso(c.stats_last_failure),
             "last_reconnect": _to_iso(c.stats_last_reconnect),
         }
