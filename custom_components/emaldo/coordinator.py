@@ -505,18 +505,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for attempt in range(2):
             try:
                 if attempt == 1:
-                    rt = self._get_paired_realtime()
-                    if rt is not None and not rt._is_primary:
-                        _LOGGER.warning(
-                            "[EmergencyCharge] ON failed on stream path for "
-                            "secondary device %s — legacy fallback skipped "
-                            "(would collide with shared session)",
-                            self._device_id,
-                        )
-                        raise EmaldoE2ESessionExpired(
-                            "Emergency charge ON: stream path failed, "
-                            "secondary device cannot use legacy fallback"
-                        )
                     _LOGGER.debug(
                         "[EmergencyCharge] ON retry via legacy standalone command"
                     )
@@ -560,18 +548,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for attempt in range(2):
             try:
                 if attempt == 1:
-                    rt = self._get_paired_realtime()
-                    if rt is not None and not rt._is_primary:
-                        _LOGGER.warning(
-                            "[EmergencyCharge] OFF failed on stream path for "
-                            "secondary device %s — legacy fallback skipped "
-                            "(would collide with shared session)",
-                            self._device_id,
-                        )
-                        raise EmaldoE2ESessionExpired(
-                            "Emergency charge OFF: stream path failed, "
-                            "secondary device cannot use legacy fallback"
-                        )
                     _LOGGER.debug(
                         "[EmergencyCharge] OFF retry via legacy standalone command"
                     )
@@ -798,9 +774,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_stream_frames_total: int = 0
         self.stats_stream_resubscribes_total: int = 0
         self.stats_stream_reconnects_total: int = 0
+        # Cumulative reconnect-reason breakdown, mirroring stats_stream_reconnects_total
+        # so the diagnostic sensor compares like-for-like (the per-session reasons dict
+        # in stream_diagnostics() resets on every session recreation, while the
+        # reconnect *count* is accumulated across sessions — #47 beta16h-C4).
+        self.stats_stream_reconnect_reasons: dict[str, int] = {}
+        self.stats_stream_last_reconnect_reason: str | None = None
         self._last_stream_frames_seen: int = 0
         self._last_stream_resubs_seen: int = 0
         self._last_stream_reconnects_seen: int = 0
+        self._last_stream_reasons_seen: dict[str, int] = {}
         # Latest stream diagnostics snapshot (reconnect-reason breakdown etc.)
         self._stream_diag: dict = {}
         # Diagnostic info collected by executor thread, logged from main thread
@@ -863,30 +846,22 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 pass
             self._battery_scan_task = None
         if self._session is not None:
-            is_owner = (
-                self.hass.data.get(DOMAIN, {})
-                .get("_home_session_owners", {})
-                .get(self.home_id)
-                == self._entry.entry_id
+            _LOGGER.debug(
+                "Shutdown: closing E2E session for device %s",
+                self.device_id,
             )
-            if self._is_primary and is_owner:
-                _LOGGER.debug(
-                    "Shutdown: closing shared E2E session (owner device %s)",
-                    self.device_id,
-                )
-                await self.hass.async_add_executor_job(self._session.close)
-                self._pop_shared_session()
-            else:
-                _LOGGER.debug(
-                    "Shutdown: not closing E2E session for device %s "
-                    "(not session owner, is_primary=%s)",
-                    self.device_id,
-                    self._is_primary,
-                )
+            await self.hass.async_add_executor_job(self._session.close)
+            self._pop_device_session()
             self._invalidate_session_ref()
 
     def _invalidate_session_ref(self) -> None:
         """Drop local references to the active E2E session and binding."""
+        # Fold the outgoing session's reconnect reasons into the cumulative
+        # totals before the per-session dict is lost (the new session starts
+        # empty). Guards against a None session (e.g. double-invalidate).
+        if self._session is not None:
+            self._merge_stream_reasons(self._session)
+            self._last_stream_reasons_seen = {}
         self._session = None
         self._session_binding = None
         # Unregister home secret rotation callback so old session is not
@@ -903,82 +878,54 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._last_stream_resubs_seen = 0
         self._last_stream_reconnects_seen = 0
 
-    # -- Shared E2E session (one per home_id, #47) ------------------------- #
+    # -- Per-device E2E sessions + home-secret coordination (Option C) ------ #
 
-    def _get_shared_session(self) -> PersistentE2ESession | None:
-        """Return the home-wide shared E2E session, or *None*.
+    @property
+    def _device_session_key(self) -> tuple:
+        return (self._parent.home_id, self._parent._device_id)
 
-        Shared across all config entries for the same home_id. The session is
-        owned by whichever entry created it first; other entries reuse it and
-        never send ``Alive(home)``. Prevents relay collisions (#47).
-        """
+    def _get_device_session(self) -> PersistentE2ESession | None:
+        """Return this device's E2E session, or *None*."""
         return self.hass.data.get(DOMAIN, {}).get(
-            "_home_sessions", {}
-        ).get(self.home_id)
+            "_device_sessions", {}
+        ).get(self._device_session_key)
 
-    def _set_shared_session(self, session: PersistentE2ESession) -> None:
-        """Store the home-wide shared E2E session and record ownership.
-
-        The first entry to create the session becomes its owner. Only the
-        owner closes the session on shutdown — other entries just drop their
-        local reference, so the stream keeps running.
-        """
+    def _set_device_session(self, session: PersistentE2ESession) -> None:
+        """Store this device's E2E session."""
         self.hass.data.setdefault(DOMAIN, {}).setdefault(
-            "_home_sessions", {}
-        )[self.home_id] = session
-        self.hass.data.setdefault(DOMAIN, {}).setdefault(
-            "_home_session_owners", {}
-        )[self.home_id] = self._entry.entry_id
+            "_device_sessions", {}
+        )[self._device_session_key] = session
 
-    def _pop_shared_session(self) -> PersistentE2ESession | None:
-        """Remove and return the home-wide shared E2E session."""
-        sessions = self.hass.data.get(DOMAIN, {}).get("_home_sessions", {})
-        session = sessions.pop(self.home_id, None)
-        if session is not None:
-            self.hass.data.setdefault(DOMAIN, {}).setdefault(
-                "_home_session_owners", {}
-            ).pop(self.home_id, None)
-        return session
+    def _pop_device_session(self) -> PersistentE2ESession | None:
+        """Remove and return this device's E2E session."""
+        sessions = self.hass.data.get(DOMAIN, {}).get("_device_sessions", {})
+        return sessions.pop(self._device_session_key, None)
 
     # ----------------------------------------------------------------------- #
 
     def _ensure_session(self) -> PersistentE2ESession:
-        """Return the home-wide shared E2E session.
+        """Return this device's E2E session.
 
-        The first entry to create the session owns it — creates the
-        persistent socket, sends ``Alive(home)``, handles keepalive and
-        reconnection. Other entries (even from separate config entries on
-        the same home) look up the shared session and never send
-        ``Alive(home)``, preventing relay collisions (#47).
-
-        Session scope is one per home_id, shared across all config entries.
+        Each device creates its own persistent UDP socket (established as
+        itself via ``Alive(home)`` + ``Alive(device)`` + …).  The primary
+        device also publishes the current ``home_end_secret`` to a shared
+        home-level dict so secondary devices use the same (non-rotated)
+        home secret — preventing the 21204 ping-pong (#47 Option C).
         """
-        shared = self._get_shared_session()
-        if shared is not None and not shared.closed:
-            # Shared session alive — use it regardless of primary/secondary.
-            # Secondary coordinators never create their own session.
-            self._session = shared
-            if not self._is_primary:
-                _LOGGER.debug(
-                    "Shared E2E session acquired for secondary device %s",
-                    self.device_id,
-                )
-            return shared
+        dev_session = self._get_device_session()
+        if dev_session is not None and not dev_session.closed:
+            self._session = dev_session
+            return dev_session
 
-        if not self._is_primary:
-            # Session closed and we're not the owner — cannot recreate.
-            # The primary coordinator will recreate it on its next poll.
-            _LOGGER.debug(
-                "Shared E2E session not available for secondary device %s "
-                "(waiting for primary)",
-                self.device_id,
-            )
-            raise EmaldoE2EError(
-                "Shared E2E session closed; waiting for primary reconnect"
-            )
+        # Close stale local reference if any
+        if self._session is not None and not self._session.closed:
+            try:
+                self._session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._invalidate_session_ref()
 
-        # -- Primary device path: create or recreate the shared session ------ #
-        client = self._parent._ensure_client()  # noqa: SLF001 - intended
+        client = self._parent._ensure_client()  # noqa: SLF001
         home_id = self._parent.home_id
         device_id = self._parent._device_id  # noqa: SLF001
         model = self._parent._model  # noqa: SLF001
@@ -987,41 +934,81 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         binding = (home_id, device_id, model)
 
-        # Close any stale session from a previous binding change
-        if self._session is not None and not self._session.closed:
-            try:
-                self._session.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self._invalidate_session_ref()
-
         creds = client.get_e2e_credentials(
-            home_id, device_id, model, force_refresh=self._needs_fresh_creds
+            home_id, device_id, model, force_refresh=self._needs_fresh_creds,
+            allow_home_refresh=self._is_primary,
         )
         if self._needs_fresh_creds:
             _LOGGER.info(
                 "E2E session rebuild after failure — forced fresh credentials"
             )
         self._needs_fresh_creds = False
-        # Register device key BEFORE creating the session / starting the stream
-        # so the stream drain loop's reverse-lookup finds the API device_id and
-        # stores frames under the key the coordinator reads by (#47 beta15f).
-        PersistentE2ESession.register_device_key(home_id, device_id, creds["chat_secret"])
-        _LOGGER.debug("E2E session host: %s", creds.get("host", "(default)"))
-        # Provider so the stream thread can pull the latest shared chat_secret
-        # on reconnect (a concurrent REST e2e_login rotates it; re-handshaking
-        # with the stale secret would 21204 forever).
+
+        # Primary publishes home secret proactively at session creation,
+        # so the shared dict is populated before secondary's _ensure_session
+        # runs (#47 Phase 4).
+        if self._is_primary:
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                "_home_secrets", {}
+            )[home_id] = {
+                "home_end_secret": creds.get("home_end_secret", ""),
+                "home_chat_secret": creds.get("home_chat_secret", ""),
+            }
+
+        # For secondary: override home secret from primary-managed shared dict
+        if not self._is_primary:
+            home_secrets = self.hass.data.get(DOMAIN, {}).get(
+                "_home_secrets", {}
+            ).get(home_id, {})
+            if home_secrets:
+                creds["home_end_secret"] = home_secrets.get(
+                    "home_end_secret", creds["home_end_secret"]
+                )
+                creds["home_chat_secret"] = home_secrets.get(
+                    "home_chat_secret", creds["home_chat_secret"]
+                )
+
+        PersistentE2ESession.register_device_key(
+            home_id, device_id, creds["chat_secret"]
+        )
+        _LOGGER.debug(
+            "E2E session host: %s (device=%s is_primary=%s)",
+            creds.get("host", "(default)"), device_id, self._is_primary,
+        )
+
         def _creds_provider(*, force_refresh: bool = False) -> dict:
             try:
-                return self._parent._ensure_client().get_e2e_credentials(
-                    home_id, device_id, model, force_refresh=force_refresh
+                new_creds = self._parent._ensure_client().get_e2e_credentials(
+                    home_id, device_id, model, force_refresh=force_refresh,
+                    allow_home_refresh=self._is_primary,
                 )
             except EmaldoAuthError:
-                # REST session token expired — force fresh login and retry.
                 self._parent._reset_client()
-                return self._parent._ensure_client().get_e2e_credentials(
+                new_creds = self._parent._ensure_client().get_e2e_credentials(
                     home_id, device_id, model, force_refresh=True,
+                    allow_home_refresh=self._is_primary,
                 )
+            # Primary publishes home secret to shared dict after each refresh
+            if self._is_primary:
+                self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                    "_home_secrets", {}
+                )[home_id] = {
+                    "home_end_secret": new_creds.get("home_end_secret", ""),
+                    "home_chat_secret": new_creds.get("home_chat_secret", ""),
+                }
+            else:
+                # Secondary overrides home secret from primary's published value
+                home_secrets = self.hass.data.get(DOMAIN, {}).get(
+                    "_home_secrets", {}
+                ).get(home_id, {})
+                if home_secrets:
+                    new_creds["home_end_secret"] = home_secrets.get(
+                        "home_end_secret", new_creds["home_end_secret"]
+                    )
+                    new_creds["home_chat_secret"] = home_secrets.get(
+                        "home_chat_secret", new_creds["home_chat_secret"]
+                    )
+            return new_creds
 
         self._session = PersistentE2ESession(
             creds,
@@ -1031,17 +1018,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         self._session.connect()
         self.stats_last_handshake_response = self._session.last_handshake_response
-        # Register as the config-entry-wide shared session. Secondary
-        # coordinators will find it via _get_shared_session().
-        self._set_shared_session(self._session)
-
+        self._set_device_session(self._session)
         self._session_binding = binding
 
-        # Register home secret rotation callback so this session re-keys its
-        # home credentials when another device on the same account rotates
-        # the shared home end_secret (#47).  The lambda captures the current
-        # session reference via a default argument so it is unaffected by
-        # future self._session reassignments.
+        # Home secret rotation callback — primary publishes after rotation
         _s = self._session
         self._unregister_home_secret = client.register_home_secret_callback(
             self._parent.home_id,
@@ -1051,9 +1031,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
 
         if self._stream_mode:
-            # Subscribe-and-stream: a background thread owns the power-flow
-            # subscription and keepalive cadence (beta13d). The coordinator's
-            # separate keepalive loop is not started in this mode.
             self._session.start_stream(
                 resubscribe_interval=RESUBSCRIBE_INTERVAL,
                 keepalive_interval=KEEPALIVE_INTERVAL,
@@ -1062,14 +1039,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 stale_after=STREAM_STALE_AFTER,
                 long_stall=STREAM_LONG_STALL_RECONNECT,
             )
-            # Cold start: give the freshly started stream a brief moment to
-            # finish the handshake + subscribe and cache the device's first
-            # pushed frame, so the poll that started the stream already returns
-            # data instead of an empty read (which would otherwise leave the
-            # realtime sensors on the restored/"unknown" value until the next
-            # poll). This runs on the executor thread, so it never blocks the
-            # event loop, and the first refresh is a background task so HA
-            # startup is unaffected. Exits early the instant a frame arrives.
             import time as _time
             _first_frame_deadline = _time.perf_counter() + STREAM_FIRST_FRAME_WAIT
             _session = self._session
@@ -1121,6 +1090,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self.stats_override_last_result = {
                     "success": False, "failure_reason": "timeout",
                 }
+                session.close()
+                self._pop_device_session()
+                self._invalidate_session_ref()
+                self._needs_fresh_creds = True
                 return False
             if b"CONN_NOT_ESTABLISHED" in resp:
                 _LOGGER.debug(
@@ -1131,6 +1104,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self.stats_override_last_result = {
                     "success": False, "failure_reason": "conn_not_established",
                 }
+                session.close()
+                self._pop_device_session()
+                self._invalidate_session_ref()
+                self._needs_fresh_creds = True
                 return False
             _LOGGER.debug(
                 "[Override] stream cmd: OK resp_len=%s "
@@ -1185,6 +1162,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 max_age=STREAM_STALE_AFTER, device_id=self.device_id,
             )
             self._accumulate_stream_stats(session)
+            # Sample RTT here too: stream mode returns before the legacy RTT
+            # block below, so without this the cumulative e2e_rtt_* stats stay
+            # empty even though the session measures RTT on every _send_raw
+            # (handshake/keepalive/command) (#47 beta16h-C4 RTT gap).
+            self._sample_session_rtt(session)
             self._stream_diag = session.stream_diagnostics()
             self._e2e_diag = (
                 f"stream frames={self.stats_stream_frames_total} "
@@ -1201,12 +1183,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return data
         # Collect diagnostic info — will be logged from main thread in _async_update_data
         self._e2e_diag = f"host={session._creds.get('host','?')} has_log={session._log is not None} closed={session.closed}"
-        if self._is_primary:
-            data = session.read_power_flow()
-        else:
-            # Secondary device: use own credentials for 0x30 subscription
-            # without sending Alive(home) (#47).
-            data = self._read_power_flow_secondary(session)
+        data = session.read_power_flow()
         self._e2e_diag += f" result={'data' if data else 'None'}"
         diag = session.last_power_flow_diag
         self.stats_powerflow_last_diag = diag
@@ -1235,15 +1212,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_powerflow_drain_exhausted += int(
             diag.get("drain_exhausted", 0)
         )
-        rtt_ms = session.last_rtt_ms
-        if rtt_ms is not None:
-            self.stats_e2e_rtt_last_ms = round(rtt_ms, 1)
-            self.stats_e2e_rtt_total_ms += rtt_ms
-            self.stats_e2e_rtt_samples += 1
-            if self.stats_e2e_rtt_min_ms is None or rtt_ms < self.stats_e2e_rtt_min_ms:
-                self.stats_e2e_rtt_min_ms = rtt_ms
-            if self.stats_e2e_rtt_max_ms is None or rtt_ms > self.stats_e2e_rtt_max_ms:
-                self.stats_e2e_rtt_max_ms = rtt_ms
+        self._sample_session_rtt(session)
         cur = get_power_flow_sanity_drops()
         delta = cur - self._last_powerflow_sanity_drops
         if delta > 0:
@@ -1300,6 +1269,51 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # Counter reset (new session object) — add the new value whole.
                 setattr(self, total_attr, getattr(self, total_attr) + cur)
             setattr(self, last_attr, cur)
+        # Carry the per-session reconnect-reason breakdown into the cumulative
+        # totals (delta vs last poll) so stream_reconnect_reasons stays in
+        # lockstep with stream_reconnects across session recreations.
+        self._merge_stream_reasons(session)
+
+    def _merge_stream_reasons(self, session: PersistentE2ESession) -> None:
+        """Fold the session's per-session reason counts into the cumulative totals.
+
+        Uses a per-key delta against ``_last_stream_reasons_seen`` so repeated
+        polls within one session do not double-count. On session recreation the
+        caller resets ``_last_stream_reasons_seen`` to ``{}`` so the fresh (empty)
+        session produces zero deltas.
+        """
+        cur = getattr(session, "_stream_reconnect_reasons", {}) or {}
+        last = self._last_stream_reasons_seen
+        for key, val in cur.items():
+            delta = val - last.get(key, 0)
+            if delta > 0:
+                self.stats_stream_reconnect_reasons[key] = (
+                    self.stats_stream_reconnect_reasons.get(key, 0) + delta
+                )
+        last_reason = getattr(session, "_stream_last_reconnect_reason", None)
+        if last_reason is not None:
+            self.stats_stream_last_reconnect_reason = last_reason
+        self._last_stream_reasons_seen = dict(cur)
+
+    def _sample_session_rtt(self, session: PersistentE2ESession) -> None:
+        """Fold the session's latest UDP RTT into the cumulative RTT stats.
+
+        The session measures RTT on every ``_send_raw`` exchange (handshake,
+        keepalive, command). In stream mode the periodic poll reads a cached
+        frame and returns before the legacy RTT-sampling block, so sample it
+        here too. No packets are sent and no protocol behavior changes — this
+        only copies an already-computed side effect (#47 beta16h-C4 RTT gap).
+        """
+        rtt_ms = session.last_rtt_ms
+        if rtt_ms is None:
+            return
+        self.stats_e2e_rtt_last_ms = round(rtt_ms, 1)
+        self.stats_e2e_rtt_total_ms += rtt_ms
+        self.stats_e2e_rtt_samples += 1
+        if self.stats_e2e_rtt_min_ms is None or rtt_ms < self.stats_e2e_rtt_min_ms:
+            self.stats_e2e_rtt_min_ms = rtt_ms
+        if self.stats_e2e_rtt_max_ms is None or rtt_ms > self.stats_e2e_rtt_max_ms:
+            self.stats_e2e_rtt_max_ms = rtt_ms
 
     def _record_reconnect(self, reason: str, ts: float) -> None:
         """Record a reconnect/reset event with a classified root cause."""
@@ -2349,22 +2363,15 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         primary's session and must not close it.
         """
         if self._session is not None:
-            if self._is_primary:
-                _LOGGER.debug(
-                    "Closing shared E2E session (primary device %s)",
-                    self.device_id,
-                )
-                try:
-                    await self.hass.async_add_executor_job(self._session.close)
-                except Exception:  # noqa: BLE001
-                    pass
-                self._pop_shared_session()
-            else:
-                _LOGGER.debug(
-                    "Not closing E2E session for secondary device %s "
-                    "(shared with primary)",
-                    self.device_id,
-                )
+            _LOGGER.debug(
+                "Closing E2E session for device %s",
+                self.device_id,
+            )
+            try:
+                await self.hass.async_add_executor_job(self._session.close)
+            except Exception:  # noqa: BLE001
+                pass
+            self._pop_device_session()
             self._invalidate_session_ref()
 
     async def _keepalive_loop(self) -> None:

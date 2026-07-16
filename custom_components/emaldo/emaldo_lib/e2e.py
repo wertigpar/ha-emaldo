@@ -30,14 +30,16 @@ from .exceptions import EmaldoE2EError, EmaldoE2ESessionExpired
 
 _LOGGER = logging.getLogger(__name__)
 
-# Rate-limited diagnostic for DECRYPTED-BUT-REJECTED events in decrypt_response.
-# A "decrypted but rejected" event is when AES decrypts cleanly but the payload
-# validator / accepted headers reject it — the #41 signal. The search loop
-# produces one such event per (nonce, offset) candidate, so per-offset logging
-# floods the log on every non-power-flow packet (ACKs, status pushes). We
-# coalesce into a single periodic line that preserves the signal (event count +
-# a sample payload) without the flood. The first event in a window is logged
-# immediately so a genuine single rejection is never swallowed; subsequent
+# Rate-limited diagnostic for DECRYPTED non-data push events in decrypt_response.
+# A "decrypted non-data push" is when AES decrypts cleanly but the payload is
+# NOT a power-flow/battery frame — the relay also sends status/control JSON
+# (e.g. ``{"__time":...,"domain":...}`` or ``cmd not allowed``) on the same
+# socket. These packets are *handled* (decrypted + identified) and ignored, not
+# *rejected* as errors. The search loop produces one such event per (nonce,
+# offset) candidate, so per-offset logging floods the log on every status push.
+# We coalesce into a single periodic line that preserves the signal (event count
+# + a classified sample payload) without the flood. The first event in a window
+# is logged immediately so a genuine single event is never swallowed; subsequent
 # events in the same window are counted and flushed at window expiry.
 _decrypt_rejected_lock = threading.Lock()
 _decrypt_rejected_count = 0
@@ -353,6 +355,26 @@ def _is_override_payload(payload: bytes) -> bool:
     return payload[8] in (0x60, 0xC0)
 
 
+def _classify_decrypted_payload(payload_hex: str) -> str:
+    """Classify a decrypted-but-non-power-flow payload for diagnostics.
+
+    The relay delivers status/control JSON (e.g. ``{"__time":...,"domain":...}``
+    or ``cmd not allowed``) on the same socket as power-flow frames. These
+    decrypt cleanly but are not power-flow/battery data — they are *handled*
+    (decrypted + identified) and ignored, not *rejected* as errors. Returning a
+    human-readable label keeps the debug log honest about what happened.
+    """
+    try:
+        raw = bytes.fromhex(payload_hex)
+        text = raw.decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return "binary (not power-flow/battery)"
+    if all(32 <= b < 127 or b in (9, 10, 13) for b in text.encode("utf-8")):
+        preview = text if len(text) <= 48 else text[:45] + "..."
+        return f"text/status push: {preview!r}"
+    return "binary (not power-flow/battery)"
+
+
 def decrypt_response(
     data: bytes,
     key: str,
@@ -477,10 +499,11 @@ def decrypt_response(
                             _flush = False
                     if _flush and sample is not None:
                         _LOGGER.debug(
-                            "decrypt_response: DECRYPTED-BUT-REJECTED x%d "
-                            "(window=%.0fs, sample nonce=%s key_len=%d "
+                            "decrypt_response: DECRYPTED non-data push x%d "
+                            "(window=%.0fs, %s, sample nonce=%s key_len=%d "
                             "payload_len=%d payload_hex=%s)",
                             n, _DECRYPT_REJECTED_WINDOW_S,
+                            _classify_decrypted_payload(sample[3]),
                             sample[0], sample[1], sample[2], sample[3],
                         )
             except (ValueError, KeyError):
@@ -3790,11 +3813,12 @@ class PersistentE2ESession:
         NOT rotate chat_secret, breaking the death spiral where every reconnect
         creates undecryptable pending packets (#47 beta15f).
         """
-        if not self._stream_needs_reconnect:
-            self._stream_last_reconnect_reason = reason
-            self._stream_reconnect_reasons[reason] = (
-                self._stream_reconnect_reasons.get(reason, 0) + 1
-            )
+        # Always record the latest reason so the diagnostic sensor reflects the
+        # most recent trigger. The per-rebuild reason count is incremented in
+        # _stream_reconnect_locked (where the reconnect counter lives) so the
+        # reasons dict tracks actual rebuilds 1:1 instead of undercounting when a
+        # reconnect retries while the flag is already set (#47 beta16h-C4).
+        self._stream_last_reconnect_reason = reason
         if "21204" in reason:
             self._stream_needs_creds_refresh = True
         self._stream_needs_reconnect = True
@@ -4142,6 +4166,12 @@ class PersistentE2ESession:
             self._last_keepalive_monotonic = time.perf_counter()
             self._stream_started_monotonic = time.perf_counter()  # reset watchdog
             self._stream_reconnects += 1
+            # Count the reason on the actual rebuild so it stays in lockstep with
+            # the reconnect counter (one entry per rebuild, not per flag-set).
+            _r = self._stream_last_reconnect_reason or "unknown"
+            self._stream_reconnect_reasons[_r] = (
+                self._stream_reconnect_reasons.get(_r, 0) + 1
+            )
             # A successful handshake clears the escalation: the next 21204 starts
             # fresh at the base backoff instead of inheriting a tall streak.
             self._stream_reconnect_streak = 0
