@@ -774,9 +774,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_stream_frames_total: int = 0
         self.stats_stream_resubscribes_total: int = 0
         self.stats_stream_reconnects_total: int = 0
+        # Cumulative reconnect-reason breakdown, mirroring stats_stream_reconnects_total
+        # so the diagnostic sensor compares like-for-like (the per-session reasons dict
+        # in stream_diagnostics() resets on every session recreation, while the
+        # reconnect *count* is accumulated across sessions — #47 beta16h-C4).
+        self.stats_stream_reconnect_reasons: dict[str, int] = {}
+        self.stats_stream_last_reconnect_reason: str | None = None
         self._last_stream_frames_seen: int = 0
         self._last_stream_resubs_seen: int = 0
         self._last_stream_reconnects_seen: int = 0
+        self._last_stream_reasons_seen: dict[str, int] = {}
         # Latest stream diagnostics snapshot (reconnect-reason breakdown etc.)
         self._stream_diag: dict = {}
         # Diagnostic info collected by executor thread, logged from main thread
@@ -849,6 +856,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     def _invalidate_session_ref(self) -> None:
         """Drop local references to the active E2E session and binding."""
+        # Fold the outgoing session's reconnect reasons into the cumulative
+        # totals before the per-session dict is lost (the new session starts
+        # empty). Guards against a None session (e.g. double-invalidate).
+        if self._session is not None:
+            self._merge_stream_reasons(self._session)
+            self._last_stream_reasons_seen = {}
         self._session = None
         self._session_binding = None
         # Unregister home secret rotation callback so old session is not
@@ -941,13 +954,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "home_end_secret": creds.get("home_end_secret", ""),
                 "home_chat_secret": creds.get("home_chat_secret", ""),
             }
-            _LOGGER.debug(
-                "[OptC-diag] Primary %s: published home_secret at "
-                "session creation — end=%s... home=%s",
-                device_id,
-                (creds.get("home_end_secret", "") or "")[:8],
-                home_id,
-            )
 
         # For secondary: override home secret from primary-managed shared dict
         if not self._is_primary:
@@ -960,16 +966,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 creds["home_chat_secret"] = home_secrets.get(
                     "home_chat_secret", creds["home_chat_secret"]
-                )
-                _LOGGER.debug(
-                    "[OptC-diag] Secondary %s: using primary-managed home secret "
-                    "end=%s...", device_id,
-                    (home_secrets.get("home_end_secret", "") or "")[:8],
-                )
-            else:
-                _LOGGER.debug(
-                    "[OptC-diag] Secondary %s: home_secrets dict empty for home=%s "
-                    "— no override applied", device_id, home_id,
                 )
 
         PersistentE2ESession.register_device_key(
@@ -1000,13 +996,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     "home_end_secret": new_creds.get("home_end_secret", ""),
                     "home_chat_secret": new_creds.get("home_chat_secret", ""),
                 }
-                _LOGGER.debug(
-                    "[OptC-diag] _creds_provider primary: published home_secret "
-                    "for home=%s end=%s... device=%s",
-                    home_id,
-                    (new_creds.get("home_end_secret", "") or "")[:8],
-                    device_id,
-                )
             else:
                 # Secondary overrides home secret from primary's published value
                 home_secrets = self.hass.data.get(DOMAIN, {}).get(
@@ -1018,19 +1007,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     )
                     new_creds["home_chat_secret"] = home_secrets.get(
                         "home_chat_secret", new_creds["home_chat_secret"]
-                    )
-                    _LOGGER.debug(
-                        "[OptC-diag] _creds_provider secondary: overriding "
-                        "for home=%s device=%s end_from=%s... end_to=%s...",
-                        home_id, device_id,
-                        (new_creds.get("home_end_secret", "") or "")[:8],
-                        (home_secrets.get("home_end_secret", "") or "")[:8],
-                    )
-                else:
-                    _LOGGER.debug(
-                        "[OptC-diag] _creds_provider secondary: no home_secrets "
-                        "for home=%s device=%s — no override",
-                        home_id, device_id,
                     )
             return new_creds
 
@@ -1114,6 +1090,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self.stats_override_last_result = {
                     "success": False, "failure_reason": "timeout",
                 }
+                session.close()
+                self._pop_device_session()
+                self._invalidate_session_ref()
+                self._needs_fresh_creds = True
                 return False
             if b"CONN_NOT_ESTABLISHED" in resp:
                 _LOGGER.debug(
@@ -1124,6 +1104,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self.stats_override_last_result = {
                     "success": False, "failure_reason": "conn_not_established",
                 }
+                session.close()
+                self._pop_device_session()
+                self._invalidate_session_ref()
+                self._needs_fresh_creds = True
                 return False
             _LOGGER.debug(
                 "[Override] stream cmd: OK resp_len=%s "
@@ -1178,6 +1162,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 max_age=STREAM_STALE_AFTER, device_id=self.device_id,
             )
             self._accumulate_stream_stats(session)
+            # Sample RTT here too: stream mode returns before the legacy RTT
+            # block below, so without this the cumulative e2e_rtt_* stats stay
+            # empty even though the session measures RTT on every _send_raw
+            # (handshake/keepalive/command) (#47 beta16h-C4 RTT gap).
+            self._sample_session_rtt(session)
             self._stream_diag = session.stream_diagnostics()
             self._e2e_diag = (
                 f"stream frames={self.stats_stream_frames_total} "
@@ -1223,15 +1212,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.stats_powerflow_drain_exhausted += int(
             diag.get("drain_exhausted", 0)
         )
-        rtt_ms = session.last_rtt_ms
-        if rtt_ms is not None:
-            self.stats_e2e_rtt_last_ms = round(rtt_ms, 1)
-            self.stats_e2e_rtt_total_ms += rtt_ms
-            self.stats_e2e_rtt_samples += 1
-            if self.stats_e2e_rtt_min_ms is None or rtt_ms < self.stats_e2e_rtt_min_ms:
-                self.stats_e2e_rtt_min_ms = rtt_ms
-            if self.stats_e2e_rtt_max_ms is None or rtt_ms > self.stats_e2e_rtt_max_ms:
-                self.stats_e2e_rtt_max_ms = rtt_ms
+        self._sample_session_rtt(session)
         cur = get_power_flow_sanity_drops()
         delta = cur - self._last_powerflow_sanity_drops
         if delta > 0:
@@ -1288,6 +1269,51 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # Counter reset (new session object) — add the new value whole.
                 setattr(self, total_attr, getattr(self, total_attr) + cur)
             setattr(self, last_attr, cur)
+        # Carry the per-session reconnect-reason breakdown into the cumulative
+        # totals (delta vs last poll) so stream_reconnect_reasons stays in
+        # lockstep with stream_reconnects across session recreations.
+        self._merge_stream_reasons(session)
+
+    def _merge_stream_reasons(self, session: PersistentE2ESession) -> None:
+        """Fold the session's per-session reason counts into the cumulative totals.
+
+        Uses a per-key delta against ``_last_stream_reasons_seen`` so repeated
+        polls within one session do not double-count. On session recreation the
+        caller resets ``_last_stream_reasons_seen`` to ``{}`` so the fresh (empty)
+        session produces zero deltas.
+        """
+        cur = getattr(session, "_stream_reconnect_reasons", {}) or {}
+        last = self._last_stream_reasons_seen
+        for key, val in cur.items():
+            delta = val - last.get(key, 0)
+            if delta > 0:
+                self.stats_stream_reconnect_reasons[key] = (
+                    self.stats_stream_reconnect_reasons.get(key, 0) + delta
+                )
+        last_reason = getattr(session, "_stream_last_reconnect_reason", None)
+        if last_reason is not None:
+            self.stats_stream_last_reconnect_reason = last_reason
+        self._last_stream_reasons_seen = dict(cur)
+
+    def _sample_session_rtt(self, session: PersistentE2ESession) -> None:
+        """Fold the session's latest UDP RTT into the cumulative RTT stats.
+
+        The session measures RTT on every ``_send_raw`` exchange (handshake,
+        keepalive, command). In stream mode the periodic poll reads a cached
+        frame and returns before the legacy RTT-sampling block, so sample it
+        here too. No packets are sent and no protocol behavior changes — this
+        only copies an already-computed side effect (#47 beta16h-C4 RTT gap).
+        """
+        rtt_ms = session.last_rtt_ms
+        if rtt_ms is None:
+            return
+        self.stats_e2e_rtt_last_ms = round(rtt_ms, 1)
+        self.stats_e2e_rtt_total_ms += rtt_ms
+        self.stats_e2e_rtt_samples += 1
+        if self.stats_e2e_rtt_min_ms is None or rtt_ms < self.stats_e2e_rtt_min_ms:
+            self.stats_e2e_rtt_min_ms = rtt_ms
+        if self.stats_e2e_rtt_max_ms is None or rtt_ms > self.stats_e2e_rtt_max_ms:
+            self.stats_e2e_rtt_max_ms = rtt_ms
 
     def _record_reconnect(self, reason: str, ts: float) -> None:
         """Record a reconnect/reset event with a classified root cause."""
