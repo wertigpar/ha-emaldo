@@ -1,6 +1,58 @@
 # Changes
 
+## v1.0.0-beta16l
+
+### Fixed (decrypt-noise flood NOT killed by beta16k — the `_try_parse_power_flow` path)
+
+- **Reported by:** JanBaecklund (issue #47), still seeing `decrypt_response:
+  1 nonce(s) tried but decryption/validation failed` after beta16k.
+- **Root cause:** beta16k's `silent=True` only covered the drain-**classifier**
+  pass (the SECOND decrypt of each unparsed frame). Every drain frame first
+  goes through `_try_parse_power_flow` (the power-flow parse attempt), and
+  that path still called `decrypt_response` with `silent=False`. Keepalive
+  frames carry AES nonce markers (e.g. `90a3_pos=[71]`) but are not encrypted
+  with our `chat_secret`, so the power-flow pass emitted
+  `1 nonce(s) tried but ... failed` for every one of them. That was the bulk
+  of the flood — beta16k reduced it by ~half at most, not to zero.
+- **Fix:** pass `silent=True` to both `decrypt_response` calls inside
+  `_try_parse_power_flow` (own-key + home-key fallback). Combined with the
+  beta16k classifier fix, every drain-frame decrypt attempt is now silent on
+  the per-call `no nonce markers` / `N nonce(s) tried but ... failed` lines.
+  A keepalive frame now increments `stream_keepalive_acks` with zero decrypt
+  noise. Nothing real is lost: `decrypt_response: SUCCESS` still logs for real
+  frames, and genuine power-flow decrypt trouble is still surfaced by
+  `_try_parse_power_flow`'s coalesced `_pf_rejected [xN in window]` and
+  `decrypt_response=None [xN in window]` summaries (1 line / 60 s window).
+- **File:** `emaldo_lib/e2e.py` (`silent=True` at both `_try_parse_power_flow`
+  decrypt calls).
+
 ## v1.0.0-beta16k
+
+### Fixed (diagnostic decrypt-noise — "still a lot of decryption/validation failed")
+
+- **Reported by:** JanBaecklund (issue #47), comparing beta16j → beta16k. The
+  DEBUG log showed a very high `decrypt_response: ... decryption/validation
+  failed` count and he read it as a regression.
+- **Root cause (NOT a real failure):** the E2E socket carries ~99 % benign relay
+  control traffic — keepalive/notice/server frames (`alive`/`and_`/`notice`/
+  `srv`/`SERVER`) and `cmd not allowed` ACKs. These are NOT encrypted with our
+  `chat_secret` (or carry no AES nonce at all), so every one of them logs
+  `no nonce markers` / `N nonce(s) tried but failed`. beta16k *added* to this:
+  the new drain-classifier re-decrypts every unparsed packet to categorise it,
+  so the same benign frames were logged a second time. Two independent logs
+  confirm the ratio is benign — beta16j was 11.2:1 fail:success over ~82 s;
+  beta16k was 17.3:1 over ~5.9 min (higher raw count but mostly the extra
+  classifier pass + 4× longer run). The REAL #47 symptom — reconnect
+  ping-pong / dead window — is fixed: beta16k froze stream reconnects at 2
+  across the whole run with no `CONN_NOT_ESTABLISHED`, vs beta16j churning 19
+  reconnect refs in 82 s.
+- **Fix:** `decrypt_response` gains a `silent: bool = False` kwarg that
+  suppresses the per-call `no nonce markers` / `N nonce(s) tried but ...
+  failed` DEBUG lines while still returning the decrypted bytes (and still
+  emitting `SUCCESS` + the rate-limited `DECRYPTED non-data push` summary).
+  The drain-classifier categorisation pass uses `silent=True`.
+- **File:** `emaldo_lib/e2e.py` (`decrypt_response` signature + two guarded
+  DEBUG lines; `silent=True` at the drain-classifier call site).
 
 ### Changed (diagnostics — split drained datagrams into three scopes)
 
