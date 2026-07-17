@@ -366,24 +366,79 @@ def _is_override_payload(payload: bytes) -> bool:
     return payload[8] in (0x60, 0xC0)
 
 
-def _classify_decrypted_payload(payload_hex: str) -> str:
-    """Classify a decrypted-but-non-power-flow payload for diagnostics.
+# Markers found in real relay control datagrams (verified beta16k/16l, #53 log):
+# the raw response carries plaintext presence/control tags outside the AES-CBC
+# body, so decrypt_response cannot parse them — they are NOT power-flow and NOT
+# errors, just the relay's keepalive/notice/server traffic multiplexed onto the
+# same subscription socket. ``alive``/``and_`` = keepalive ACK; ``notice``/``srv``
+# = relay notice/server-status frame; ``SERVER`` = relay control frame.
+_KEEPALIVE_MARKERS = (b"alive", b"and_", b"notice", b"srv", b"SERVER")
 
-    The relay delivers status/control JSON (e.g. ``{"__time":...,"domain":...}``
-    or ``cmd not allowed``) on the same socket as power-flow frames. These
-    decrypt cleanly but are not power-flow/battery data — they are *handled*
-    (decrypted + identified) and ignored, not *rejected* as errors. Returning a
-    human-readable label keeps the debug log honest about what happened.
+
+def _classify_drain_payload(
+    resp: bytes, decrypted: bytes | None
+) -> tuple[str, str]:
+    """Classify a drain datagram into a (category_key, display) pair.
+
+    The relay multiplexes several datagram kinds onto the same persistent E2E
+    subscription socket as the 0x30 power-flow frames. Anything that is not a
+    recognized data frame (power-flow, regulate-frequency, force-logout) lands
+    in the drain "unparsed" bucket. These are almost all NORMAL relay traffic
+    (keepalive ACKs, status/control pushes), not errors — the high unparsed
+    ratio only means most pushes on this socket are control, not power-flow.
+
+    Classification uses the RAW response first (the keepalive tags live outside
+    the encrypted body), then the decrypted payload.
+
+    Categories (``category_key``):
+      - ``keepalive_ack``— raw response carries a relay presence/control tag
+                           (``alive``/``and_``/``notice``/``srv``/``SERVER``).
+                           Normal relay keepalive/notice/server traffic. By far
+                           the most common; not decryptable as data with our key.
+      - ``status_json``  — decrypted, valid UTF-8 JSON object/array
+                           (e.g. ``{"__time":...,"domain":...}``). Status push.
+      - ``control_text`` — decrypted, printable text but not JSON
+                           (e.g. ``cmd not allowed``, ACK strings).
+      - ``binary``       — decrypted (often a partial/tail block) but not valid
+                           printable text.
+      - ``undecryptable``— neither a relay-control tag nor decryptable with any
+                           known key. The ONLY category that may indicate a real
+                           problem (stale secret / wrong key / corrupt frame).
+
+    ``decrypted`` is the recovered payload bytes, or ``None`` when every decrypt
+    attempt failed.
+    """
+    if resp and any(m in resp for m in _KEEPALIVE_MARKERS):
+        return "keepalive_ack", f"keepalive_ack (relay presence, resp {len(resp)}B)"
+    if not decrypted:
+        return "undecryptable", "undecryptable (no key decrypted it)"
+    try:
+        text = decrypted.decode("utf-8")
+    except UnicodeDecodeError:
+        return "binary", f"binary {len(decrypted)}B (not power-flow/battery)"
+    printable = all(32 <= b < 127 or b in (9, 10, 13) for b in decrypted)
+    if not printable:
+        return "binary", f"binary {len(decrypted)}B (not power-flow/battery)"
+    stripped = text.strip()
+    preview = text if len(text) <= 48 else text[:45] + "..."
+    if stripped[:1] in ("{", "["):
+        return "status_json", f"status_json: {preview!r}"
+    return "control_text", f"control_text: {preview!r}"
+
+
+def _classify_decrypted_payload(payload_hex: str) -> str:
+    """Backward-compatible display-string classifier (coalesced summary).
+
+    Wraps :func:`_classify_drain_payload`; returns only the human-readable
+    display half so the existing ``DECRYPTED non-data push`` summary line is
+    unchanged in shape. This path only has the decrypted payload (no raw
+    response), so the keepalive detection does not apply here.
     """
     try:
         raw = bytes.fromhex(payload_hex)
-        text = raw.decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
+    except ValueError:
         return "binary (not power-flow/battery)"
-    if all(32 <= b < 127 or b in (9, 10, 13) for b in text.encode("utf-8")):
-        preview = text if len(text) <= 48 else text[:45] + "..."
-        return f"text/status push: {preview!r}"
-    return "binary (not power-flow/battery)"
+    return _classify_drain_payload(b"", raw)[1]
 
 
 def decrypt_response(
@@ -3313,7 +3368,37 @@ class PersistentE2ESession:
         self._stream_reconnect_reasons: dict[str, int] = {}
         self._stream_last_reconnect_reason: str | None = None
         self._stream_drain_packets = 0
+        # Drained non-power-flow datagrams split into three scopes (beta16k):
+        #
+        #   1. keepalive_ack  -> _stream_keepalive_acks (top-level counter)
+        #      Benign relay presence/keepalive/notice/server chatter
+        #      (alive/and_/notice/srv/SERVER). By far the most common; NOT a
+        #      problem and NOT "unparsed" — it just isn't power-flow.
+        #
+        #   2. status_json / control_text -> _stream_relay_status (dict)
+        #      Decrypted, readable relay status pushes / ACKs. Also benign;
+        #      broken out separately so they don't inflate the concern counter.
+        #
+        #   3. binary / undecryptable -> _stream_drain_unparsed (+ categories)
+        #      Frames we genuinely could not parse into readable data. THIS is
+        #      the counter worth watching (undecryptable = stale secret / wrong
+        #      key / corrupt frame; binary = partial/unknown blob).
+        self._stream_keepalive_acks = 0
+        self._stream_relay_status: dict[str, int] = {
+            "status_json": 0,
+            "control_text": 0,
+        }
         self._stream_drain_unparsed = 0
+        self._stream_drain_unparsed_categories: dict[str, int] = {
+            "binary": 0,
+            "undecryptable": 0,
+        }
+        # One-shot rate-limited sample of each category's payload for
+        # verification (beta16k). Emitted at DEBUG at most once per category per
+        # _stream_drain_sample_window seconds so a debug-log test run reveals the
+        # actual payloads without flooding.
+        self._stream_drain_sample_last: dict[str, float] = {}
+        self._stream_drain_sample_window = 120.0
         # Decrypt-gated reconnect success (#53 Q1/Q3). A handshake returning
         # "ok" only proves the transport reconnected — it does NOT prove the
         # current chat_secret can still decrypt the realtime push stream. We
@@ -3869,7 +3954,12 @@ class PersistentE2ESession:
                 "resubscribes": self._stream_resubscribes,
                 "reconnects": self._stream_reconnects,
                 "drain_packets": self._stream_drain_packets,
+                "keepalive_acks": self._stream_keepalive_acks,
+                "relay_status": dict(self._stream_relay_status),
                 "drain_unparsed": self._stream_drain_unparsed,
+                "drain_unparsed_categories": dict(
+                    self._stream_drain_unparsed_categories
+                ),
                 "last_reconnect_reason": self._stream_last_reconnect_reason,
                 "reconnect_reasons": dict(self._stream_reconnect_reasons),
                 "creds_refresh_queued": self._stream_needs_creds_refresh,
@@ -4107,9 +4197,67 @@ class PersistentE2ESession:
                     except Exception:
                         pass
 
-                # A datagram we received but could not classify — track it so a
-                # "frames=0 but packets>0" situation is visible in diagnostics.
-                self._stream_drain_unparsed += 1
+                # A datagram we received but that is not a data frame. Classify
+                # it (beta16k) and route it into the right scope so diagnostics
+                # separate benign relay chatter from frames we truly could not
+                # parse. Try a permissive decrypt with the known keys purely to
+                # recover the plaintext for classification; if nothing decrypts
+                # it (and it carries no relay-control tag) it is undecryptable.
+                _decoded_for_class: bytes | None = None
+                _class_keys = [self._creds.get("chat_secret", "")]
+                _hs = self._creds.get("home_end_secret", "")
+                if _hs:
+                    _class_keys.append(_hs)
+                for _k in alt_keys.values() if alt_keys else []:
+                    if _k and _k not in _class_keys:
+                        _class_keys.append(_k)
+                for _k in _class_keys:
+                    if not _k:
+                        continue
+                    try:
+                        _decoded_for_class = decrypt_response(
+                            resp, _k, payload_validator=lambda _d: True,
+                        )
+                    except Exception:  # noqa: BLE001 - classification best-effort
+                        _decoded_for_class = None
+                    if _decoded_for_class is not None:
+                        break
+                _cat, _display = _classify_drain_payload(
+                    resp, _decoded_for_class
+                )
+                # Route by scope:
+                #   keepalive_ack          -> benign top-level counter
+                #   status_json/control_text -> benign relay-status dict
+                #   binary/undecryptable   -> genuinely-unparsed (+ categories)
+                if _cat == "keepalive_ack":
+                    self._stream_keepalive_acks += 1
+                elif _cat in self._stream_relay_status:
+                    self._stream_relay_status[_cat] += 1
+                else:
+                    self._stream_drain_unparsed += 1
+                    self._stream_drain_unparsed_categories[_cat] = (
+                        self._stream_drain_unparsed_categories.get(_cat, 0) + 1
+                    )
+                # Rate-limited per-category sample so a debug-log test run
+                # reveals the real payloads (verification aid, beta16k). At most
+                # one sample per category per _stream_drain_sample_window seconds.
+                if _LOGGER.isEnabledFor(logging.DEBUG):
+                    _now_s = time.perf_counter()
+                    _last_s = self._stream_drain_sample_last.get(_cat, 0.0)
+                    if _now_s - _last_s >= self._stream_drain_sample_window:
+                        self._stream_drain_sample_last[_cat] = _now_s
+                        _hexlen = 0 if _decoded_for_class is None else len(_decoded_for_class)
+                        _rawhex = _decoded_for_class.hex() if _decoded_for_class is not None else ""
+                        _resp_ascii = "".join(
+                            chr(_b) if 32 <= _b < 127 else "." for _b in resp[:48]
+                        )
+                        _LOGGER.debug(
+                            "[E2E] drain unparsed sample: category=%s payload=%dB "
+                            "%s | resp_len=%dB resp_ascii=%r resp_head=%s "
+                            "decrypted_hex=%s",
+                            _cat, _hexlen, _display,
+                            len(resp), _resp_ascii, resp[:32].hex(), _rawhex[:256],
+                        )
         finally:
             try:
                 self._sock.settimeout(prev_timeout)
