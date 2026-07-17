@@ -1,5 +1,150 @@
 # Changes
 
+## v1.0.0-beta16k
+
+### Changed (diagnostics — split drained datagrams into three scopes)
+
+- **Why:** even after categorising, lumping keepalive/status/ACK traffic under
+  `stream_drain_unparsed` was misleading — those frames are perfectly parseable
+  benign relay chatter, not "unparsed". The counter that matters (frames we
+  truly could not parse) was buried in a dict dominated by keepalives.
+- **What:** drained non-power-flow datagrams are now routed into **three
+  separate scopes** instead of one `unparsed` bucket with a nested breakdown:
+  - `stream_keepalive_acks` — **top-level** counter for benign relay presence/
+    keepalive/notice/server chatter (`alive`/`and_`/`notice`/`srv`/`SERVER`).
+    The bulk of drain traffic; expected, ignore.
+  - `stream_relay_status` — decrypted benign relay status/ACK pushes,
+    `{status_json, control_text}`; expected, ignore.
+  - `stream_drain_unparsed` (+ `stream_drain_unparsed_categories`) — now counts
+    **only** frames we genuinely could not parse, `{binary, undecryptable}`.
+    `undecryptable > 0` is the single value that indicates a real decrypt
+    problem (stale secret / wrong key / corrupt frame).
+- All three are cumulative across sessions (coordinator delta-merge, reset on
+  `_invalidate_session_ref`). Verified: keepalive/notice/SERVER → keepalive
+  counter, JSON/ACK → relay_status, non-text/no-key → drain_unparsed only.
+- **Files:** `emaldo_lib/e2e.py` (session counters + routing in the drain loop +
+  `stream_diagnostics`), `coordinator.py` (three cumulative stats + merge +
+  reset), `sensor.py` (three attributes).
+
+### Changed (diagnostics — categorize the drain "unparsed" bucket)
+
+- **Why:** the diagnostic sensor showed a single `stream_drain_unparsed` count
+  that was often ~87 % of `stream_drain_packets`, which *looks* like a massive
+  failure to anyone without protocol background. In reality these are almost all
+  NORMAL relay control/status datagrams multiplexed onto the same persistent E2E
+  subscription socket as the 0x30 power-flow frames — the integration decrypts
+  them fine and intentionally ignores them (they are not power-flow /
+  regulate-frequency / force-logout). The high ratio only means most pushes on
+  that socket are control, not data.
+- **What:** the drain "unparsed" packets are now classified into categories via
+  `_classify_drain_payload(resp, decrypted)`. Classification looks at the RAW
+  response first (relay keepalive tags live *outside* the AES-CBC body), then
+  the decrypted payload:
+  - `keepalive_ack` — raw response carries the relay `alive`/`and_<session>`
+    presence tags. This is the relay's keepalive/heartbeat ACK and is by far the
+    most common drain datagram. **Verified against a real debug-log run** (see
+    below): `alive` (`616c697665`) appears in 628 raw responses; these are the
+    179 B replies to `Alive(home)`/`Alive(device)`. Not power-flow, not an error.
+  - `status_json`  — decrypted, valid JSON status push (`{"__time":...}` etc.)
+  - `control_text` — decrypted printable non-JSON (ACK, `cmd not allowed`)
+  - `binary`       — decrypted (often only a partial/tail block, e.g. ending
+    `...u_x_02"}`) but not valid printable text
+  - `undecryptable`— neither a keepalive tag nor decryptable with any known key
+    (**the only category that may indicate a real problem**: stale secret /
+    wrong key / corrupt frame)
+  Per-session counts live on the session; the coordinator accumulates them
+  cross-session (same delta pattern as reconnect reasons) into
+  `stats_stream_drain_unparsed_categories`, surfaced on the sensor as the
+  `stream_drain_unparsed_categories` attribute (only non-zero categories shown).
+- **Verification logging:** to confirm the taxonomy against real traffic, a
+  rate-limited DEBUG sample is emitted at most once per category per 120 s
+  (`drain unparsed sample: category=... payload=NB ... resp_ascii=... resp_head=... decrypted_hex=...`).
+  This lets a debug-log test run reveal the actual payloads without flooding.
+  `resp_ascii` (first 48 B, non-printable rendered `.`) was added after the
+  first debug-log run revealed the keepalive tags live in the raw response, not
+  the decrypted body — it makes the `keepalive_ack` classification auditable.
+- **First debug-log run (2026-07-17):** confirmed the drain "unparsed" bucket is
+  dominated by keepalive ACKs; earlier `binary`/`undecryptable` labels were
+  reclassified to `keepalive_ack` once the raw response was inspected. No
+  `status_json`/`control_text` seen in that window; realtime sensor healthy
+  (85/85 polls, `stream_stale: false`, RTT min 92.1 ms).
+- **Second debug-log run (2026-07-17, 38 min, 453 polls):** `keepalive_ack:
+  1290` vs `binary: 2` / `undecryptable: 1` — 99.7 % of the 1293 drain "unparsed"
+  packets are normal relay keepalive/presence ACKs. The single `undecryptable`
+  decodes to the same `<id><token>` presence format (no literal `alive`/`and_`
+  substring in the scanned window) — benign, not a secret/key problem. Realtime
+  fully healthy: 453/453 polls, 0 failures, 5 `session_expired_21204` reconnects
+  all recovered, `stream_stale: false`.
+- **RTT min guard tightened (`< 1.0` ms reject):** the first run showed
+  `e2e_rtt_min_ms: 0` because a sub-millisecond clock-granularity measurement
+  slipped past the old `<= 0` guard and rounded to `0.0`. Real relay RTT is
+  always 50-120 ms, so any sample `< 1 ms` is an artifact and is now dropped.
+- **No protocol/behavior change** — the total `stream_drain_unparsed` counter is
+  unchanged; this only adds the breakdown and the sample log. The `#53` decrypt
+  gate, `#53` None-guard, and RTT guard from beta16j are unaffected.
+- **Third debug-log run (2026-07-17, 15 min):** confirmed all drain-unparsed
+  frames are benign relay traffic. The earlier `undecryptable`/`binary` samples
+  decode to relay `notice`/`SERVER` presence frames and partial-offset JSON
+  control tails (``..."logout"}``) — none indicate a stale/key problem. The
+  `undecryptable` frames even carry valid AES nonces but use a *relay* key, not
+  our `chat_secret`, so they are expected. Broadened the `keepalive_ack` marker
+  set to `alive`/`and_`/`notice`/`srv`/`SERVER` so these land in the benign
+  bucket; `undecryptable` is now reserved for genuinely unparseable frames. The
+  only error in the run was a transient `OSError: Bad file descriptor` on a bulk
+  override command during a reconnect window (fd mid-rebuild) — expected
+  CONN_NOT_ESTABLISHED retry behavior, self-recovered, same family as #41 RC4.
+  This is now handled cleanly (see below).
+
+### Fixed (override socket teardown race — `OSError: Bad file descriptor`)
+
+- **Root cause:** `_send_override_via_stream` runs in a HA `SyncWorker` executor
+  thread. Between `_ensure_session()`'s `closed` check and the actual
+  `send_command_for_creds`, the session's socket can be torn down concurrently
+  by *another* thread: the stream reconnect thread (primary) or the
+  `rekey_home` callback fired after a primary rotates the home secret (any
+  device in a **multi-unit** home). Sending on that dead fd raised
+  `OSError(EBADF, "Bad file descriptor")`, which surfaced as a full Traceback
+  and was retried as a generic `exception` (3× → `CONN_NOT_ESTABLISHED`). It
+  always self-recovered, but the Traceback looked alarming and the retry
+  reason was miscategorised.
+- **Fix A — classify EBADF as transient (no Traceback):** the `except` now
+  catches `OSError` and, when `errno == EBADF`, logs a quiet DEBUG line and
+  classifies the failure as `conn_not_established` (retryable) instead of a
+  Traceback-logged `exception`. Any *other* `OSError` (real network fault) is
+  still logged with a full Traceback.
+- **Fix B — close the TOCTOU:** immediately before the send, re-check
+  `session.closed`. If the session was invalidated under us, bail out cleanly
+  (`conn_not_established`, invalidate + flag fresh creds) rather than sending on
+  a dead socket. Deliberately **no re-acquire loop** — a single deterministic
+  bail keeps this safe during a mass `rekey_home` across many units; the caller
+  (`services.py`) retries on the freshly rebuilt session.
+- **Multi-unit safety:** the fd race is strictly per-device (each device owns
+  its own socket in `_device_sessions`, keyed per device — an override for one
+  unit cannot close another unit's fd). `_ensure_client`/`_reset_client` are
+  already lock-guarded in `client.py`. The one multi-unit-only trigger
+  (primary→secondary `rekey_home` concurrent with a secondary override) is
+  covered by the same "transient → retry" semantics; no new locking, no hot
+  loop. Verified single-unit-testable; multi-unit path is behaviourally
+  identical.
+- **Verified:** a standalone script exercised the *real* extracted method over
+  4 cases — closed-before-send, EBADF-during-send, other-OSError, happy-path —
+  all pass (transient paths return `False` with `conn_not_established` and no
+  raise; other `OSError` still surfaces; happy path unchanged).
+- **File:** `coordinator.py` (`_send_override_via_stream` + `import errno`).
+- **Counter scope fixed (subset > parent bug):** a debug-log review caught
+  `stream_drain_unparsed` (per-session, from `stream_diagnostics`) being *smaller*
+  than the cumulative `stream_drain_unparsed_categories` total after reconnects
+  (run showed 671 vs 733 — the breakdown exceeded its own parent). Both are now
+  **cumulative lifetime**: the coordinator folds the per-session delta into
+  `stats_stream_drain_unparsed` (survives session recreation via the same
+  delta-merge as the categories), and the sensor reads that. The per-session
+  value remains available in `stream_diagnostics["drain_unparsed"]` if needed.
+- **Files changed:** `emaldo_lib/e2e.py` (`_classify_drain_payload` +
+  `_classify_decrypted_payload` wrapper; category counters, sample log, and
+  `drain_unparsed_categories` in `stream_diagnostics`), `coordinator.py`
+  (cumulative `stats_stream_drain_unparsed_categories` + merge/reset),
+  `sensor.py` (`stream_drain_unparsed_categories` attribute), `manifest.json`.
+
 ## v1.0.0-beta16j
 
 ### Fixed (#53 — session wedged "handshake ok" but never decrypts)

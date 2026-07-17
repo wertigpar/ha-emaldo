@@ -1104,7 +1104,34 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             stream_attrs["stream_reconnects"] = c.stats_stream_reconnects_total
             stream_diag = getattr(c, "_stream_diag", None) or {}
             stream_attrs["stream_drain_packets"] = stream_diag.get("drain_packets")
-            stream_attrs["stream_drain_unparsed"] = stream_diag.get("drain_unparsed")
+            # Drained non-power-flow datagrams, split into three scopes (beta16k),
+            # all cumulative across sessions:
+            #   * stream_keepalive_acks — benign relay presence/keepalive chatter
+            #     (alive/notice/srv/SERVER). Expected; the bulk of drain traffic.
+            #   * stream_relay_status — decrypted benign relay status/ACK pushes
+            #     ({status_json, control_text}). Expected.
+            #   * stream_drain_unparsed (+ _categories) — frames we genuinely
+            #     could NOT parse ({binary, undecryptable}). undecryptable > 0 is
+            #     the only value that indicates a real decrypt problem.
+            stream_attrs["stream_keepalive_acks"] = getattr(
+                c, "stats_stream_keepalive_acks", 0
+            )
+            stream_attrs["stream_relay_status"] = {
+                k: v
+                for k, v in getattr(c, "stats_stream_relay_status", {}).items()
+                if v > 0
+            }
+            # Cumulative (lifetime) unparsed total; equals the sum of the category
+            # breakdown below. Per-session value lives in
+            # stream_diagnostics["drain_unparsed"].
+            stream_attrs["stream_drain_unparsed"] = c.stats_stream_drain_unparsed
+            stream_attrs["stream_drain_unparsed_categories"] = {
+                k: v
+                for k, v in getattr(
+                    c, "stats_stream_drain_unparsed_categories", {}
+                ).items()
+                if v > 0
+            }
             stream_attrs["stream_last_reconnect_reason"] = getattr(
                 c, "stats_stream_last_reconnect_reason", None
             )

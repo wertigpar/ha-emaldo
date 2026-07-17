@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from datetime import datetime, timedelta
+import errno
 import logging
 import struct
 from typing import Any, Callable
@@ -780,10 +781,28 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # reconnect *count* is accumulated across sessions — #47 beta16h-C4).
         self.stats_stream_reconnect_reasons: dict[str, int] = {}
         self.stats_stream_last_reconnect_reason: str | None = None
+        # Cumulative drained-datagram breakdown (beta16k), split into three
+        # scopes and accumulated cross-session (same delta pattern as the
+        # reconnect reasons above) so the sensor shows lifetime totals, not just
+        # the current session's (which resets on every rebuild):
+        #   * stats_stream_keepalive_acks  — benign relay presence/keepalive
+        #     chatter (alive/notice/srv/SERVER). Expected, ignore.
+        #   * stats_stream_relay_status    — decrypted benign relay status/ACK
+        #     pushes ({status_json, control_text}). Expected, ignore.
+        #   * stats_stream_drain_unparsed(+_categories) — frames we genuinely
+        #     could not parse ({binary, undecryptable}). undecryptable > 0 is the
+        #     only value that indicates a real decrypt problem.
+        self.stats_stream_keepalive_acks: int = 0
+        self.stats_stream_relay_status: dict[str, int] = {}
+        self.stats_stream_drain_unparsed_categories: dict[str, int] = {}
+        self.stats_stream_drain_unparsed: int = 0
         self._last_stream_frames_seen: int = 0
         self._last_stream_resubs_seen: int = 0
         self._last_stream_reconnects_seen: int = 0
         self._last_stream_reasons_seen: dict[str, int] = {}
+        self._last_stream_keepalive_acks_seen: int = 0
+        self._last_stream_relay_status_seen: dict[str, int] = {}
+        self._last_stream_drain_categories_seen: dict[str, int] = {}
         # Latest stream diagnostics snapshot (reconnect-reason breakdown etc.)
         self._stream_diag: dict = {}
         # Diagnostic info collected by executor thread, logged from main thread
@@ -862,6 +881,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if self._session is not None:
             self._merge_stream_reasons(self._session)
             self._last_stream_reasons_seen = {}
+            self._last_stream_keepalive_acks_seen = 0
+            self._last_stream_relay_status_seen = {}
+            self._last_stream_drain_categories_seen = {}
         self._session = None
         self._session_binding = None
         # Unregister home secret rotation callback so old session is not
@@ -1088,6 +1110,31 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 battery_range_override=battery_range_override,
                 slot_values=slot_values,
             )
+            # Fix B (beta16k): close the cross-thread TOCTOU. Between
+            # _ensure_session()'s `closed` check and the send below, the
+            # session's socket can be torn down concurrently by another thread
+            # — the stream reconnect thread (primary) or the home-secret
+            # rekey_home callback fired after a primary rotation (any device in
+            # a multi-unit home). Sending on that dead fd raises
+            # OSError(EBADF). Re-check `closed` immediately before the send; if
+            # the session was invalidated under us, treat it as a transient
+            # "session rebuilding" condition and let the caller (services.py)
+            # retry rather than sending on a dead socket. No re-acquire loop —
+            # a single deterministic bail-out keeps this safe during a mass
+            # rekey across many units.
+            if session.closed:
+                _LOGGER.debug(
+                    "[Override] stream cmd: session rebuilding (closed before "
+                    "send) device=%s is_primary=%s",
+                    self._parent._device_id, self._is_primary,
+                )
+                self.stats_override_last_result = {
+                    "success": False, "failure_reason": "conn_not_established",
+                }
+                self._pop_device_session()
+                self._invalidate_session_ref()
+                self._needs_fresh_creds = True
+                return False
             resp = session.send_command_for_creds(0x1A, payload, own_creds)
             if resp is None:
                 _LOGGER.debug(
@@ -1126,6 +1173,37 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "success": True, "failure_reason": None,
             }
             return True
+        except OSError as exc:
+            # Fix A (beta16k): a bare socket error here is almost always the
+            # benign cross-thread teardown race — the session's fd was closed by
+            # the stream reconnect thread or a rekey_home callback between our
+            # `closed` re-check and recvfrom, surfacing as EBADF (Errno 9). This
+            # is transient and retryable, not a bug: log it quietly (no
+            # Traceback) and classify it like CONN_NOT_ESTABLISHED so
+            # services.py retries on a freshly rebuilt session. Any *other*
+            # OSError (real network fault) is re-raised into the generic
+            # handler below so it is still surfaced with a full Traceback.
+            if exc.errno == errno.EBADF:
+                _LOGGER.debug(
+                    "[Override] stream cmd: session socket closed mid-send "
+                    "(EBADF, benign reconnect race) device=%s is_primary=%s",
+                    self._parent._device_id, self._is_primary,
+                )
+                self.stats_override_last_result = {
+                    "success": False, "failure_reason": "conn_not_established",
+                }
+                self._pop_device_session()
+                self._invalidate_session_ref()
+                self._needs_fresh_creds = True
+                return False
+            _LOGGER.debug(
+                "[Override] stream cmd: OSError device=%s",
+                self._parent._device_id, exc_info=True,
+            )
+            self.stats_override_last_result = {
+                "success": False, "failure_reason": "exception",
+            }
+            return False
         except Exception:
             _LOGGER.debug(
                 "[Override] stream cmd: exception device=%s",
@@ -1302,6 +1380,35 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if last_reason is not None:
             self.stats_stream_last_reconnect_reason = last_reason
         self._last_stream_reasons_seen = dict(cur)
+        # Fold the drained-datagram counts using the same delta pattern (beta16k)
+        # so lifetime totals survive session recreation. Three separate scopes:
+        # keepalive_acks (int), relay_status (dict), drain_unparsed (dict).
+        cur_ka = int(getattr(session, "_stream_keepalive_acks", 0) or 0)
+        ka_delta = cur_ka - self._last_stream_keepalive_acks_seen
+        if ka_delta > 0:
+            self.stats_stream_keepalive_acks += ka_delta
+        self._last_stream_keepalive_acks_seen = cur_ka
+
+        cur_rs = getattr(session, "_stream_relay_status", {}) or {}
+        last_rs = self._last_stream_relay_status_seen
+        for key, val in cur_rs.items():
+            delta = val - last_rs.get(key, 0)
+            if delta > 0:
+                self.stats_stream_relay_status[key] = (
+                    self.stats_stream_relay_status.get(key, 0) + delta
+                )
+        self._last_stream_relay_status_seen = dict(cur_rs)
+
+        cur_cats = getattr(session, "_stream_drain_unparsed_categories", {}) or {}
+        last_cats = self._last_stream_drain_categories_seen
+        for key, val in cur_cats.items():
+            delta = val - last_cats.get(key, 0)
+            if delta > 0:
+                self.stats_stream_drain_unparsed_categories[key] = (
+                    self.stats_stream_drain_unparsed_categories.get(key, 0) + delta
+                )
+                self.stats_stream_drain_unparsed += delta
+        self._last_stream_drain_categories_seen = dict(cur_cats)
 
     def _sample_session_rtt(self, session: PersistentE2ESession) -> None:
         """Fold the session's latest UDP RTT into the cumulative RTT stats.
@@ -1315,10 +1422,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         rtt_ms = session.last_rtt_ms
         if rtt_ms is None:
             return
-        # Ignore implausible non-positive samples (e.g. a cached/local path that
-        # never sent a real packet) so stats_e2e_rtt_min_ms is not skewed to
-        # ~0 ms — a UDP round-trip to the relay is always > 0.
-        if rtt_ms <= 0:
+        # Ignore implausible samples. A UDP round-trip to the relay is always
+        # tens of ms (every observed sample is 50-120 ms); anything < 1 ms is a
+        # measurement artifact (clock granularity on a cached/local path, or a
+        # sub-millisecond positive value that would round to 0.0 and corrupt the
+        # min stat). Reject so stats_e2e_rtt_min_ms stays truthful.
+        if rtt_ms < 1.0:
             return
         self.stats_e2e_rtt_last_ms = round(rtt_ms, 1)
         self.stats_e2e_rtt_total_ms += rtt_ms
