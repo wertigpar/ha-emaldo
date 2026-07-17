@@ -1042,6 +1042,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             import time as _time
             _first_frame_deadline = _time.perf_counter() + STREAM_FIRST_FRAME_WAIT
             _session = self._session
+            # Guard: the session can be invalidated (rotate/reset ->
+            # _invalidate_session_ref sets self._session = None) between the
+            # stream-mode check above and here. Without this, the frame-wait
+            # loop calls None.get_latest_power_flow() -> AttributeError, which
+            # surfaces as a spurious read_error reconnect. Return the (None)
+            # session so the caller's normal re-create path handles it.
+            if _session is None:
+                return self._session
             while _time.perf_counter() < _first_frame_deadline:
                 if (
                     _session.get_latest_power_flow(max_age=STREAM_STALE_AFTER)
@@ -1306,6 +1314,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         rtt_ms = session.last_rtt_ms
         if rtt_ms is None:
+            return
+        # Ignore implausible non-positive samples (e.g. a cached/local path that
+        # never sent a real packet) so stats_e2e_rtt_min_ms is not skewed to
+        # ~0 ms — a UDP round-trip to the relay is always > 0.
+        if rtt_ms <= 0:
             return
         self.stats_e2e_rtt_last_ms = round(rtt_ms, 1)
         self.stats_e2e_rtt_total_ms += rtt_ms
