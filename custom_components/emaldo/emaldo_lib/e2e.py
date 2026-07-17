@@ -448,6 +448,7 @@ def decrypt_response(
     accepted_headers: set[tuple[int, int]] | None = None,
     payload_validator: Callable[[bytes], bool] | None = None,
     fallback_ivs: list[bytes] | None = None,
+    silent: bool = False,
 ) -> bytes | None:
     """Decrypt the encrypted payload from an E2E response packet.
 
@@ -492,7 +493,7 @@ def decrypt_response(
             idx = pos + 1
 
     if not nonces:
-        if _LOGGER.isEnabledFor(logging.DEBUG):
+        if not silent and _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug(
                 "decrypt_response: no nonce markers (90a3/10a3) found "
                 "in %d-byte response, hex=%s",
@@ -582,7 +583,7 @@ def decrypt_response(
             except (ValueError, KeyError):
                 continue
 
-    if _LOGGER.isEnabledFor(logging.DEBUG) and nonces:
+    if not silent and _LOGGER.isEnabledFor(logging.DEBUG) and nonces:
         def _positions(marker: bytes) -> list[int]:
             out = []
             idx = 0
@@ -4217,6 +4218,7 @@ class PersistentE2ESession:
                     try:
                         _decoded_for_class = decrypt_response(
                             resp, _k, payload_validator=lambda _d: True,
+                            silent=True,
                         )
                     except Exception:  # noqa: BLE001 - classification best-effort
                         _decoded_for_class = None
@@ -4495,6 +4497,7 @@ class PersistentE2ESession:
                 resp, key,
                 payload_validator=_is_power_flow_payload,
                 fallback_ivs=[self._session_nonce.encode()],
+                silent=True,
             )
         except Exception as exc:  # noqa: BLE001 - best-effort parse
             if self._log:
@@ -4516,6 +4519,7 @@ class PersistentE2ESession:
                         resp, home_secret,
                         payload_validator=_is_power_flow_payload,
                         fallback_ivs=[self._session_nonce.encode()],
+                        silent=True,
                     )
                 except Exception:  # noqa: BLE001 - best-effort parse
                     pass
