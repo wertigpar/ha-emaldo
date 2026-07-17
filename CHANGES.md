@@ -1,5 +1,98 @@
 # Changes
 
+## v1.0.0-beta16j
+
+### Fixed (#53 — session wedged "handshake ok" but never decrypts)
+
+- **Root cause (issue #53 Q1/Q3):** a handshake returning `"ok"` only proves
+  the transport reconnected — it does **not** prove the current `chat_secret`
+  can still decrypt the realtime push stream. The reconnect logic cleared
+  `_stream_needs_reconnect` on handshake-ok alone, so a session that handshaked
+  `ok` yet decrypted **no** frames was declared "recovered" and stopped
+  escalating — the reporter saw a >6 h stall with repeating `Handshake complete
+  (response=ok)` while `Stream long-stall` kept climbing.
+- **Fix (decrypt-gated reconnect, Q3):** the session now records the monotonic
+  time of the last successfully **decrypted** power-flow frame
+  (`_stream_last_decrypted_frame_ts`, set in `_stream_drain_locked`). After a
+  handshake-ok reconnect, if the session has ever decrypted before
+  (`_stream_ever_decrypted`), a decrypt-gate deadline is armed
+  (`_stream_decrypt_gate_window`, 30 s). A cleanly decrypted frame clears it; if
+  the deadline passes with no fresh frame, `_stream_watchdog_locked` escalates
+  to a **forced credential/home-secret refresh** (same path as a 21204).
+- **Automatic recovery (Q1):** the escalation sets `_stream_needs_creds_refresh`
+  and `_stream_reconnect_locked` now refreshes creds **before** the first
+  re-handshake when that flag is set (otherwise the re-handshake reuses the
+  stale secret, succeeds at the transport level, and the gate would loop). The
+  forced refresh increments the generation counter → `force_home_refresh` →
+  rotates the stale `home_end_secret`, so the stream self-heals instead of
+  wedging until a manual restart.
+- **No refresh spiral (Q2):** the gate fires **at most once per reconnect
+  episode** (the deadline is cleared when it triggers) and `long_stall`/socket
+  reconnects still do NOT force-refresh — only a decrypt-gated failure does.
+  A never-yet-decrypted session (cold start, inverter offline) is not gated, so
+  a legitimately idle relay is never punished.
+- **Files changed:** `emaldo_lib/e2e.py` (`_stream_last_decrypted_frame_ts` /
+  `_stream_ever_decrypted` / `_stream_decrypt_gate_deadline` /
+  `_stream_decrypt_gate_window`; decrypt bookkeeping in `_stream_drain_locked`;
+  decrypt-gate check in `_stream_watchdog_locked`; pre-reconnect creds refresh +
+  gate arming in `_stream_reconnect_locked`).
+
+### Fixed (spurious read_error reconnects — `NoneType.get_latest_power_flow`)
+
+- **Problem:** `_ensure_session` cached `_session = self._session` then ran a
+  first-frame-wait loop calling `_session.get_latest_power_flow(...)`. If the
+  session was invalidated (`_invalidate_session_ref` sets `self._session = None`
+  during a rotate/reset) between the stream-mode check and the loop, the call
+  raised `AttributeError: 'NoneType' object has no attribute
+  'get_latest_power_flow'`, surfacing as a `read_error` reconnect
+  (`last_read_error` in the diagnostic sensor).
+- **Fix:** guard `if _session is None: return self._session` before the loop so
+  the caller's normal re-create path handles the missing session.
+- **Files changed:** `coordinator.py` (`_ensure_session`).
+
+### Fixed (implausible ~0 ms RTT samples)
+
+- **Problem:** `stats_e2e_rtt_min_ms` could drop to ~0.1 ms — physically
+  impossible for a UDP round-trip to the relay — when a cached/local path
+  reported a non-positive `last_rtt_ms`.
+- **Fix:** `_sample_session_rtt` now skips samples `<= 0`.
+- **Files changed:** `coordinator.py` (`_sample_session_rtt`).
+
+### Changed (logging — coalesce per-step decrypt flood)
+
+- **Problem:** `_try_parse_power_flow` logged a DEBUG line at every step for
+  each relay status/control push (non-power-flow packet): "trying
+  home_chat_secret (device key failed)" + "decrypt_response=None". These fire
+  per packet (~65/min in a 28-min beta16i capture → ~1,840 lines, the dominant
+  log content), drowning real diagnostics. The `DECRYPTED non-data push`
+  *summary* was already rate-limited, but these step logs were not.
+- **Fix:** coalesced both step logs into a single line per 60 s window (first
+  event flushed immediately, later events in the window counted and flushed
+  once at window expiry) via module-level `_pf_rejected_*` state in `e2e.py`,
+  mirroring the existing `_decrypt_rejected_*` pattern. The rare-but-useful
+  lines (`decrypted OK`, `parse_power_flow FAILED`) stay at full verbosity.
+  Pure diagnostic change — no protocol, timing, or data-keeping behavior change.
+- **Regression + fix #1 (same version):** the first beta16j build wrote those
+  module globals without a `global` declaration inside the method, raising
+  `UnboundLocalError` in the `emaldo-e2e-stream` worker thread on every
+  non-power-flow push (161 reconnects in a 26-min capture, classified as
+  `loop_exception:UnboundLocalError`). Fixed by adding
+  `global _pf_rejected_count, _pf_rejected_window_start, _pf_rejected_window_s,
+  _pf_rejected_lock` at the top of `_try_parse_power_flow` (mirrors the existing
+  `global` in `decrypt_response`).
+- **Regression + fix #2 (same version):** the coalescing guard used
+  `is_first = count == 0` then reset `count = 0` on flush. That made *every*
+  fresh-window start flush immediately, so the coalescing never suppressed
+  anything — both the new `_pf_rejected` step logs AND the pre-existing
+  `DECRYPTED non-data push` summary were still emitted per-packet (~80/min,
+  drowning the log). Corrected to a `window_start == 0.0` first-event check
+  followed by a true `now - window_start >= WINDOW` flush, so each window
+  yields exactly one summary line. The pre-existing `_decrypt_rejected` block
+  had the identical flaw and is fixed the same way.
+- **Files changed:** `emaldo_lib/e2e.py` (module-level `_pf_rejected_*` state +
+  wrapped step logs + `global` decl + corrected coalescing in both
+  `_try_parse_power_flow` and `decrypt_response`), `manifest.json` (version bump).
+
 ## v1.0.0-beta16i
 
 ### Changed (#49 — Realtime connection sensor should reflect stale data)

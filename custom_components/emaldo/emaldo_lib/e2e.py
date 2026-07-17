@@ -47,6 +47,17 @@ _decrypt_rejected_window_start = 0.0
 _decrypt_rejected_sample: tuple[str, int, int, str] | None = None
 _DECRYPT_REJECTED_WINDOW_S = 60.0
 
+# Coalescing for the per-step decrypt diagnostics inside _try_parse_power_flow.
+# Every relay status/control push (non-power-flow) hits the device-key-failed
+# fallback and the final decrypt=None steps, which would otherwise emit a DEBUG
+# line per packet (~65/min). The first event in a window is logged immediately;
+# later events in the same window are counted and flushed once at expiry. Keep
+# the rare-but-useful parse-FAILED / decrypted-OK lines at full verbosity.
+_pf_rejected_lock = threading.Lock()
+_pf_rejected_count = 0
+_pf_rejected_window_start = 0.0
+_pf_rejected_window_s = 60.0
+
 # Cumulative count of power-flow packets dropped by _has_reasonable_power_flow_values.
 _power_flow_sanity_drops: int = 0
 
@@ -476,17 +487,24 @@ def decrypt_response(
                 # pushes). Coalesce into the rate-limited diagnostic below.
                 if _LOGGER.isEnabledFor(logging.DEBUG):
                     with _decrypt_rejected_lock:
-                        is_first = _decrypt_rejected_count == 0
                         _decrypt_rejected_count += 1
                         _decrypt_rejected_sample = (
                             nonce.hex(), len(key),
                             len(decrypted), decrypted.hex(),
                         )
                         now = time.monotonic()
-                        if is_first or (
-                            now - _decrypt_rejected_window_start
-                            >= _DECRYPT_REJECTED_WINDOW_S
-                        ):
+                        # First event ever: flush immediately so a single
+                        # genuine decrypt-non-data is never swallowed. After
+                        # that, count silently for the window then flush once.
+                        if _decrypt_rejected_window_start == 0.0:
+                            n = _decrypt_rejected_count
+                            sample = _decrypt_rejected_sample
+                            _decrypt_rejected_count = 0
+                            _decrypt_rejected_window_start = now
+                            _decrypt_rejected_sample = None
+                            _flush = True
+                        elif now - _decrypt_rejected_window_start \
+                                >= _DECRYPT_REJECTED_WINDOW_S:
                             n = _decrypt_rejected_count
                             sample = _decrypt_rejected_sample
                             _decrypt_rejected_count = 0
@@ -3296,6 +3314,26 @@ class PersistentE2ESession:
         self._stream_last_reconnect_reason: str | None = None
         self._stream_drain_packets = 0
         self._stream_drain_unparsed = 0
+        # Decrypt-gated reconnect success (#53 Q1/Q3). A handshake returning
+        # "ok" only proves the transport reconnected — it does NOT prove the
+        # current chat_secret can still decrypt the realtime push stream. We
+        # therefore track the wall-clock (monotonic) time of the last
+        # successfully DECRYPTED power-flow frame. _stream_reconnect_locked
+        # requires a fresh decrypted frame (not just handshake ok) before it
+        # declares the session recovered; otherwise it escalates to a forced
+        # credential/home-secret refresh. _stream_ever_decrypted gates the
+        # escalation so a never-yet-healthy session (cold start, inverter
+        # offline) is not punished as a stale-secret failure.
+        self._stream_last_decrypted_frame_ts: float = 0.0
+        self._stream_ever_decrypted = False
+        # Deadline by which a decrypted frame must arrive after a handshake-ok
+        # reconnect, else the reconnect is treated as decrypt-failed. Armed in
+        # _stream_reconnect_locked; None when no gate is pending.
+        self._stream_decrypt_gate_deadline: float | None = None
+        # Grace window (seconds) for the decrypt gate. Sized like the startup
+        # first-frame wait: a healthy stream delivers a frame within a couple of
+        # subscribe cycles.
+        self._stream_decrypt_gate_window = 30.0
         # Escalating reconnect backoff. The streak resets when a frame arrives
         # OR when a handshake succeeds (beta13e), so a single competing read
         # cannot ratchet the backoff up to the 30 s ceiling.
@@ -3852,6 +3890,29 @@ class PersistentE2ESession:
         """
         if self._stream_needs_reconnect:
             return
+        # Decrypt-gate check (#53 Q1/Q3): a reconnect that handshaked "ok" armed
+        # a deadline by which a fresh decrypted frame must arrive. A cleanly
+        # decrypted frame clears the deadline (in _stream_drain_locked). If the
+        # deadline passes with no fresh frame, the handshake succeeded but the
+        # chat_secret can no longer decrypt the push stream — escalate to a
+        # forced credential/home-secret refresh (same path as a 21204) so the
+        # next reconnect rotates the stale secret instead of wedging silently.
+        # This fires at most once per reconnect episode (the deadline is cleared
+        # here), so it cannot spam force-refresh (issue #53 Q2).
+        if (
+            self._stream_decrypt_gate_deadline is not None
+            and now > self._stream_decrypt_gate_deadline
+        ):
+            self._stream_decrypt_gate_deadline = None
+            if self._log:
+                self._log(
+                    "Stream reconnect handshaked ok but no decrypted frame "
+                    f"within {self._stream_decrypt_gate_window:.0f}s — "
+                    "escalating to forced credential refresh (#53)"
+                )
+            self._stream_needs_creds_refresh = True
+            self._stream_flag_reconnect("decrypt_gate_no_frame")
+            return
         # Latest frame across all devices (per-device cache, beta15f)
         latest_ts = max(self._latest_power_flow_monotonic.values()) if self._latest_power_flow_monotonic else None
         reference = latest_ts if latest_ts is not None else self._stream_started_monotonic
@@ -4002,9 +4063,17 @@ class PersistentE2ESession:
                             break
 
                 if pf is not None:
+                    _now_pf = time.perf_counter()
                     self._latest_power_flow[dev_id] = pf
-                    self._latest_power_flow_monotonic[dev_id] = time.perf_counter()
+                    self._latest_power_flow_monotonic[dev_id] = _now_pf
                     self._stream_frames_received += 1
+                    # Decrypt-gate bookkeeping (#53 Q1/Q3): a frame decrypted
+                    # cleanly, so the current chat_secret is valid. Record the
+                    # time, mark the session as having ever decrypted, and clear
+                    # any pending reconnect decrypt-gate deadline.
+                    self._stream_last_decrypted_frame_ts = _now_pf
+                    self._stream_ever_decrypted = True
+                    self._stream_decrypt_gate_deadline = None
                     continue
 
                 rf = self._try_parse_regulate_frequency(resp)
@@ -4143,6 +4212,14 @@ class PersistentE2ESession:
         # Deadline reached: perform the actual rebuild.
         self._stream_reconnect_not_before = None
         try:
+            # If a forced credential refresh is already pending (a 21204 flagged
+            # it, or the decrypt-gate escalated because handshake-ok frames never
+            # decrypted — #53 Q1/Q3), refresh creds BEFORE the first reconnect.
+            # Otherwise the re-handshake reuses the stale chat_secret, succeeds
+            # at the transport level, and the decrypt gate would loop forever
+            # because the force flag is only consumed by _refresh_creds_locked.
+            if self._stream_needs_creds_refresh:
+                self._refresh_creds_locked()
             # Try re-handshake with current creds first (#47 beta16b).
             # If handshake succeeds, creds are still valid — skip the
             # expensive cloud force_refresh that can trigger dual-unit
@@ -4176,6 +4253,21 @@ class PersistentE2ESession:
             # fresh at the base backoff instead of inheriting a tall streak.
             self._stream_reconnect_streak = 0
             self._stream_reconnect_backoff_anchor_frames = self._stream_frames_received
+            # Decrypt-gated reconnect success (#53 Q1/Q3): a handshake-ok does
+            # NOT prove the chat_secret can still decrypt frames. If this session
+            # has ever decrypted a frame (i.e. it was genuinely healthy before),
+            # arm a deadline by which a fresh decrypted frame must arrive. If the
+            # watchdog sees the deadline pass with no fresh frame it escalates to
+            # a forced credential/home-secret refresh — closing the "handshake ok
+            # but stream never decrypts" stall (issue #53, was a 6h wedge). A
+            # never-yet-decrypted session (cold start / inverter offline) is not
+            # gated, so a legitimately idle relay is never punished.
+            if self._stream_ever_decrypted:
+                self._stream_decrypt_gate_deadline = (
+                    time.perf_counter() + self._stream_decrypt_gate_window
+                )
+            else:
+                self._stream_decrypt_gate_deadline = None
         except Exception as err:  # noqa: BLE001 - best-effort reconnect
             if self._log:
                 self._log(f"Stream reconnect failed: {err}")
@@ -4248,6 +4340,7 @@ class PersistentE2ESession:
         chat_secret — when provided (secondary device read), use this key for
         AES-CBC decryption instead of self._creds["chat_secret"].
         """
+        global _pf_rejected_count, _pf_rejected_window_start, _pf_rejected_window_s, _pf_rejected_lock
         key = chat_secret if chat_secret is not None else self._creds["chat_secret"]
         try:
             decrypted = decrypt_response(
@@ -4270,11 +4363,6 @@ class PersistentE2ESession:
             # Fallback: home-level chat_secret (#47 beta15h)
             home_secret = self._creds.get("home_chat_secret", "")
             if home_secret and home_secret != key:
-                if self._log:
-                    self._log(
-                        f"  _try_parse_power_flow: trying home_chat_secret "
-                        f"(device key failed, resp {len(resp)}B)"
-                    )
                 try:
                     decrypted = decrypt_response(
                         resp, home_secret,
@@ -4283,17 +4371,72 @@ class PersistentE2ESession:
                     )
                 except Exception:  # noqa: BLE001 - best-effort parse
                     pass
+                # Per-packet step logs flood the log on non-power-flow pushes.
+                # Coalesce to one line per window (first event immediate).
+                if _LOGGER.isEnabledFor(logging.DEBUG) or self._log:
+                    with _pf_rejected_lock:
+                        _pf_rejected_count += 1
+                        now = time.monotonic()
+                        if _pf_rejected_window_start == 0.0:
+                            n = _pf_rejected_count
+                            _pf_rejected_count = 0
+                            _pf_rejected_window_start = now
+                            _flush = True
+                        elif now - _pf_rejected_window_start \
+                                >= _pf_rejected_window_s:
+                            n = _pf_rejected_count
+                            _pf_rejected_count = 0
+                            _pf_rejected_window_start = now
+                            _flush = True
+                        else:
+                            n = None
+                            _flush = False
+                    if _flush:
+                        msg = (
+                            f"  _try_parse_power_flow: device key failed -> "
+                            f"tried home_chat_secret (resp {len(resp)}B)"
+                            + (f" [x{n} in window]" if n else "")
+                        )
+                        if self._log:
+                            self._log(msg)
+                        if _LOGGER.isEnabledFor(logging.DEBUG):
+                            _LOGGER.debug(
+                                "  _try_parse_power_flow: device key failed -> "
+                                "tried home_chat_secret resp (%dB)",
+                                len(resp),
+                            )
         if decrypted is None:
-            if self._log:
-                self._log(
-                    f"  _try_parse_power_flow: decrypt_response=None "
-                    f"(resp {len(resp)}B)"
-                )
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                _LOGGER.debug(
-                    "  _try_parse_power_flow: decrypt=None resp (%dB) hex=%s",
-                    len(resp), resp.hex(),
-                )
+            if _LOGGER.isEnabledFor(logging.DEBUG) or self._log:
+                with _pf_rejected_lock:
+                    _pf_rejected_count += 1
+                    now = time.monotonic()
+                    if _pf_rejected_window_start == 0.0:
+                        n = _pf_rejected_count
+                        _pf_rejected_count = 0
+                        _pf_rejected_window_start = now
+                        _flush = True
+                    elif now - _pf_rejected_window_start \
+                            >= _pf_rejected_window_s:
+                        n = _pf_rejected_count
+                        _pf_rejected_count = 0
+                        _pf_rejected_window_start = now
+                        _flush = True
+                    else:
+                        n = None
+                        _flush = False
+                if _flush:
+                    msg = (
+                        f"  _try_parse_power_flow: decrypt_response=None "
+                        f"(resp {len(resp)}B)"
+                        + (f" [x{n} in window]" if n else "")
+                    )
+                    if self._log:
+                        self._log(msg)
+                    if _LOGGER.isEnabledFor(logging.DEBUG):
+                        _LOGGER.debug(
+                            "  _try_parse_power_flow: decrypt=None resp (%dB)",
+                            len(resp),
+                        )
             return None
         if self._log:
             self._log(
