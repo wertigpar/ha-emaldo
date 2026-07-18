@@ -44,24 +44,49 @@
   reconnect.
 - **Files:** `coordinator.py`.
 
-### Fixed (residual `1 nonce(s) tried` decrypt-noise on drain loop)
+### Fixed (`1 nonce(s) tried` decrypt-noise — full drain + legacy-read coverage)
 
-- **Reported by:** JanBaecklund (issue #47), beta16l field log still showed
-  `decrypt_response: 1 nonce(s) tried but decryption/validation failed`
-  ~623× in ~6 min — looked like errors but are handled/benign.
-- **Root cause:** beta16l silenced `_try_parse_power_flow` (4219) and the
-  drain classifier, but MISSED the third `decrypt_response` caller on the
-  drain loop — the force-logout check (e2e.py:4182), which tries to
-  decrypt every drain frame with `home_end_secret` and a `logout`-only
-  validator. Benign keepalive/notice frames are not logout JSON, so that
-  call logged `1 nonce(s) tried … failed` on nearly every packet (twice
-  per frame in the observed pairs). The success path was already
-  surfaced separately (`Force-logout from relay`), so the failure log was
-  pure noise.
-- **Fix:** pass `silent=True` to the force-logout `decrypt_response`
-  call (e2e.py:4182). A real logout is still logged via the existing
-  SUCCESS path; the per-frame failure flood is gone. Now ALL three
-  drain-loop `decrypt_response` callers are silent on benign frames.
+- **Reported by:** JanBaecklund (issue #47). beta16k silenced
+  `_try_parse_power_flow` + the drain classifier; beta16l added the
+  force-logout caller. After those, the `emaldo-e2e-stream` thread STILL
+  flooded `decrypt_response: 1 nonce(s) tried but decryption/validation
+  failed` + `no nonce markers` for every keepalive/alive/wake/heartbeat
+  ACK (observed paired with a `SUCCESS` for the same nonce a few ms later —
+  the frame IS decryptable, just not with the tried key).
+- **Root cause:** the drain loop's **`_try_parse_regulate_frequency`**
+  caller (e2e.py, inside `_stream_drain_locked`) called `decrypt_response`
+  with the default `silent=False`. Every drain packet that was not a
+  power-flow frame fell through to `_try_parse_regulate_frequency`, which
+  emitted `1 nonce(s) tried … failed` on the benign relay frame. The
+  same benign-relay-frame pattern also lived in the **module-level legacy
+  `read_*` / `send_*` session functions** (`read_override_state`,
+  `read_regulate_frequency_state`, `read_power_flow`,
+  `read_selling_protection`, `read_virtualpowerplant`, `read_manual_selling`,
+  `read_ev_charging_mode`, `read_battery_info` drains, the `_run_session`
+  `_accept_any` peak-shaving read, and the `_try_decrypt_verbose` helper) —
+  these fire `1 nonce(s) tried` during initial setup / creds-refresh reads.
+  The earlier "3 drain callers" claim in this changelog was INCOMPLETE:
+  the regulate-frequency parse path was the actual stream-thread flood
+  source, and the legacy reads were never covered.
+- **Fix:** pass `silent=True` to every benign-relay-frame `decrypt_response`
+  call across both the `PersistentE2ESession` methods AND the module-level
+  `read_*`/`send_*` functions:
+  * `_try_parse_regulate_frequency` (the stream-thread flood — primary fix)
+  * `_try_parse_battery` (class method + module-level legacy variant)
+  * `_try_decrypt_verbose` (legacy read helper)
+  * `_run_session` `_accept_any` peak-shaving read
+  * `read_override_state`, `read_regulate_frequency_state`,
+    `read_power_flow`, `read_selling_protection`, `read_virtualpowerplant`,
+    `read_manual_selling`, `read_ev_charging_mode` drains + their
+    `home_chat_secret` fallbacks
+  Total `silent=True` decrypt calls went from 4 → 30. The stream thread now
+  logs only `decrypt_response: SUCCESS` + `decrypted OK` + the coalesced
+  `DECRYPTED non-data push xN (window=60s)` summary. **Left intentionally
+  non-silent:** `load_ev_page_data` EV-panel discovery burst (tries many
+  wire bytes on purpose; stores raw on failure — diagnostic by design).
+- **Verification (field log 2026-07-18 18:23):** zero `1 nonce(s) tried`
+  / `no nonce markers` in ~2 min of stream traffic; only `SUCCESS` +
+  `decrypted OK` remain.
 - **Files:** `emaldo_lib/e2e.py`.
 
 ### Fixed (benign `parse_battery_data: payload is None` flood)

@@ -1106,6 +1106,9 @@ def read_overrides(
         decrypted = decrypt_response(
             resp, e2e_creds["chat_secret"],
             payload_validator=_is_override_payload,
+            # Benign relay frames are not override payloads; silence the
+            # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
         )
         state = parse_override_state(decrypted)
         if state is not None:
@@ -1118,6 +1121,9 @@ def read_overrides(
                 decrypted = decrypt_response(
                     resp, e2e_creds["chat_secret"],
                     payload_validator=_is_override_payload,
+                    # Benign relay frames are not override payloads; silence the
+                    # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                    silent=True,
                 )
                 state = parse_override_state(decrypted)
                 if state is not None:
@@ -1208,6 +1214,9 @@ def read_battery_info(
         decrypted = decrypt_response(
             resp, e2e_creds["chat_secret"],
             accepted_headers={HEADER_BATTERY},
+            # Benign relay frames are not battery payloads; silence the
+            # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
         )
         return parse_battery_data(decrypted)
 
@@ -1519,6 +1528,9 @@ def read_regulate_frequency_state(
         decrypted = decrypt_response(
             resp, e2e_creds["chat_secret"],
             payload_validator=_is_regulate_frequency_payload,
+            # Benign relay frames are not reg-freq payloads; silence the
+            # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
         )
         result = parse_regulate_frequency_state(decrypted)
         if result is not None:
@@ -1531,6 +1543,9 @@ def read_regulate_frequency_state(
                 decrypted = decrypt_response(
                     resp, e2e_creds["chat_secret"],
                     payload_validator=_is_regulate_frequency_payload,
+                    # Benign relay frames are not reg-freq payloads; silence the
+                    # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                    silent=True,
                 )
                 result = parse_regulate_frequency_state(decrypted)
                 if result is not None:
@@ -1615,6 +1630,9 @@ def read_power_flow(
             resp, e2e_creds["chat_secret"],
             payload_validator=_is_power_flow_payload,
             fallback_ivs=[session_nonce.encode()],
+            # Benign relay frames are not power-flow payloads; silence the
+            # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
         )
         if decrypted is None:
             # Fallback: home-level chat_secret (#47 beta15h)
@@ -1626,6 +1644,9 @@ def read_power_flow(
                     resp, home_secret,
                     payload_validator=_is_power_flow_payload,
                     fallback_ivs=[session_nonce.encode()],
+                    # Benign relay frames are not power-flow payloads; silence the
+                    # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                    silent=True,
                 )
         if decrypted is not None and log:
             _log_power_flow_raw(decrypted, log)
@@ -1654,6 +1675,9 @@ def read_power_flow(
                     resp, e2e_creds["chat_secret"],
                     payload_validator=_is_power_flow_payload,
                     fallback_ivs=[session_nonce.encode()],
+                    # Benign relay frames are not power-flow payloads; silence the
+                    # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                    silent=True,
                 )
                 if decrypted is None:
                     home_secret = e2e_creds.get("home_chat_secret", "")
@@ -1662,6 +1686,9 @@ def read_power_flow(
                             resp, home_secret,
                             payload_validator=_is_power_flow_payload,
                             fallback_ivs=[session_nonce.encode()],
+                            # Benign relay frames are not power-flow payloads;
+                            # silence the per-call decrypt failure flood (#47 beta16m).
+                            silent=True,
                         )
                 if decrypted is not None and log:
                     _log_power_flow_raw(decrypted, log)
@@ -2178,6 +2205,9 @@ def get_manual_selling(
         decrypted = decrypt_response(
             resp, e2e_creds["chat_secret"],
             payload_validator=lambda b: len(b) >= 10,
+            # Benign relay frames are not manual-selling payloads; silence the
+            # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
         )
         return parse_manual_selling_response(decrypted)
     finally:
@@ -2325,7 +2355,13 @@ def read_peak_shaving(
     for label, resp in results:
         if resp is None:
             continue
-        dec = decrypt_response(resp, chat_secret, payload_validator=_accept_any)
+        dec = decrypt_response(
+            resp, chat_secret,
+            payload_validator=_accept_any,
+            # Benign relay frames are not peak-shaving payloads; silence the
+            # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
+        )
         if dec is None:
             continue
         if "config" in label.lower() and len(dec) >= 20:
@@ -2749,6 +2785,9 @@ def read_ev_charging_mode(
         # Permissive validator: any 6-byte payload is acceptable here
         # because the response has no distinctive 2-byte header.
         payload_validator=lambda p: len(p) == 6,
+        # Benign relay frames are not EV payloads; silence the per-call
+        # decrypt failure flood (#47 decrypt-noise, beta16m).
+        silent=True,
     )
     return parse_ev_charging_info(decrypted)
 
@@ -3006,7 +3045,12 @@ def get_selling_protection(
     def _try_decrypt_verbose(resp: bytes, label: str) -> bytes | None:
         """Decrypt without validator (for debug), log raw payload."""
         try:
-            raw = decrypt_response(resp, e2e_creds["chat_secret"])
+            raw = decrypt_response(
+                resp, e2e_creds["chat_secret"],
+                # Benign relay frames are not the expected payload; silence the
+                # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                silent=True,
+            )
             if log and raw is not None:
                 b0 = f"0x{raw[0]:02x}" if raw else "N/A"
                 log(f"  {label} raw decrypted ({len(raw)}B): {raw.hex()} | byte[0]={b0}")
@@ -3029,6 +3073,9 @@ def get_selling_protection(
         decrypted = decrypt_response(
             resp, e2e_creds["chat_secret"],
             payload_validator=_is_selling_protection_payload,
+            # Benign relay frames are not selling-protection payloads; silence
+            # the per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
         )
         result = parse_selling_protection_response(decrypted)
         if result is not None:
@@ -3043,6 +3090,9 @@ def get_selling_protection(
                 decrypted = decrypt_response(
                     resp, e2e_creds["chat_secret"],
                     payload_validator=_is_selling_protection_payload,
+                    # Benign relay frames are not selling-protection payloads;
+                    # silence the per-call decrypt failure flood (#47 beta16m).
+                    silent=True,
                 )
                 result = parse_selling_protection_response(decrypted)
                 if result is not None:
@@ -3152,7 +3202,12 @@ def get_virtualpowerplant(
 
     def _try_decrypt_verbose(resp: bytes, label: str) -> bytes | None:
         try:
-            raw = decrypt_response(resp, e2e_creds["chat_secret"])
+            raw = decrypt_response(
+                resp, e2e_creds["chat_secret"],
+                # Benign relay frames are not the expected payload; silence the
+                # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                silent=True,
+            )
             if log and raw is not None:
                 b0 = f"0x{raw[0]:02x}" if raw else "N/A"
                 log(f"  {label} raw decrypted ({len(raw)}B): {raw.hex()} | byte[0]={b0}")
@@ -3175,6 +3230,9 @@ def get_virtualpowerplant(
         decrypted = decrypt_response(
             resp, e2e_creds["chat_secret"],
             payload_validator=_is_virtualpowerplant_payload,
+            # Benign relay frames are not VPP payloads; silence the per-call
+            # decrypt failure flood (#47 decrypt-noise, beta16m).
+            silent=True,
         )
         result = parse_virtualpowerplant_response(decrypted)
         if result is not None:
@@ -3189,6 +3247,9 @@ def get_virtualpowerplant(
                 decrypted = decrypt_response(
                     resp, e2e_creds["chat_secret"],
                     payload_validator=_is_virtualpowerplant_payload,
+                    # Benign relay frames are not VPP payloads; silence the
+                    # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                    silent=True,
                 )
                 result = parse_virtualpowerplant_response(decrypted)
                 if result is not None:
@@ -4515,6 +4576,11 @@ class PersistentE2ESession:
             decrypted = decrypt_response(
                 resp, key,
                 payload_validator=_is_regulate_frequency_payload,
+                # Benign relay frames (keepalive/notice) are not regulate-freq
+                # payloads, so this decrypt "fails" on nearly every drain
+                # packet. Silence the per-call flood; a real reg-freq frame is
+                # still returned and cached (#47 decrypt-noise, beta16m).
+                silent=True,
             )
         except Exception:  # noqa: BLE001 - best-effort parse
             return None
@@ -4663,6 +4729,7 @@ class PersistentE2ESession:
                 decrypted = decrypt_response(
                     resp, self._creds["chat_secret"],
                     payload_validator=_is_selling_protection_payload,
+                    silent=True,
                 )
             except Exception:  # noqa: BLE001
                 decrypted = None
@@ -4682,6 +4749,7 @@ class PersistentE2ESession:
                     decrypted = decrypt_response(
                         more_resp, self._creds["chat_secret"],
                         payload_validator=_is_selling_protection_payload,
+                        silent=True,
                     )
                 except Exception:  # noqa: BLE001
                     continue
@@ -4715,6 +4783,7 @@ class PersistentE2ESession:
                 decrypted = decrypt_response(
                     resp, self._creds["chat_secret"],
                     payload_validator=_is_virtualpowerplant_payload,
+                    silent=True,
                 )
             except Exception:  # noqa: BLE001
                 decrypted = None
@@ -4734,6 +4803,7 @@ class PersistentE2ESession:
                     decrypted = decrypt_response(
                         more_resp, self._creds["chat_secret"],
                         payload_validator=_is_virtualpowerplant_payload,
+                        silent=True,
                     )
                 except Exception:  # noqa: BLE001
                     continue
@@ -4768,6 +4838,7 @@ class PersistentE2ESession:
                 decrypted = decrypt_response(
                     resp, self._creds["chat_secret"],
                     payload_validator=lambda b: len(b) >= 10,
+                    silent=True,
                 )
             except Exception:  # noqa: BLE001
                 decrypted = None
@@ -4787,6 +4858,7 @@ class PersistentE2ESession:
                     decrypted = decrypt_response(
                         more_resp, self._creds["chat_secret"],
                         payload_validator=lambda b: len(b) >= 10,
+                        silent=True,
                     )
                 except Exception:  # noqa: BLE001
                     continue
@@ -4938,6 +5010,9 @@ class PersistentE2ESession:
             decrypted = decrypt_response(
                 resp, self._creds["chat_secret"],
                 accepted_headers={HEADER_BATTERY},
+                # Benign relay frames are not battery payloads; silence the
+                # per-call decrypt failure flood (#47 decrypt-noise, beta16m).
+                silent=True,
             )
         except Exception:  # noqa: BLE001 - best-effort parse
             return None
