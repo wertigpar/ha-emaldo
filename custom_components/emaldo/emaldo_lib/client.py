@@ -774,9 +774,20 @@ class EmaldoClient:
         with home_lock:
             # Double-check cache: another thread may have refreshed while we
             # were waiting on the per-home lock.  If the cache was updated
-            # within the last 5 s we reuse it even when *force_refresh* is
-            # set — this prevents back-to-back /home/e2e-login/ rotations
+            # within the home TTL (and this is NOT an escalation force) we
+            # reuse it — this prevents back-to-back /home/e2e-login/ rotations
             # when two devices on the same account both escalate (#47).
+            #
+            # CRITICAL: when *force_refresh* is set we MUST fall through to the
+            # API call below. The only caller that passes force_refresh=True
+            # here is e2e_login(force_home_refresh=_do_home_refresh), i.e. a
+            # genuine escalation (>=3 generations within 60s, see
+            # _get_e2e_credentials). If we short-circuited on the 5s grace we
+            # would replay the STALE home secret and the home-level rotation
+            # would never fire — leaving the stream wedged in a 21204 loop
+            # (#47, observed: 1128 "Stream saw 21204" over ~2h, force_home_refresh
+            # never emitted). Routine (non-escalation) forces keep force_refresh
+            # False here, so RC5's 5s dedupe still protects dual-unit ping-pong.
             with self._e2e_lock:
                 cached = self._home_e2e_cache.get(home_id)
                 if cached is not None:
@@ -785,31 +796,6 @@ class EmaldoClient:
                         not force_refresh
                         and age <= self._home_e2e_ttl
                     ):
-                        return dict(cached[0])
-                    if force_refresh and age < 5:
-                        _LOGGER.debug(
-                            "Home e2e cache %ds fresh — reusing for home_id=%s "
-                            "(age < 5s window, replaying latest secret to avoid "
-                            "dual-unit ping-pong)",
-                            int(age), home_id,
-                        )
-                        # Fire callbacks so late-registered sessions still
-                        # learn about the new secret.
-                        _callbacks = list(
-                            self._home_secret_callbacks.get(home_id, [])
-                        )
-                        # Release per-home lock before firing to avoid
-                        # deadlock (callbacks may acquire e2e locks).
-                        # (will be released by `with` context manager exit)
-                        for cb in _callbacks:
-                            try:
-                                cb(dict(cached[0]))
-                            except Exception:
-                                _LOGGER.exception(
-                                    "Home secret callback failed for "
-                                    "home_id=%s",
-                                    home_id,
-                                )
                         return dict(cached[0])
 
             home_result = self.api_request(

@@ -184,8 +184,13 @@ send_command_for_creds() while still addressing it by recipient_end_id.
   shared ``home_end_secret`` server-side on every call. A per-home
   ``threading.Lock`` serializes concurrent calls so two devices on the same
   account cannot race and rotate the secret back and forth. The result is cached
-  for 30 minutes; a 5-second grace window reuses the cache when
-  ``force_refresh`` is requested within that window after a previous refresh.
+  for 30 minutes; a 5-second grace window reuses the cache for **routine**
+  refresh requests (``force_refresh=False``) to dedupe back-to-back rotations
+  when two devices escalate simultaneously. An escalation (``force_refresh=True``,
+  i.e. ≥3 generations within 60 s) **bypasses** the grace and hits the
+  rotation API, so a wedged stream (stuck 21204) can actually rejoin
+  instead of replaying the stale cached secret. See β16m changelog (RC5/RC4
+  grace fix).
 - **Home secret rotation callbacks (#47)** — ``_get_home_e2e()`` fires
   registered callbacks after a fresh ``/home/e2e-login/`` so live sessions can
   re-key their in-memory credentials (``home_end_id``, ``home_group_id``,

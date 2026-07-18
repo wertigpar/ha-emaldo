@@ -250,10 +250,14 @@ rotate the shared home secret; the secondary always reuses the primary's value.
 **Per-home serialization lock:** ``EmaldoClient._get_home_e2e()`` still
 serializes concurrent ``/home/e2e-login/`` calls per ``home_id`` using a
 ``threading.Lock``. A 5-second grace window (``_home_e2e_cache`` age < 5 s)
-reuses cached credentials when ``force_refresh`` is requested, preventing
-back-to-back rotations when two devices escalate simultaneously. The home login
-result has its own 30-minute TTL, separate from the per-device 10-minute
-``e2e_login`` cache.
+reuses cached credentials for **routine** refresh requests, preventing
+back-to-back rotations when two devices escalate simultaneously. The grace
+applies only when ``force_refresh`` is **False** — a genuine escalation
+(``force_refresh=True``, i.e. ≥3 generations within 60 s) bypasses the
+grace and hits the rotation API so the shared home secret actually rotates
+and a wedged stream can rejoin (#47 RC5/RC4; see β16m changelog). The
+home login result has its own 30-minute TTL, separate from the perdevice
+10-minute ``e2e_login`` cache.
 
 **Home secret rotation callbacks:** Registered by each live
 ``PersistentE2ESession`` via ``register_home_secret_callback()``. When
