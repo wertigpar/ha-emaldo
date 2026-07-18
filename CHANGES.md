@@ -88,6 +88,30 @@
   the block.
 - **Files:** `emaldo_lib/e2e.py`.
 
+### Fixed (21204 storm — RC5 5s grace blocked home-secret rotation escalation)
+
+- **Symptom (beta16m field log):** 1128 `Stream saw 21204` events over ~2h,
+  `stream_reconnects` climbing to 557+, `force_home_refresh` never emitted,
+  every forced creds refresh immediately followed by `Home e2e cache Ns fresh
+  — reusing`. Stream wedged in a ~18-min 21204 cadence (relay's own session
+  TTL), self-healing only when the relay opened a fresh window.
+- **Root cause:** the escalation path was correctly wired (RC4) — `_get_e2e_
+  credentials` sets `_do_home_refresh=True` when `entry.generation >= 3` within
+  60s and passes it to `e2e_login(force_home_refresh=...)` → `_get_home_e2e(
+  force_refresh=True)`. But RC5's grace short-circuit (`client.py:789`, the
+  `if force_refresh and age < 5: return cached`) fired on that forced call and
+  replayed the STALE home secret instead of hitting the `/home/e2e-login/`
+  rotation API. So the home secret never actually rotated and the stream could
+  never rejoin — exactly the wedge RC4 was meant to break.
+- **Fix:** remove the forced-refresh grace reuse. `_get_home_e2e` now only
+  short-circuits on the normal home TTL when `not force_refresh`. The ONLY
+  caller that passes `force_refresh=True` is an escalation, so routine (non-
+  escalation) forces from the stream keep `force_refresh=False` and RC5's 5s
+  dedupe still protects dual-unit ping-pong. On escalation the rotation API
+  now fires, breaking the 21204 loop. Live sessions learn the new secret via
+  the post-rotation home-secret callback (now fired on the real rotation path).
+- **Files:** `emaldo_lib/client.py`.
+
 ## v1.0.0-beta16l
 
 ### Fixed (decrypt-noise flood NOT killed by beta16k — the `_try_parse_power_flow` path)
