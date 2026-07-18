@@ -1,5 +1,69 @@
 # Changes
 
+## v1.0.0-beta16m
+
+### Cleanup (remove dead code — graph-assisted audit)
+
+- **How found:** knowledge-graph pass over `ha-emaldo-repo` (graphify) flagged
+  functions with zero call sites across the repo; each candidate was verified
+  by grep + `value_fn=` registry check (sensors are dispatched via
+  `EmaldoSensorEntityDescription.value_fn`, not by name) before removal.
+- **Removed (5 functions, 0 references, safe to delete):**
+  * `coordinator.py` — `_get_paired_realtime` (orphaned helper, never called)
+  * `coordinator.py` — `_read_power_flow_secondary` (secondary-device power-flow
+    read, never invoked; primary path uses `_read_power_flow`)
+  * `sensor.py` — `_latest` (time-series helper, not in any `value_fn=`)
+  * `sensor.py` — `_latest_nonzero` (time-series helper, not in any `value_fn=`)
+  * `sensor.py` — `_balancing_display` (display-string helper for the balancing
+    state sensor, superseded by `EmaldoBalancingStateSensor`'s own mapping)
+- **Not removed (verified intentional, not dead):** `emaldo_lib/client.py` ↔
+  `emaldo_lib/e2e.py` name pairs (`cancel_sell`, `get_manual_selling`,
+  `set_virtualpowerplant`, …) are the two-layer REST vs E2E-stream API;
+  `schedule_coordinator._ensure_client`/`_reset_client` delegate to the parent
+  `EmaldoCoordinator` (composition, not duplication).
+- **Files:** `coordinator.py`, `sensor.py`, `manifest.json` (→ `1.0.0-beta16m`).
+
+### Fixed (spurious `AttributeError: NoneType` read_error on session invalidate)
+
+- **Symptom (beta16l field log):** 2× `reconnect_reasons: read_error` with
+  `last_read_error: AttributeError: 'NoneType' object has no attribute …` over
+  ~11.8k polls. Benign (99.6% success, self-heals) but a needless reconnect.
+- **Root cause:** `_ensure_session()` can return `None` when the session is
+  invalidated (rotate/reset → `_invalidate_session_ref` sets `self._session =
+  None`) during its own first-frame wait. Its guard (coordinator.py:1060) is
+  documented to "return the (None) session so the caller's normal re-create
+  path handles it" — but `_read_power_flow` did not null-check before calling
+  `session.get_latest_power_flow()`, so the `None` was dereferenced and threw
+  `AttributeError`, which the poll wrapper caught as a generic `read_error`
+  and triggered a reconnect. The intended clean "not ready, recreate next
+  poll" path was never taken.
+- **Fix:** in `_read_power_flow`, immediately after `session =
+  self._ensure_session()`, `if session is None: return None`. The `None` now
+  propagates cleanly up to `_async_update_data` (the normal re-create path on
+  the next poll handles it) instead of raising. No spurious `read_error`
+  reconnect.
+- **Files:** `coordinator.py`.
+
+### Fixed (residual `1 nonce(s) tried` decrypt-noise on drain loop)
+
+- **Reported by:** JanBaecklund (issue #47), beta16l field log still showed
+  `decrypt_response: 1 nonce(s) tried but decryption/validation failed`
+  ~623× in ~6 min — looked like errors but are handled/benign.
+- **Root cause:** beta16l silenced `_try_parse_power_flow` (4219) and the
+  drain classifier, but MISSED the third `decrypt_response` caller on the
+  drain loop — the force-logout check (e2e.py:4182), which tries to
+  decrypt every drain frame with `home_end_secret` and a `logout`-only
+  validator. Benign keepalive/notice frames are not logout JSON, so that
+  call logged `1 nonce(s) tried … failed` on nearly every packet (twice
+  per frame in the observed pairs). The success path was already
+  surfaced separately (`Force-logout from relay`), so the failure log was
+  pure noise.
+- **Fix:** pass `silent=True` to the force-logout `decrypt_response`
+  call (e2e.py:4182). A real logout is still logged via the existing
+  SUCCESS path; the per-frame failure flood is gone. Now ALL three
+  drain-loop `decrypt_response` callers are silent on benign frames.
+- **Files:** `emaldo_lib/e2e.py`.
+
 ## v1.0.0-beta16l
 
 ### Fixed (decrypt-noise flood NOT killed by beta16k — the `_try_parse_power_flow` path)
