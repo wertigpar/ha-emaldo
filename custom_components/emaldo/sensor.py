@@ -59,25 +59,6 @@ def _uid_base(coordinator: Any) -> str:
     return coordinator.device_id or coordinator.home_id
 
 
-def _latest_nonzero(d: dict | None) -> list | None:
-    """Return the latest time-series entry with nonzero values."""
-    if not isinstance(d, dict):
-        return None
-    entries = d.get("data", [])
-    for e in reversed(entries):
-        if len(e) >= 2 and any(v != 0 for v in e[1:]):
-            return e
-    return entries[-1] if entries else None
-
-
-def _latest(d: dict | None) -> list | None:
-    """Return the last entry from time-series data."""
-    if not isinstance(d, dict):
-        return None
-    entries = d.get("data", [])
-    return entries[-1] if entries else None
-
-
 # -- Value extraction functions --
 
 
@@ -308,18 +289,6 @@ def _car_charge_power(data: dict[str, Any]) -> float | None:
         w = data.get("ev_w")
         return -w if w is not None else None
     return None
-
-
-def _balancing_display(data: dict[str, Any]) -> str | None:
-    """Return the display string for the balancing state sensor.
-
-    Returns None when the E2E call failed so the sensor shows as unknown
-    rather than silently reporting "idle" on a transient network failure.
-    """
-    rf = data.get("regulate_frequency")
-    if not isinstance(rf, dict):
-        return None
-    return rf.get("display", None)
 
 
 # -- Sensor descriptions --

@@ -4185,6 +4185,12 @@ class PersistentE2ESession:
                             payload_validator=lambda d: (
                                 b"logout" in d
                             ),
+                            # Benign relay frames (keepalive/notice) are not
+                            # logout JSON, so this decrypt "fails" on nearly
+                            # every drain packet. Silence the per-call flood;
+                            # a real logout is still surfaced by the SUCCESS
+                            # log below (#47 decrypt-noise, beta16m follow-up).
+                            silent=True,
                         )
                         if decoded is not None:
                             text = decoded.decode("utf-8", errors="replace")

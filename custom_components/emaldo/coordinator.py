@@ -599,19 +599,6 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             _LOGGER.debug("Failed to close paired stream session", exc_info=True)
 
-    def _get_paired_realtime(self) -> EmaldoRealtimeCoordinator | None:
-        """Return the paired realtime coordinator for this device."""
-        try:
-            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
-            if not entry_data:
-                return None
-            for item in entry_data.get("devices", [entry_data]):
-                if item.get("power") is self:
-                    return item.get("realtime")
-        except Exception:
-            return None
-        return None
-
 
 class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     """Fast coordinator for E2E real-time power flow (10s).
@@ -1225,6 +1212,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # beta9-style one-shot read model (see _read_power_flow_legacy).
             return self._read_power_flow_legacy()
         session = self._ensure_session()
+        # _ensure_session returns None when the session was invalidated
+        # (rotate/reset) during its own first-frame wait (coordinator.py:1060).
+        # Treat that as "not ready yet" — let the normal re-create path on the
+        # next poll handle it instead of dereferencing None below and surfacing
+        # a spurious AttributeError read_error reconnect.
+        if session is None:
+            return None
         # Register this device's chat_secret in the session's cross-device
         # key registry so the stream drain loop can decrypt packets from
         # other devices on the same home (#47 beta15f). The creds call is
@@ -1308,32 +1302,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # Session died mid-read — force recreation on next call
             self._invalidate_session_ref()
         return data
-
-    def _read_power_flow_secondary(self, session: PersistentE2ESession) -> dict | None:
-        """Read power flow for a secondary device via shared session.
-
-        Fetches own E2E credentials and sends 0x30 subscription through the
-        primary's session socket without sending ``Alive(home)``.
-        """
-        client = self._parent._ensure_client()  # noqa: SLF001 - intended
-        home_id = self._parent.home_id
-        device_id = self._parent._device_id  # noqa: SLF001
-        model = self._parent._model  # noqa: SLF001
-        if device_id is None or model is None:
-            raise UpdateFailed("Device not yet discovered")
-        _LOGGER.debug(
-            "Secondary power-flow read for device %s via shared session",
-            device_id,
-        )
-        creds = client.get_e2e_credentials(
-            home_id, device_id, model, force_refresh=self._needs_fresh_creds
-        )
-        if self._needs_fresh_creds:
-            _LOGGER.info(
-                "Secondary E2E read with forced fresh credentials"
-            )
-        self._needs_fresh_creds = False
-        return session.read_power_flow_for_creds(creds)
 
     def _accumulate_stream_stats(self, session: PersistentE2ESession) -> None:
         """Roll per-session stream counters into cumulative coordinator totals.
