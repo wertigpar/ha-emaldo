@@ -64,6 +64,16 @@
   drain-loop `decrypt_response` callers are silent on benign frames.
 - **Files:** `emaldo_lib/e2e.py`.
 
+### Fixed (benign `parse_battery_data: payload is None` flood)
+
+- **Symptom:** every poll logged ~15× `parse_battery_data: payload is None` for
+  empty battery module slots (idx 3-12 when modules not installed). Benign but
+  noisy — not coalesced like the `_pf_rejected` pattern.
+- **Fix:** coalesce to one line per 60s window (first event immediate, then
+  `[xN in window]`), mirroring the `_pf_rejected`/`_decrypt_rejected` counters.
+  Genuine single-event visibility preserved.
+- **Files:** `emaldo_lib/e2e.py`.
+
 ## v1.0.0-beta16l
 
 ### Fixed (decrypt-noise flood NOT killed by beta16k — the `_try_parse_power_flow` path)

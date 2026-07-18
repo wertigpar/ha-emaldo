@@ -58,6 +58,14 @@ _pf_rejected_count = 0
 _pf_rejected_window_start = 0.0
 _pf_rejected_window_s = 60.0
 
+# Coalescing for the benign `parse_battery_data: payload is None` line. Empty
+# battery module slots (idx 3-12 when modules not installed) hit this on every
+# poll; ~15x/min would otherwise flood. First event immediate, then 1 line/window.
+_battery_none_lock = threading.Lock()
+_battery_none_count = 0
+_battery_none_window_start = 0.0
+_battery_none_window_s = 60.0
+
 # Cumulative count of power-flow packets dropped by _has_reasonable_power_flow_values.
 _power_flow_sanity_drops: int = 0
 
@@ -692,7 +700,28 @@ def parse_battery_data(payload: bytes) -> dict | None:
         Dict with decoded fields, or *None* if payload is invalid.
     """
     if payload is None:
-        _LOGGER.debug("parse_battery_data: payload is None")
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            with _battery_none_lock:
+                _battery_none_count += 1
+                now = time.monotonic()
+                if _battery_none_window_start == 0.0:
+                    n = _battery_none_count
+                    _battery_none_count = 0
+                    _battery_none_window_start = now
+                    _flush = True
+                elif now - _battery_none_window_start >= _battery_none_window_s:
+                    n = _battery_none_count
+                    _battery_none_count = 0
+                    _battery_none_window_start = now
+                    _flush = True
+                else:
+                    n = None
+                    _flush = False
+            if _flush:
+                _LOGGER.debug(
+                    "parse_battery_data: payload is None%s",
+                    f" [x{n} in window]" if n else "",
+                )
         return None
     if len(payload) < 26:
         _LOGGER.debug("parse_battery_data: payload too short (%d bytes)", len(payload))
