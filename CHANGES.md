@@ -74,6 +74,20 @@
   Genuine single-event visibility preserved.
 - **Files:** `emaldo_lib/e2e.py`.
 
+### Fixed (regression: `UnboundLocalError` on `parse_battery_data` coalescing)
+
+- **Symptom:** `Battery module info read failed: cannot access local variable
+  '_battery_none_count' where it is not associated with a value`
+  (e2e.py:705) on every empty battery slot → battery scan aborts.
+- **Root cause:** the `parse_battery_data` coalescing block assigned to the
+  module-level `_battery_none_count` without a `global` declaration, so Python
+  bound it as a function-local (uninitialized) variable. The other two
+  coalescing blocks (`_decrypt_rejected`, `_pf_rejected`) declare `global`;
+  this one was missing it.
+- **Fix:** add `global _battery_none_count, _battery_none_window_start` inside
+  the block.
+- **Files:** `emaldo_lib/e2e.py`.
+
 ## v1.0.0-beta16l
 
 ### Fixed (decrypt-noise flood NOT killed by beta16k — the `_try_parse_power_flow` path)

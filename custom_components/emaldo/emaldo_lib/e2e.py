@@ -701,6 +701,7 @@ def parse_battery_data(payload: bytes) -> dict | None:
     """
     if payload is None:
         if _LOGGER.isEnabledFor(logging.DEBUG):
+            global _battery_none_count, _battery_none_window_start
             with _battery_none_lock:
                 _battery_none_count += 1
                 now = time.monotonic()
