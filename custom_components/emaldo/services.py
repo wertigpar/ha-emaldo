@@ -495,10 +495,224 @@ async def async_handle_apply_bulk_schedule(
                     )
 
 
+def _reset_one_device(
+    hass: HomeAssistant,
+    *,
+    device_id: str,
+    reset_all: bool,
+    start_time: str | None,
+    end_time: str | None,
+    high: int | None,
+    low: int | None,
+    bro: bool | None,
+) -> dict:
+    """Reset overrides on a single device (runs in executor).
+
+    Returns a result dict so callers can surface per-device status instead of
+    fire-and-forget (beta16o): the previous code gave the caller no feedback,
+    so a recurring trigger (automation / repeated button) kept re-firing while
+    the E2E stream was in a 21204 death cycle, producing staggered, repeated
+    resets that looked like "command didn't take effect". See #47 / JanBaecklund
+    beta16n field log.
+
+    On success the override is read back (``get_overrides``) and compared to
+    the intended slots, so a relay ACK that didn't actually clear state is
+    caught and reported as a failure.
+    """
+    resolved = False
+    last_err = None
+    last_reason = None
+    slots = None
+    slot_bytes = None
+    for attempt in range(3):
+        try:
+            coord, client = _get_coordinator_and_client(
+                hass, coordinator_key="schedule", device_id=device_id
+            )
+            hid, did, model = coord.home_id, coord._device_id, coord._model
+
+            if reset_all:
+                # Resolve omitted header fields from device state
+                if not resolved:
+                    if high is None or low is None or bro is None:
+                        current = client.get_overrides(hid, did, model)
+                        if current:
+                            if high is None:
+                                high = current["high_marker"]
+                            if low is None:
+                                low = current["low_marker"]
+                            if bro is None:
+                                bro = current.get("battery_range_override", False)
+                        else:
+                            if high is None:
+                                high = DEFAULT_MARKER_HIGH
+                            if low is None:
+                                low = DEFAULT_MARKER_LOW
+                            if bro is None:
+                                bro = False
+                    resolved = True
+
+                slot_bytes = bytes([SLOT_NO_OVERRIDE] * 96)
+                rt = _get_target_set(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )["realtime"]
+                if rt._send_override_via_stream(
+                    slot_bytes,
+                    high_marker=high, low_marker=low,
+                    battery_range_override=bro,
+                ):
+                    _LOGGER.info(
+                        "All overrides reset to internal (device=%s)", did
+                    )
+                    if _override_readback_ok(client, hid, did, model, slot_bytes):
+                        return {
+                            "device_id": did, "success": True, "reason": None,
+                        }
+                    last_reason = "readback_mismatch"
+                    _LOGGER.debug(
+                        "Reset-all ACK but readback mismatch (attempt %d/3), "
+                        "retrying device=%s", attempt + 1, did
+                    )
+                    coord._reset_client()
+                else:
+                    last_reason = rt.stats_override_last_result.get(
+                        "failure_reason"
+                    )
+                    _LOGGER.debug(
+                        "Reset-all not applied (attempt %d/3, reason=%s), "
+                        "retrying device=%s", attempt + 1, last_reason, did
+                    )
+                    coord._reset_client()
+            else:
+                # Partial reset — read current, clear the range
+                start_slot = _time_to_slot(start_time)
+                end_slot = _time_to_slot(end_time)
+
+                current = client.get_overrides(hid, did, model)
+                if current:
+                    slots = list(current["slots"])
+                else:
+                    slots = [SLOT_NO_OVERRIDE] * 96
+
+                # Resolve omitted header fields from device state
+                if high is None:
+                    high = current["high_marker"] if current else DEFAULT_MARKER_HIGH
+                if low is None:
+                    low = current["low_marker"] if current else DEFAULT_MARKER_LOW
+                if bro is None:
+                    bro = current.get("battery_range_override", False) if current else False
+
+                for i in range(start_slot, min(end_slot, 96)):
+                    slots[i] = SLOT_NO_OVERRIDE
+
+                slot_bytes = bytes(slots)
+                rt = _get_target_set(
+                    hass, coordinator_key="schedule", device_id=device_id,
+                )["realtime"]
+                if rt._send_override_via_stream(
+                    slot_bytes, high_marker=high, low_marker=low,
+                    battery_range_override=bro,
+                ):
+                    _LOGGER.info(
+                        "Overrides reset: slots %d-%d (device=%s)",
+                        start_slot, end_slot, did,
+                    )
+                    if _override_readback_ok(client, hid, did, model, slot_bytes):
+                        return {
+                            "device_id": did, "success": True, "reason": None,
+                        }
+                    last_reason = "readback_mismatch"
+                    _LOGGER.debug(
+                        "Partial reset ACK but readback mismatch (attempt %d/3), "
+                        "retrying device=%s", attempt + 1, did
+                    )
+                    coord._reset_client()
+                else:
+                    last_reason = rt.stats_override_last_result.get(
+                        "failure_reason"
+                    )
+                    _LOGGER.debug(
+                        "Partial reset not applied (attempt %d/3, reason=%s), "
+                        "retrying device=%s", attempt + 1, last_reason, did
+                    )
+                    coord._reset_client()
+        except EmaldoAuthError as err:
+            last_err = err
+            _LOGGER.debug(
+                "Session expired resetting overrides (attempt %d/3), "
+                "re-authenticating device=%s", attempt + 1, device_id
+            )
+            coord._reset_client()
+        except (EmaldoE2EError, EmaldoConnectionError) as err:
+            last_err = err
+            _LOGGER.debug(
+                "Transient E2E error resetting overrides (attempt %d/3): %s "
+                "device=%s", attempt + 1, err, device_id
+            )
+            coord._reset_client()
+        if attempt < 2:
+            time.sleep(1)
+    _LOGGER.error(
+        "Failed to reset overrides after 3 attempts (device=%s): %s%s",
+        device_id, last_err,
+        f" (reason={last_reason})" if last_err is None else "",
+    )
+    # Legacy one-shot fallback (#47 Option C)
+    if slot_bytes is not None:
+        try:
+            fb_coord, fb_client = _get_coordinator_and_client(
+                hass, coordinator_key="schedule", device_id=device_id
+            )
+            if fb_client.set_override(
+                fb_coord.home_id, fb_coord._device_id, fb_coord._model,
+                slot_bytes, high_marker=high, low_marker=low,
+                battery_range_override=bro,
+            ):
+                _LOGGER.info(
+                    "Overrides reset via legacy one-shot fallback (device=%s)",
+                    device_id,
+                )
+                return {"device_id": device_id, "success": True, "reason": None}
+        except Exception:
+            _LOGGER.debug("Legacy one-shot fallback also failed (device=%s)", device_id)
+    return {
+        "device_id": device_id,
+        "success": False,
+        "reason": last_reason or str(last_err) if last_err else "unknown",
+    }
+
+
+def _override_readback_ok(
+    client, home_id: str, device_id: str, model: str, expected: bytes
+) -> bool:
+    """Confirm the relay accepted the override by reading it back.
+
+    Best-effort: a read failure is treated as "unknown" (True) so a flaky
+    read can never mask a successful write — we only FAIL the write when the
+    relay clearly reports a different state than we sent.
+    """
+    try:
+        current = client.get_overrides(home_id, device_id, model)
+    except Exception:
+        return True
+    if not current:
+        return True
+    sent = list(expected)
+    got = current.get("slots")
+    if got is None:
+        return True
+    return all(g == s for g, s in zip(got, sent))
+
+
 async def async_handle_reset_to_internal(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
-    """Handle the reset_to_internal service call."""
+    """Handle the reset_to_internal service call.
+
+    Returns per-device status (beta16o): when called without ``device_id`` it
+    resets every device and logs a summary + raises a persistent notification
+    on any failure, so a caller can see the result instead of blind re-firing.
+    """
     device_id = call.data.get("device_id")
     reset_all = call.data.get("all", False)
     start_time = call.data.get("start_time")
@@ -510,154 +724,70 @@ async def async_handle_reset_to_internal(
     low = call.data.get("low_marker")
     bro = call.data.get("battery_range_override")
 
-    def _do_reset():
-        nonlocal high, low, bro
-        resolved = False
-        last_err = None
-        last_reason = None
-        slots = None
-        for attempt in range(3):
-            try:
-                coord, client = _get_coordinator_and_client(
-                    hass, coordinator_key="schedule", device_id=device_id
-                )
-                hid, did, model = coord.home_id, coord._device_id, coord._model
-
-                if reset_all:
-                    # Resolve omitted header fields from device state
-                    if not resolved:
-                        if high is None or low is None or bro is None:
-                            current = client.get_overrides(hid, did, model)
-                            if current:
-                                if high is None:
-                                    high = current["high_marker"]
-                                if low is None:
-                                    low = current["low_marker"]
-                                if bro is None:
-                                    bro = current.get("battery_range_override", False)
-                            else:
-                                if high is None:
-                                    high = DEFAULT_MARKER_HIGH
-                                if low is None:
-                                    low = DEFAULT_MARKER_LOW
-                                if bro is None:
-                                    bro = False
-                        resolved = True
-
-                    rt = _get_target_set(
-                        hass, coordinator_key="schedule", device_id=device_id,
-                    )["realtime"]
-                    if rt._send_override_via_stream(
-                        bytes([SLOT_NO_OVERRIDE] * 96),
-                        high_marker=high, low_marker=low,
-                        battery_range_override=bro,
-                    ):
-                        _LOGGER.info("All overrides reset to internal")
-                        return True
-                    last_reason = rt.stats_override_last_result.get(
-                        "failure_reason"
-                    )
-                    _LOGGER.debug(
-                        "Reset-all not applied (attempt %d/3, reason=%s), "
-                        "retrying",
-                        attempt + 1, last_reason,
-                    )
-                    coord._reset_client()
-                else:
-                    # Partial reset — read current, clear the range
-                    start_slot = _time_to_slot(start_time)
-                    end_slot = _time_to_slot(end_time)
-
-                    current = client.get_overrides(hid, did, model)
-                    if current:
-                        slots = list(current["slots"])
-                    else:
-                        slots = [SLOT_NO_OVERRIDE] * 96
-
-                    # Resolve omitted header fields from device state
-                    if high is None:
-                        high = current["high_marker"] if current else DEFAULT_MARKER_HIGH
-                    if low is None:
-                        low = current["low_marker"] if current else DEFAULT_MARKER_LOW
-                    if bro is None:
-                        bro = current.get("battery_range_override", False) if current else False
-
-                    for i in range(start_slot, min(end_slot, 96)):
-                        slots[i] = SLOT_NO_OVERRIDE
-
-                    rt = _get_target_set(
-                        hass, coordinator_key="schedule", device_id=device_id,
-                    )["realtime"]
-                    if rt._send_override_via_stream(
-                        bytes(slots), high_marker=high, low_marker=low,
-                        battery_range_override=bro,
-                    ):
-                        _LOGGER.info(
-                            "Overrides reset: slots %d-%d", start_slot, end_slot
-                        )
-                        return True
-                    last_reason = rt.stats_override_last_result.get(
-                        "failure_reason"
-                    )
-                    _LOGGER.debug(
-                        "Partial reset not applied (attempt %d/3, reason=%s), "
-                        "retrying",
-                        attempt + 1, last_reason,
-                    )
-                    coord._reset_client()
-            except EmaldoAuthError as err:
-                last_err = err
-                _LOGGER.debug(
-                    "Session expired resetting overrides (attempt %d/3), "
-                    "re-authenticating", attempt + 1
-                )
-                coord._reset_client()
-            except (EmaldoE2EError, EmaldoConnectionError) as err:
-                last_err = err
-                _LOGGER.debug(
-                    "Transient E2E error resetting overrides (attempt %d/3): %s",
-                    attempt + 1, err
-                )
-                coord._reset_client()
-            if attempt < 2:
-                time.sleep(1)
-        _LOGGER.error(
-            "Failed to reset overrides after 3 attempts: %s%s",
-            last_err,
-            f" (reason={last_reason})" if last_err is None else "",
-        )
-        # Legacy one-shot fallback (#47 Option C)
-        if reset_all or slots is not None:
-            slot_bytes = bytes([SLOT_NO_OVERRIDE] * 96) if reset_all else bytes(slots)
-            try:
-                fb_coord, fb_client = _get_coordinator_and_client(
-                    hass, coordinator_key="schedule", device_id=device_id,
-                )
-                if fb_client.set_override(
-                    fb_coord.home_id, fb_coord._device_id, fb_coord._model,
-                    slot_bytes, high_marker=high, low_marker=low,
-                    battery_range_override=bro,
-                ):
-                    _LOGGER.info("Overrides reset via legacy one-shot fallback")
-                    return True
-            except Exception:
-                _LOGGER.debug("Legacy one-shot fallback also failed")
-        return False
-
-    await hass.async_add_executor_job(_do_reset)
-
     if device_id:
+        result = await hass.async_add_executor_job(
+            _reset_one_device,
+            hass,
+            device_id=device_id,
+            reset_all=reset_all,
+            start_time=start_time,
+            end_time=end_time,
+            high=high,
+            low=low,
+            bro=bro,
+        )
+        results = [result]
         target_set = _get_target_set(
             hass, coordinator_key="schedule", device_id=device_id
         )
         await target_set["schedule"].async_request_refresh()
     else:
+        results = []
         entries = _get_entry_data(hass)
         for entry_data in entries.values():
             for item in _iter_device_sets(entry_data):
+                did = item.get("device_id") or (
+                    item.get("realtime")._parent._device_id  # noqa: SLF001
+                    if item.get("realtime") else None
+                )
+                if did is None:
+                    continue
+                res = await hass.async_add_executor_job(
+                    _reset_one_device,
+                    hass,
+                    device_id=did,
+                    reset_all=reset_all,
+                    start_time=start_time,
+                    end_time=end_time,
+                    high=high,
+                    low=low,
+                    bro=bro,
+                )
+                results.append(res)
                 sched = item.get("schedule")
                 if sched is not None:
                     await sched.async_request_refresh()
+
+    failed = [r for r in results if not r["success"]]
+    if failed:
+        summary = "; ".join(
+            f"{r['device_id']}: {r['reason']}" for r in failed
+        )
+        _LOGGER.warning("reset_to_internal partial failure: %s", summary)
+        try:
+            hass.components.persistent_notification.async_create(
+                f"Emaldo 'reset to AI' did not complete on all devices:\n"
+                f"{summary}\n\nThe E2E stream may be recovering from a "
+                f"session reset (21204). Retry once the connection is stable.",
+                title="Emaldo: reset to AI partially failed",
+                notification_id="emaldo_reset_to_internal_partial",
+            )
+        except Exception:
+            _LOGGER.debug("Could not raise persistent notification")
+    else:
+        _LOGGER.info(
+            "reset_to_internal completed for %d device(s)", len(results)
+        )
 
 
 async def async_handle_refresh_schedule(
