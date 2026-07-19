@@ -725,17 +725,19 @@ async def async_handle_reset_to_internal(
     bro = call.data.get("battery_range_override")
 
     if device_id:
-        result = await hass.async_add_executor_job(
-            _reset_one_device,
-            hass,
-            device_id=device_id,
-            reset_all=reset_all,
-            start_time=start_time,
-            end_time=end_time,
-            high=high,
-            low=low,
-            bro=bro,
-        )
+        def _reset_job():
+            return _reset_one_device(
+                hass,
+                device_id=device_id,
+                reset_all=reset_all,
+                start_time=start_time,
+                end_time=end_time,
+                high=high,
+                low=low,
+                bro=bro,
+            )
+
+        result = await hass.async_add_executor_job(_reset_job)
         results = [result]
         target_set = _get_target_set(
             hass, coordinator_key="schedule", device_id=device_id
@@ -752,17 +754,20 @@ async def async_handle_reset_to_internal(
                 )
                 if did is None:
                     continue
-                res = await hass.async_add_executor_job(
-                    _reset_one_device,
-                    hass,
-                    device_id=did,
-                    reset_all=reset_all,
-                    start_time=start_time,
-                    end_time=end_time,
-                    high=high,
-                    low=low,
-                    bro=bro,
-                )
+
+                def _reset_job():
+                    return _reset_one_device(
+                        hass,
+                        device_id=did,
+                        reset_all=reset_all,
+                        start_time=start_time,
+                        end_time=end_time,
+                        high=high,
+                        low=low,
+                        bro=bro,
+                    )
+
+                res = await hass.async_add_executor_job(_reset_job)
                 results.append(res)
                 sched = item.get("schedule")
                 if sched is not None:
