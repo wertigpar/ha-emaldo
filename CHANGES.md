@@ -1,5 +1,37 @@
 # Changes
 
+## v1.0.0-beta16n
+
+### Fixed (`long_stall` wedge — in-place reconnect spun without recovering)
+
+- **Symptom (β16m field log, ~11.7k polls):** `stream_reconnect_reasons` showed
+  `long_stall: 61` (vs `session_expired_21204: 157`). System log carried
+  `E2E stream wedged: no fresh frame for 24 consecutive polls (~120s) — in-place
+  reconnect not recovering; resetting REST client and rebuilding session`.
+  Wedge diag: `reconnects: 21` during one stall, `relay_status: {status_json:0,
+  control_text:0}`, `keepalive_acks` frozen — i.e. the socket received ZERO
+  inbound (a relay-side session-binding drop), not a decrypt failure. 21 in-place
+  reconnects all re-handshaked "ok" but the relay never resumed pushing frames,
+  until the coordinator's 120s wedge timer forced a full REST reset.
+- **Root cause:** `_stream_flag_reconnect` (e2e.py) set
+  `_stream_needs_creds_refresh = True` only for `21204`. A `long_stall` flagged
+  a reconnect WITHOUT a creds refresh, so `_stream_reconnect_locked` re-handshaked
+  with the SAME home secret. The relay had dropped the session binding, so the
+  transport-level handshake "succeeded" but no frames flowed. The decrypt-gate
+  watchdog (e2e.py, `_stream_watchdog_locked`) only escalates when frames ARRIVE
+  but fail to decrypt — it cannot see a blackhole (zero inbound), so it never
+  forced a rotation. Result: the in-place path spun uselessly until the
+  coordinator's out-of-band 120s REST reset bailed it out.
+- **Fix:** in `_stream_flag_reconnect`, when the reason is `long_stall` AND the
+  session was previously healthy (`_stream_ever_decrypted`), also set
+  `_stream_needs_creds_refresh = True`. The next in-place rebuild now rotates the
+  home secret (same path as 21204) and re-establishes a fresh relay session, so
+  the stall self-heals in one reconnect instead of waiting ~120s for the REST
+  reset. Cold-start stalls (never decrypted) are left alone — a legitimately idle
+  relay is not punished by a forced rotation. The `long_stall` creds-refresh is
+  gated identically to the decrypt-gate's own `_stream_ever_decrypted` guard.
+- **Files:** `emaldo_lib/e2e.py`, `manifest.json` (→ `1.0.0-beta16n`).
+
 ## v1.0.0-beta16m
 
 ### Cleanup (remove dead code — graph-assisted audit)
