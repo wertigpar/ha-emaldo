@@ -4023,10 +4023,23 @@ class PersistentE2ESession:
         The reason counters are exposed via the diagnostic sensor so a reconnect
         storm can be diagnosed from attributes alone (no debug logging needed).
 
-        Only force-refresh E2E credentials when the reconnect is caused by a
-        21204 (session expired).  Other reasons (long_stall, socket errors) do
-        NOT rotate chat_secret, breaking the death spiral where every reconnect
-        creates undecryptable pending packets (#47 beta15f).
+        Force-refresh E2E credentials when the reconnect is caused by a 21204
+        (session expired).  Other reasons (socket errors) do NOT rotate
+        chat_secret, breaking the death spiral where every reconnect creates
+        undecryptable pending packets (#47 beta15f).
+
+        A ``long_stall`` is special: it means the relay stopped pushing frames
+        for the whole stall window and in-place re-handshakes did not recover
+        (observed: keepalive_acks frozen, relay_status all-zero — a relay-side
+        session-binding drop, NOT a decrypt failure). Re-handshaking with the
+        same creds "succeeds" at transport level but the relay never resumes
+        pushing, so the in-place reconnect spins (~20×) until the coordinator's
+        120s wedge timer force-resets REST.  If the session was previously
+        healthy (``_stream_ever_decrypted``), rotate the home secret on the
+        stall (same path as 21204) so the in-place reconnect self-heals instead
+        of waiting for the full REST rebuild (#47 long_stall wedge, beta16n).
+        Cold-start stalls (never decrypted) are left alone — a legitimately idle
+        relay must not be punished by a forced rotation.
         """
         # Always record the latest reason so the diagnostic sensor reflects the
         # most recent trigger. The per-rebuild reason count is incremented in
@@ -4035,6 +4048,10 @@ class PersistentE2ESession:
         # reconnect retries while the flag is already set (#47 beta16h-C4).
         self._stream_last_reconnect_reason = reason
         if "21204" in reason:
+            self._stream_needs_creds_refresh = True
+        elif "long_stall" in reason and self._stream_ever_decrypted:
+            # Relay dropped the session binding; rotate home secret so the
+            # in-place reconnect re-establishes a fresh session (#47 beta16n).
             self._stream_needs_creds_refresh = True
         self._stream_needs_reconnect = True
 
