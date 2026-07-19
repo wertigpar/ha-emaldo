@@ -1,5 +1,47 @@
 # Changes
 
+## v1.0.0-beta16o
+
+### Fixed (`reset_to_internal` — silent fire-and-forget, blind re-fire under 21204)
+
+- **Symptom (JanBaecklund β16n field log, 2026-07-19):** "reset to AI" command
+  sometimes appeared to take no effect; eventually both PS1 (RYFOzJxpGrffGm1x)
+  and PS2 (uVuOAKnVtrM5gUeN) reset. Log showed 8 top-level `reset_to_internal`
+  calls in ~2m: two initial single-device calls 15s apart, then a ~17–20s
+  re-fire cadence on each unit. Each fire hit `CONN_NOT_ESTABLISHED` because the
+  E2E stream was mid-21204-reconnect, retried 1s later on a still-dead session,
+  and landed only after the stream self-healed (β16n `long_stall` fix). The
+  command *did* work — just serially, per-device, delayed — but the service
+  returned no status, so the caller (automation / repeated button) kept firing.
+- **Root cause:** `async_handle_reset_to_internal` ran the 3-attempt loop
+  fire-and-forget and returned nothing. The caller could not distinguish
+  "succeeded" from "delayed by stream churn", so any recurring trigger re-fired
+  blindly. The override path also used `_reset_client()` (device-only refresh)
+  which does NOT force home-secret rotation — correct for dual-unit safety
+  (#47 / RC1–RC5), but it means an override send during a 21204 death cycle
+  cannot recover until the stream escalates on its own.
+- **Fix (atomic + visible, NOT forced home rotation):** refactored the per-device
+  work into `_reset_one_device()` returning `{device_id, success, reason}`.
+  - When called **without** `device_id`, it now iterates every device, awaits
+    each result, and logs a summary. On any failure it raises a
+    `persistent_notification` ("reset to AI partially failed" + per-device
+    reason) so the caller stops re-firing and sees the outcome.
+  - Added `_override_readback_ok()`: after a relay ACK, the override is read
+    back via `get_overrides` and compared to the intended slots. A relay ACK
+    that didn't clear state is caught and retried. Best-effort: a read failure
+    is treated as success (never masks a real write).
+  - Preserved the existing device-only refresh + legacy one-shot fallback
+    (#47 Option C). **No change to the credential-escalation / ping-pong guard**
+    — home-secret rotation is still only escalated by the stream ladder, so
+    dual-unit homes stay safe.
+- **Why not "force home-secret rotation on override retry" (rejected):** forcing
+  escalation on a single override reject would rotate the shared home secret
+  under the OTHER unit's live session, re-introducing the reciprocal 21204
+  storm that RC1–RC5 eliminated — catastrophic for a 2-unit home with a re-firing
+  trigger.
+- **Files:** `services.py` (`_reset_one_device`, `_override_readback_ok`,
+  `async_handle_reset_to_internal`), `manifest.json` (`1.0.0-beta16o`).
+
 ## v1.0.0-beta16n
 
 ### Fixed (`long_stall` wedge — in-place reconnect spun without recovering)
