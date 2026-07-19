@@ -1,5 +1,32 @@
 # Changes
 
+## v1.0.0-beta16p
+
+### Fixed (`reset_to_internal` crash — β16o regression, every call failed)
+
+- **Symptom (user report, 2026-07-19, β16o):** "reset to AI is not working" —
+  worse than β16n. HA log (home-assistant_emaldo_2026-07-19T17-14-00.999Z.log)
+  showed `Error executing script ... Unexpected error for call_service`:
+  `HomeAssistant.async_add_executor_job() got an unexpected keyword argument
+  'device_id'` at `services.py:728` (and the loop at :755). Every
+  `reset_to_internal` invocation threw `TypeError` before doing any work — the
+  service was 100% broken, not merely flaky/re-firing.
+- **Root cause:** β16o's `_reset_one_device` refactor called
+  `hass.async_add_executor_job(_reset_one_device, hass, device_id=...,
+  reset_all=..., ...)` — passing arguments as **keyword** args. HA's
+  `async_add_executor_job(func, *args)` accepts only positional args; kwargs are
+  rejected with `TypeError`. The rest of the codebase uses inline closures
+  (`_do_override`, `_do_bulk`) passed bare to `async_add_executor_job` — β16o
+  violated that convention.
+- **Fix:** wrapped both call sites (single-device and the per-device loop) in
+  local closures (`def _reset_job(): return _reset_one_device(...)`) and passed
+  the bare closure to `async_add_executor_job`, matching `_do_bulk`. The
+  β16o design (per-device result dict + read-back verify + persistent
+  notification on failure) is otherwise retained.
+- **Verification:** `python3 -m py_compile services.py` clean.
+- **Files:** `services.py` (`async_handle_reset_to_internal` call sites),
+  `manifest.json` (`1.0.0-beta16p`).
+
 ## v1.0.0-beta16o
 
 ### Fixed (`reset_to_internal` — silent fire-and-forget, blind re-fire under 21204)
