@@ -80,6 +80,8 @@
       "dual_power": { "name": "Consumption" },
       "solar_power": { "name": "Solar power" },
       "car_charge_power": { "name": "Car charge power" },
+      "addition_load_power": { "name": "Additional load power" },
+      "other_load_power": { "name": "Other load power" },
       "plan_source": { "name": "Plan source" },
       "active_mode": { "name": "Active mode" },
       "schedule_chart": { "name": "Schedule chart" },

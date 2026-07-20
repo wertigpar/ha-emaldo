@@ -77,6 +77,8 @@
       "dual_power": { "name": "Forbrug" },
       "solar_power": { "name": "Soleffekt" },
       "car_charge_power": { "name": "Ladeeffekt bil" },
+      "addition_load_power": { "name": "Additional load power" },
+      "other_load_power": { "name": "Other load power" },
       "plan_source": { "name": "Plankilde" },
       "active_mode": { "name": "Aktiv tilstand" },
       "schedule_chart": { "name": "Tidsplandiagram" },

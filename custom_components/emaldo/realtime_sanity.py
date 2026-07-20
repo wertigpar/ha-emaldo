@@ -17,13 +17,13 @@ REALTIME_POWER_ENTITY_KEYS: tuple[str, ...] = (
     "grid_w",
     "ev_w",
     "dual_power_w",
+    "addition_load_w",
+    "other_load_w",
 )
 
 # Parsed realtime channels that are currently not mapped to HA entities.
 # Kept for diagnostics/future use; they are intentionally non-blocking.
 REALTIME_POWER_AUX_KEYS: tuple[str, ...] = (
-    "addition_load_w",
-    "other_load_w",
     "ip2_w",
     "op2_w",
 )

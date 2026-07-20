@@ -77,6 +77,8 @@
       "dual_power": { "name": "Kulutus" },
       "solar_power": { "name": "Aurinkoteho" },
       "car_charge_power": { "name": "Auton latasteho" },
+      "addition_load_power": { "name": "Additional load power" },
+      "other_load_power": { "name": "Other load power" },
       "plan_source": { "name": "Suunnitelman lähde" },
       "active_mode": { "name": "Aktiivinen tila" },
       "schedule_chart": { "name": "Aikataulukaavio" },
