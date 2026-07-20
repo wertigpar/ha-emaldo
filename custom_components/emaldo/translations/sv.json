@@ -51,10 +51,7 @@
       "init": {
         "title": "Schemaomfrågning",
         "description": "Konfigurera när integrationen kontrollerar schemauppdateringar.",
-        "data": {
-          "schedule_start_hour": "Starttimme (0-23)",
-          "schedule_start_minute": "Startminut (0-59)",
-          "schedule_interval": "Upprepningsintervall (sekunder)"
+        "data": {          "schedule_interval": "Upprepningsintervall (sekunder)"
         }
       }
     }

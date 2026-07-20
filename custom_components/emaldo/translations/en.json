@@ -54,10 +54,7 @@
       "init": {
         "title": "Schedule Polling",
         "description": "Configure when the integration checks for schedule updates.",
-        "data": {
-          "schedule_start_hour": "Start hour (0-23)",
-          "schedule_start_minute": "Start minute (0-59)",
-          "schedule_interval": "Repeat interval (seconds)"
+        "data": {          "schedule_interval": "Repeat interval (seconds)"
         }
       }
     }

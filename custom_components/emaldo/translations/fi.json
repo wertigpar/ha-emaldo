@@ -51,10 +51,7 @@
       "init": {
         "title": "Aikataulukyselyt",
         "description": "Määritä, milloin integraatio tarkistaa aikataulupäivitykset.",
-        "data": {
-          "schedule_start_hour": "Alkutunti (0–23)",
-          "schedule_start_minute": "Alkuminuutti (0–59)",
-          "schedule_interval": "Toistovälintervalli (sekuntia)"
+        "data": {          "schedule_interval": "Toistovälintervalli (sekuntia)"
         }
       }
     }

@@ -106,13 +106,9 @@ STREAM_FIRST_FRAME_WAIT = 12.0
 REALTIME_SUCCESS_WINDOW = 240
 
 # Schedule polling configuration
-CONF_SCHEDULE_START_HOUR = "schedule_start_hour"
-CONF_SCHEDULE_START_MINUTE = "schedule_start_minute"
 CONF_SCHEDULE_INTERVAL = "schedule_interval"
 
-DEFAULT_SCHEDULE_START_HOUR = 14
-DEFAULT_SCHEDULE_START_MINUTE = 0
-DEFAULT_SCHEDULE_INTERVAL = 7200  # 2 hours in seconds
+DEFAULT_SCHEDULE_INTERVAL = 600  # 10 minutes in seconds
 
 # Models that do not support the solar PV input
 PV_UNSUPPORTED_MODELS: frozenset[str] = frozenset({

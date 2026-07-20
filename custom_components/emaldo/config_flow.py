@@ -30,13 +30,9 @@ from .const import (
     DEFAULT_APP_ID,
     DEFAULT_APP_SECRET,
     DEFAULT_APP_VERSION,
-    CONF_SCHEDULE_START_HOUR,
-    CONF_SCHEDULE_START_MINUTE,
     CONF_SCHEDULE_INTERVAL,
     CONF_REALTIME_STREAM_MODE,
     REALTIME_STREAM_MODE,
-    DEFAULT_SCHEDULE_START_HOUR,
-    DEFAULT_SCHEDULE_START_MINUTE,
     DEFAULT_SCHEDULE_INTERVAL,
 )
 
@@ -253,23 +249,11 @@ class EmaldoOptionsFlow(OptionsFlow):
             data_schema=vol.Schema(
                 {
                     vol.Required(
-                        CONF_SCHEDULE_START_HOUR,
-                        default=options.get(
-                            CONF_SCHEDULE_START_HOUR, DEFAULT_SCHEDULE_START_HOUR
-                        ),
-                    ): vol.All(int, vol.Range(min=0, max=23)),
-                    vol.Required(
-                        CONF_SCHEDULE_START_MINUTE,
-                        default=options.get(
-                            CONF_SCHEDULE_START_MINUTE, DEFAULT_SCHEDULE_START_MINUTE
-                        ),
-                    ): vol.All(int, vol.Range(min=0, max=59)),
-                    vol.Required(
                         CONF_SCHEDULE_INTERVAL,
                         default=options.get(
                             CONF_SCHEDULE_INTERVAL, DEFAULT_SCHEDULE_INTERVAL
                         ),
-                    ): vol.All(int, vol.Range(min=600, max=86400)),
+                    ): vol.All(int, vol.Range(min=60, max=600)),
                     vol.Required(
                         CONF_REALTIME_STREAM_MODE,
                         default=options.get(

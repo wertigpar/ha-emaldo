@@ -51,10 +51,7 @@
       "init": {
         "title": "Tidsplanpolling",
         "description": "Konfigurer hvornår integrationen tjekker for tidsplanopdateringer.",
-        "data": {
-          "schedule_start_hour": "Starttime (0-23)",
-          "schedule_start_minute": "Startminut (0-59)",
-          "schedule_interval": "Gentagelsesinterval (sekunder)"
+        "data": {          "schedule_interval": "Gentagelsesinterval (sekunder)"
         }
       }
     }
