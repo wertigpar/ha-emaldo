@@ -53,10 +53,8 @@
     "step": {
       "init": {
         "title": "Schedule Polling",
-        "description": "Configure when the integration checks for schedule updates.",
+        "description": "How often the integration refreshes schedule and override data (60-600s). Active mode and plan source also recompute every minute at no API cost.",
         "data": {
-          "schedule_start_hour": "Start hour (0-23)",
-          "schedule_start_minute": "Start minute (0-59)",
           "schedule_interval": "Repeat interval (seconds)",
           "realtime_stream_mode": "Realtime stream mode (recommended; turn off for poll/compatibility mode if realtime data stalls on your network)"
         }

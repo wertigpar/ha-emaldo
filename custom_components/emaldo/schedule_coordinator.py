@@ -31,11 +31,7 @@ from .emaldo_lib import (
 from .const import (
     DOMAIN,
     CONF_HOME_ID,
-    CONF_SCHEDULE_START_HOUR,
-    CONF_SCHEDULE_START_MINUTE,
     CONF_SCHEDULE_INTERVAL,
-    DEFAULT_SCHEDULE_START_HOUR,
-    DEFAULT_SCHEDULE_START_MINUTE,
     DEFAULT_SCHEDULE_INTERVAL,
     EVENT_NEXT_DAY_SCHEDULE_READY,
 )
@@ -83,6 +79,7 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._retry_count = 0  # exponential backoff counter
         self._unsub_time: CALLBACK_TYPE | None = None
         self._unsub_interval: CALLBACK_TYPE | None = None
+        self._unsub_slot: CALLBACK_TYPE | None = None
         self._unsub_e2e_retry: CALLBACK_TYPE | None = None
         self._unsub_retry: CALLBACK_TYPE | None = None
 
@@ -342,33 +339,30 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @callback
     def async_setup_listeners(self) -> None:
-        """Set up the time-of-day and interval listeners."""
+        """Set up the interval poll and slot-boundary recompute listeners."""
         self._cancel_listeners()
 
         opts = self._entry.options
-        start_hour = opts.get(CONF_SCHEDULE_START_HOUR, DEFAULT_SCHEDULE_START_HOUR)
-        start_minute = opts.get(
-            CONF_SCHEDULE_START_MINUTE, DEFAULT_SCHEDULE_START_MINUTE
-        )
         interval_sec = opts.get(CONF_SCHEDULE_INTERVAL, DEFAULT_SCHEDULE_INTERVAL)
 
         @callback
-        def _on_time_trigger(now: datetime) -> None:
-            """Refresh when the configured start time is reached."""
-            _LOGGER.debug("Schedule start-time trigger fired at %s", now)
-            self.hass.async_create_task(self.async_request_refresh())
-
-        @callback
         def _on_interval(now: datetime) -> None:
-            """Refresh on the repeat interval."""
+            """Refresh schedule/override data from the API on the interval."""
             _LOGGER.debug("Schedule interval trigger fired at %s", now)
             self.hass.async_create_task(self.async_request_refresh())
 
-        self._unsub_time = async_track_time_change(
-            self.hass, _on_time_trigger, hour=start_hour, minute=start_minute, second=0
-        )
+        @callback
+        def _on_slot_tick(now: datetime) -> None:
+            """Re-push cached data so time-derived sensors (active_mode,
+            plan_source) recompute on slot boundaries without an API call."""
+            if self.data is not None:
+                self.async_set_updated_data(self.data)
+
         self._unsub_interval = async_track_time_interval(
             self.hass, _on_interval, timedelta(seconds=interval_sec)
+        )
+        self._unsub_slot = async_track_time_interval(
+            self.hass, _on_slot_tick, timedelta(minutes=1)
         )
 
     @callback
@@ -380,6 +374,9 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._unsub_interval is not None:
             self._unsub_interval()
             self._unsub_interval = None
+        if self._unsub_slot is not None:
+            self._unsub_slot()
+            self._unsub_slot = None
 
     @callback
     def async_shutdown(self) -> None:

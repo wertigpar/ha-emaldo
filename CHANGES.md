@@ -1,5 +1,24 @@
 # Changes
 
+## v1.0.0-beta17
+
+### Changed (schedule polling: faster, simpler, fixes active_mode/plan_source lag)
+
+- Removed `Start hour` and `Start minute` schedule-polling config options.
+  The 2-hour default was an over-correction: the integration already polls
+  power flow every 5s (720 REST-ish calls/hr/device), so one extra schedule
+  REST call every few minutes is negligible API load.
+- `Repeat interval` (schedule refresh) is now clamped to **60-600s** with a
+  default of **600s (10 min)**. This also catches external (app-side) override
+  changes within 10 min instead of up to 2 hours.
+- Added a **1-minute slot-boundary recompute ticker** to
+  `EmaldoScheduleCoordinator`: it re-pushes the cached `self.data` via
+  `async_set_updated_data` with **zero network cost**, so the time-derived
+  `active_mode` (Swedish: aktivt läge) and `plan_source` (plan källa) sensors
+  recompute on every 15-min slot crossing within ~1 min. Fixes the reported
+  up-to-9-min (worst case 2-hour) staleness when idle/charge/discharge or
+  internal/override flips.
+
 ## v1.0.0-beta16q
 
 ### Added (publish both power-flow load channels as realtime sensors)
