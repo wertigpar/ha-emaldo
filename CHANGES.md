@@ -1,5 +1,37 @@
 # Changes
 
+## v1.0.0-beta16q
+
+### Added (publish both power-flow load channels as realtime sensors)
+
+- Both per-frame load channels are now exposed as realtime W sensors:
+  - `addition_load_power` ("Additional load power") ← `addition_load_w`
+  - `other_load_power` ("Other load power") ← `other_load_w`
+- Wire values report load as a negative sink from the home POV; both
+  sensors flip the sign so they read as positive loads (consistent with
+  the existing `Consumption` and `Car charge power` sensors).
+- `realtime_sanity.py`: moved both load keys from the non-blocking AUX
+  set into `REALTIME_POWER_ENTITY_KEYS`, so a spike on one channel
+  blocks only that channel (and not the other load channel or the whole
+  payload).
+
+
+### Fixed (PowerFlow reasonability-fail DEBUG flood)
+
+- Root cause: `_stream_drain_locked` called `_try_parse_power_flow` on
+  **every** datagram drained from the shared subscription socket, without
+  first confirming the datagram was a 0x30 (`GET_GLOBAL_CURRENT_FLOW_INFO`)
+  reply. Relay keepalive / notice / wake / heartbeat datagrams on that same
+  socket were force-fed into the power-flow parser, producing the weekly
+  "PowerFlow reasonability fail" DEBUG spam with bogus values
+  (e.g. -16513, -18140, 15759, 6307, 20866, 25021).
+- Fix: added `_is_0x30_reply(resp)` pre-filter on the raw outer METHOD TLV
+  marker `82 f5 30`. Power-flow parsing now only runs on datagrams that
+  actually carry that marker; all other datagrams fall through to the
+  existing classify/drain path (correctly bucketed as keepalive/notice).
+  No real power-flow data is lost — the dedicated 0x30 reads already
+  contain the `82f530` marker.
+
 ## v1.0.0-beta16p
 
 ### Fixed (`reset_to_internal` crash — β16o regression, every call failed)

@@ -4241,12 +4241,20 @@ class PersistentE2ESession:
                     break
 
                 # 1) Try own chat_secret first (fast path — most packets)
-                pf = self._try_parse_power_flow(resp)
+                #    Skip non-0x30 datagrams (relay keepalive/notice/other
+                #    command replies) before decrypting — they are not
+                #    power-flow frames and only trigger the reasonability
+                #    sanity log when force-fed to the parser.
+                pf = (
+                    self._try_parse_power_flow(resp)
+                    if self._is_0x30_reply(resp)
+                    else None
+                )
                 dev_id = own_device_id
                 alt_hit = False
 
                 # 2) Alt-key loop: try every other device's secret (#47 beta15f)
-                if pf is None and alt_keys:
+                if pf is None and alt_keys and self._is_0x30_reply(resp):
                     for alt_dev_id, alt_secret in alt_keys.items():
                         if alt_secret == self._creds.get("chat_secret"):
                             continue  # already tried via own-creds path
@@ -5176,6 +5184,31 @@ class PersistentE2ESession:
             return "n/a"
         return f"{(now_ts - event_ts) * 1000.0:.1f}ms"
 
+
+    # METHOD field marker for a 0x30 (GET_GLOBAL_CURRENT_FLOW_INFO) reply.
+    # The relay echoes the command type in the outer packet as the TLV
+    # ``82 f5 <msg_type> <mode>`` sequence. A power-flow reply carries
+    # ``82 f5 30``; keepalive/notice/wake/heartbeat datagrams on the same
+    # shared subscription socket carry other method bytes (or the literal
+    # "alive"/"heartbeat" strings) and must NOT be fed to the power-flow
+    # parser. This pre-filter stops the heuristic mis-routing that produced
+    # the "PowerFlow reasonability fail" DEBUG floods (see #investigation).
+    _POWER_FLOW_METHOD_MARKER = b"\x82\xf5\x30"
+
+    @classmethod
+    def _is_0x30_reply(cls, resp: bytes) -> bool:
+        """Return True if *resp* is plausibly a 0x30 power-flow reply.
+
+        Cheap pre-decode check on the raw outer packet: the relay's METHOD
+        TLV (``82 f5 <msg_type> <mode>``) must advertise type 0x30. Datagrams
+        that are not 0x30 replies (relay keepalive/notice/other command
+        responses) are skipped so they fall through to the generic
+        classify/drain path instead of being force-fed to the power-flow
+        parser.
+        """
+        if resp is None or len(resp) < 4:
+            return False
+        return cls._POWER_FLOW_METHOD_MARKER in resp
 
     @classmethod
     def _is_session_expired(cls, resp: bytes) -> bool:

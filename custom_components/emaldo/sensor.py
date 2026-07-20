@@ -291,6 +291,31 @@ def _car_charge_power(data: dict[str, Any]) -> float | None:
     return None
 
 
+def _addition_load_power(data: dict[str, Any]) -> float | None:
+    """Additional household load in W — positive = consuming.
+
+    The Emaldo wire value reports load as negative (a sink from the home
+    node's POV). We flip it so the sensor reads as a positive load, matching
+    the Consumption/Car-charge convention.
+    """
+    if isinstance(data, dict):
+        w = data.get("addition_load_w")
+        return -w if w is not None else None
+    return None
+
+
+def _other_load_power(data: dict[str, Any]) -> float | None:
+    """Other household load in W — positive = consuming.
+
+    Same sign convention as the additional-load sensor (wire reports load as
+    a negative sink; flipped to a positive load for HA).
+    """
+    if isinstance(data, dict):
+        w = data.get("other_load_w")
+        return -w if w is not None else None
+    return None
+
+
 # -- Sensor descriptions --
 
 
@@ -417,6 +442,24 @@ REALTIME_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=_dual_power,
+    ),
+    EmaldoSensorEntityDescription(
+        key="addition_load_power",
+        translation_key="addition_load_power",
+        icon="mdi:home-lightning-bolt",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=_addition_load_power,
+    ),
+    EmaldoSensorEntityDescription(
+        key="other_load_power",
+        translation_key="other_load_power",
+        icon="mdi:home-lightning-bolt",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=_other_load_power,
     ),
 )
 
