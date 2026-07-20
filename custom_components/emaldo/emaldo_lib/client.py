@@ -1216,19 +1216,29 @@ class EmaldoClient:
     ) -> bool:
         """Write the AI Battery Range — opcode 0x1AA0 with `enable` byte.
 
-        Mirrors the app's "Save Battery Range" button: sends the new
-        smart/emergency markers with all 96 per-slot overrides cleared to
-        ``SLOT_NO_OVERRIDE`` (0x80). ``enable=True`` activates
+        Mirrors the app's "Save Battery Range" button. Updates only the
+        smart/emergency markers and the ``battery_range_override`` flag,
+        **without clearing existing manual per-slot overrides** (issue #55):
+        the official app coexists a "customized" battery range with manual
+        slot plans, so setting the range must not wipe slot overrides and
+        editing slots must not wipe the range. ``enable=True`` activates
         "Battery Range = override" — AI must operate inside
         [emergency_pct, smart_pct]. ``enable=False`` reverts to AI-chosen
-        range while persisting the markers.
+        range while keeping the manual slot overrides.
         """
         if not (0 <= smart_pct <= 100 and 0 <= emergency_pct <= 100):
             raise ValueError("smart_pct and emergency_pct must be 0..100")
         if smart_pct < emergency_pct:
             raise ValueError("smart_pct must be >= emergency_pct")
-        return self.reset_overrides(
-            home_id, device_id, model,
+        current = self.get_overrides(home_id, device_id, model, log=log)
+        if current and "slots" in current and isinstance(current["slots"], (list, bytes)):
+            slots = bytes(current["slots"])
+        else:
+            slots = bytes([SLOT_NO_OVERRIDE] * 96)
+        if len(slots) not in (96, 192):
+            slots = bytes([SLOT_NO_OVERRIDE] * 96)
+        return self.set_override(
+            home_id, device_id, model, slots,
             high_marker=smart_pct, low_marker=emergency_pct,
             battery_range_override=enable, log=log,
         )

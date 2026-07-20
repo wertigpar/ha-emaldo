@@ -1,5 +1,15 @@
 # Changes
 
+## v1.0.0-beta18
+
+### Fixed
+
+- **Issue #55:** `set_battery_range` no longer wipes manual per-slot overrides.
+  It now preserves the existing slot array and only updates the smart/emergency
+  markers + `battery_range_override` flag, matching the official-app
+  "customized battery range" behaviour that coexists with slot plans.
+  (Setting the range and editing slots are now independent, as in the app.)
+
 ## v1.0.0-beta17
 
 ### Changed (schedule polling: faster, simpler, fixes active_mode/plan_source lag)
@@ -17,7 +27,10 @@
   `active_mode` (Swedish: aktivt läge) and `plan_source` (plan källa) sensors
   recompute on every 15-min slot crossing within ~1 min. Fixes the reported
   up-to-9-min (worst case 2-hour) staleness when idle/charge/discharge or
-  internal/override flips.
+   internal/override flips.
+- **Verified by reporter (JanBaecklund, issue #47):** after deploying beta17,
+  an app-side override toggle and charge/discharge change propagated to
+  `plan_source`/`active_mode` within ~1 minute.
 
 ## v1.0.0-beta16q
 
