@@ -357,6 +357,7 @@ class EmaldoBatteryRangeOverrideSwitch(
         ov = (self.coordinator.data or {}).get("overrides") or {}
         smart = ov.get("high_marker", 50)
         emergency = ov.get("low_marker", 10)
+        cached_slots = bytes(ov["slots"]) if ov.get("slots") else None
 
         def _do_write() -> bool:
             for attempt in range(2):
@@ -369,6 +370,7 @@ class EmaldoBatteryRangeOverrideSwitch(
                         smart_pct=smart,
                         emergency_pct=emergency,
                         enable=enable,
+                        slot_values=cached_slots,
                     )
                 except EmaldoAuthError:
                     if attempt == 0:

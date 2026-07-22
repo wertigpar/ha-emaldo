@@ -175,8 +175,9 @@ set_battery_range:
   description: >
     Write the AI Battery Range — the SoC band the AI must operate within.
     Mirrors the app's Battery Range slider + override toggle. Sends opcode
-    0x1AA0 with all 96 per-15-min slot overrides cleared to 0x80
-    (no-override). Live-confirmed 2026-05-07 against Power Core 2.0.
+    0x1AA0 with the existing per-slot overrides preserved (coordinator
+    cache), so battery-range edits never wipe manual slot plans.
+    Live-confirmed 2026-05-07 against Power Core 2.0.
   fields:
     smart_pct:
       name: Smart reserve %

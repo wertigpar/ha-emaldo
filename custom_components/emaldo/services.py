@@ -271,6 +271,8 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
                 current = client.get_overrides(hid, did, model)
+                if current is None and coord.data:
+                    current = coord.data.get("overrides")
 
                 # Resolve omitted header fields from device state (first attempt)
                 if not resolved:
@@ -397,6 +399,8 @@ async def async_handle_apply_bulk_schedule(
                 # Resolve omitted header fields from device state (first attempt)
                 if not resolved and (high is None or low is None or bro is None):
                     current = client.get_overrides(hid, did, model)
+                    if current is None and coord.data:
+                        current = coord.data.get("overrides")
                     if current:
                         if high is None:
                             high = current["high_marker"]
@@ -536,6 +540,8 @@ def _reset_one_device(
                 if not resolved:
                     if high is None or low is None or bro is None:
                         current = client.get_overrides(hid, did, model)
+                        if current is None and coord.data:
+                            current = coord.data.get("overrides")
                         if current:
                             if high is None:
                                 high = current["high_marker"]
@@ -589,6 +595,8 @@ def _reset_one_device(
                 end_slot = _time_to_slot(end_time)
 
                 current = client.get_overrides(hid, did, model)
+                if current is None and coord.data:
+                    current = coord.data.get("overrides")
                 if current:
                     slots = list(current["slots"])
                 else:
@@ -1099,9 +1107,12 @@ async def async_handle_set_battery_range(
                     hass, coordinator_key="schedule", device_id=device_id
                 )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
+                ov = (coord.data or {}).get("overrides") or {}
+                cached_slots = bytes(ov["slots"]) if ov.get("slots") else None
                 ok = client.set_battery_range(
                     hid, did, model,
                     smart_pct=smart, emergency_pct=emergency, enable=enable,
+                    slot_values=cached_slots,
                 )
                 if ok:
                     _LOGGER.info(
