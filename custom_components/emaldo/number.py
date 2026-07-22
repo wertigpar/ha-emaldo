@@ -177,6 +177,7 @@ class EmaldoBatteryRangeMarker(
         smart = ov.get("high_marker", 50)
         emergency = ov.get("low_marker", 10)
         enable = bool(ov.get("battery_range_override", False))
+        cached_slots = bytes(ov["slots"]) if ov.get("slots") else None
         if self._kind == "smart":
             smart = new_pct
         else:
@@ -199,6 +200,7 @@ class EmaldoBatteryRangeMarker(
                         smart_pct=smart,
                         emergency_pct=emergency,
                         enable=enable,
+                        slot_values=cached_slots,
                     )
                 except EmaldoAuthError:
                     if attempt == 0:

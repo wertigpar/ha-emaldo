@@ -1,5 +1,50 @@
 # Changes
 
+## v1.0.0-beta19
+
+### Fixed
+
+- **Bug (a) — `AttributeError: 'NoneType' object has no attribute 'last_handshake_response':**
+  `_ensure_session` in `coordinator.py` now captures `self._session` into a local
+  variable (`_session`) before accessing `last_handshake_response` and calling
+  `_set_device_session`. This prevents a race condition where
+  `_invalidate_session_ref()` (called from the event loop) sets `self._session = None`
+  between `connect()` and the `last_handshake_response` read on the executor thread.
+
+- **Bug (b) — 21204 session_expired permanent death cycle:**
+  `_get_e2e_credentials` in `client.py` now resets the credential cache entry's
+  `generation` to `1` (instead of incrementing) after a successful home-level
+  escalation (`force_home_refresh=True`). Previously, the generation counter
+  persisted ≥3 within the 60s window, causing every subsequent forced refresh to
+  re-escalate — rotating the home secret every 5s (RC5 grace window) and
+  producing a permanent 21204 storm.
+
+- **Issue #56 — Battery range markers overwritten by defaults on transient
+  `get_overrides()` failure:**
+  When `get_overrides()` returned `None` due to a transient E2E read failure,
+  all service handlers (`set_slot_range`, `apply_bulk_schedule`,
+  `reset_to_internal`) fell back to `DEFAULT_MARKER_HIGH=72` /
+  `DEFAULT_MARKER_LOW=20` in the 4-byte packet header. These defaults
+  overwrote the user's actual smart/emergency values (e.g. 41/13) on every
+  subsequent override packet until the next successful `get_overrides()` call.
+
+  Primary fix: the 4 fallback branches across `set_slot_range`,
+  `apply_bulk_schedule`, and `reset_to_internal` now fall back to
+  `coord.data.get("overrides")` (coordinator cache) before using hardcoded
+  defaults.
+
+  Secondary fix: `client.set_battery_range()` now accepts an optional
+  `slot_values` parameter. All 3 callers (`number.py`, `switch.py`,
+  `services.py`) pass `bytes(ov["slots"])` from the coordinator cache,
+  bypassing the internal `get_overrides()` call entirely so a transient
+  failure cannot wipe manual per-slot overrides either.
+
+### Changed
+
+- `_ensure_session` uses a local `_session` reference for all post-connect reads
+  (`last_handshake_response`, `_set_device_session`) to eliminate the
+  `self._session = None` race window.
+
 ## v1.0.0-beta18
 
 ### Fixed

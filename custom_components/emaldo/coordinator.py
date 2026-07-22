@@ -1026,8 +1026,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             creds_provider=_creds_provider,
         )
         self._session.connect()
-        self.stats_last_handshake_response = self._session.last_handshake_response
-        self._set_device_session(self._session)
+        _session = self._session  # local ref for thread safety
+        self.stats_last_handshake_response = _session.last_handshake_response
+        self._set_device_session(_session)
         self._session_binding = binding
 
         # Home secret rotation callback — primary publishes after rotation

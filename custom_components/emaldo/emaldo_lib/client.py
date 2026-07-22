@@ -1040,7 +1040,13 @@ class EmaldoClient:
                     home_id, device_id, model,
                     force_home_refresh=_do_home_refresh,
                 )
-                generation = entry.generation + 1 if entry else 1
+                # After a successful home-level escalation, reset generation
+                # so the 60s escalation window does not re-trigger immediately
+                # on the next forced refresh (permanent 21204 storm).
+                if _do_home_refresh:
+                    generation = 1
+                else:
+                    generation = entry.generation + 1 if entry else 1
                 entry = E2ECredentialCacheEntry(
                     creds=creds,
                     created_at=now,
@@ -1212,6 +1218,7 @@ class EmaldoClient:
         smart_pct: int,
         emergency_pct: int,
         enable: bool = True,
+        slot_values: bytes | None = None,
         log: Callable[..., None] | None = None,
     ) -> bool:
         """Write the AI Battery Range — opcode 0x1AA0 with `enable` byte.
@@ -1225,18 +1232,26 @@ class EmaldoClient:
         "Battery Range = override" — AI must operate inside
         [emergency_pct, smart_pct]. ``enable=False`` reverts to AI-chosen
         range while keeping the manual slot overrides.
+
+        If *slot_values* is provided (96 or 192 bytes), the existing
+        ``get_overrides()`` call is skipped entirely — the caller supplies
+        pre-fetched slot data (typically from the coordinator cache) so a
+        transient E2E read failure cannot accidentally wipe slots.
         """
         if not (0 <= smart_pct <= 100 and 0 <= emergency_pct <= 100):
             raise ValueError("smart_pct and emergency_pct must be 0..100")
         if smart_pct < emergency_pct:
             raise ValueError("smart_pct must be >= emergency_pct")
-        current = self.get_overrides(home_id, device_id, model, log=log)
-        if current and "slots" in current and isinstance(current["slots"], (list, bytes)):
-            slots = bytes(current["slots"])
+        if slot_values is not None and len(slot_values) in (96, 192):
+            slots = slot_values
         else:
-            slots = bytes([SLOT_NO_OVERRIDE] * 96)
-        if len(slots) not in (96, 192):
-            slots = bytes([SLOT_NO_OVERRIDE] * 96)
+            current = self.get_overrides(home_id, device_id, model, log=log)
+            if current and "slots" in current and isinstance(current["slots"], (list, bytes)):
+                slots = bytes(current["slots"])
+            else:
+                slots = bytes([SLOT_NO_OVERRIDE] * 96)
+            if len(slots) not in (96, 192):
+                slots = bytes([SLOT_NO_OVERRIDE] * 96)
         return self.set_override(
             home_id, device_id, model, slots,
             high_marker=smart_pct, low_marker=emergency_pct,
