@@ -1,5 +1,28 @@
 # Changes
 
+## v1.0.0-beta20
+
+### Fixed
+
+- **Issue #58 — `manual_selling` optimistic state update:**
+  `async_turn_on`/`_write_manual_selling` sent the 0x80 command but never
+  inspected the response. Home Assistant unconditionally set `manual_selling_on`
+  to `True`, even when the relay rejected the command (e.g.
+  `CONN_NOT_ESTABLISHED`). Added `_write_manual_selling_verified` using the same
+  `_write_verified` pattern established in #51 for `sell_back_to_grid`,
+  `sell_limit`, and `third_party_pv`: write, sleep 1s, read-back via standalone
+  session, retry up to 3× if the device hasn't acknowledged the change. Switch
+  entities now reflect the confirmed device state rather than optimistic local
+  state.
+
+- **Issue #58 — `_get_home_e2e` cached empty `end_secret` for 30 min:**
+  `/home/e2e-login/` responses were validated only for `end_id` presence, not
+  for non-empty `end_secret`/`chat_secret`. When the API returned these as
+  empty/missing, the response was cached for 30 min and every stream reconnect
+  attempt failed with ``ValueError: Incorrect AES key length (0 bytes)``.
+  Validation now requires all three fields to be present and non-empty before
+  caching.
+
 ## v1.0.0-beta19
 
 ### Fixed

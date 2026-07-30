@@ -292,24 +292,24 @@ class EmaldoManualSellingSwitch(
         return max(1, int(round(self.coordinator.data.get("manual_selling_target_kwh") or 1)))
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Start manual selling with the last-known target kWh."""
+        """Start manual selling with the last-known target kWh, verifying the device confirms it (#58)."""
         target = self._current_target()
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_manual_selling, True, target  # noqa: SLF001
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_manual_selling_verified, True, target  # noqa: SLF001
         )
-        if self.coordinator.data is not None:
+        if confirmed is not None and self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
-            updated["manual_selling_on"] = True
+            updated["manual_selling_on"] = confirmed
             self.coordinator.async_set_updated_data(updated)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Stop manual selling."""
-        await self.hass.async_add_executor_job(
-            self.coordinator._write_manual_selling, False, 0  # noqa: SLF001
+        """Stop manual selling, verifying the device confirms it (#58)."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_manual_selling_verified, False, 0  # noqa: SLF001
         )
-        if self.coordinator.data is not None:
+        if confirmed is not None and self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
-            updated["manual_selling_on"] = False
+            updated["manual_selling_on"] = confirmed
             self.coordinator.async_set_updated_data(updated)
 
 

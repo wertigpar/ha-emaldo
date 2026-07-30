@@ -1684,6 +1684,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         session = self._ensure_session()
         return session.read_manual_selling()
 
+    def _write_manual_selling_verified(self, on: bool, target_kwh: int) -> Any:
+        """Write manual-selling state and confirm the device applied it (#58)."""
+        return self._write_verified(
+            lambda: self._write_manual_selling(on, target_kwh),
+            self._read_manual_selling,
+            "enabled",
+            on,
+            "Manual selling",
+        )
+
     def _read_battery_info_standalone(self) -> list[dict]:
         """Read per-module battery info on a throwaway one-shot E2E session.
 

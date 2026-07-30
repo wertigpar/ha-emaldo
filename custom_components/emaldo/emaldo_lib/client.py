@@ -802,7 +802,8 @@ class EmaldoClient:
                 "/home/e2e-login/", json_data={"home_id": home_id}
             )
             home_data = home_result.get("Result", {})
-            if not isinstance(home_data, dict) or "end_id" not in home_data:
+            if not isinstance(home_data, dict) or "end_id" not in home_data \
+               or not home_data.get("end_secret") or not home_data.get("chat_secret"):
                 raise EmaldoE2EError(f"Home e2e-login failed: {home_result}")
 
             with self._e2e_lock:
