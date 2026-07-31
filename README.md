@@ -1,6 +1,10 @@
 # Emaldo Battery — Home Assistant Custom Integration
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
+[![GitHub Release](https://img.shields.io/github/release/wertigpar/ha-emaldo.svg?style=flat-square)](https://github.com/wertigpar/ha-emaldo/releases)
+[![License](https://img.shields.io/github/license/wertigpar/ha-emaldo.svg?style=flat-square)](https://github.com/wertigpar/ha-emaldo/blob/main/LICENSE)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=flat-square)](https://github.com/hacs/integration)
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wertigpar&repository=ha-emaldo&category=integration)
 
 A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery systems. Provides real-time power monitoring, battery state tracking, schedule visualization, and full override control via services.
 
