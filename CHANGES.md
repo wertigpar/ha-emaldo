@@ -1,5 +1,12 @@
 # Changes
 
+## v1.0.0-beta21
+
+### Added logo & icon
+
+- **Local brand images** (`brand/` folder): `icon.png` (app icon, dark-green square + white glyph), `logo.png` (navy wordmark), plus `dark_*` and `@2x` variants. Served via HA 2026.3+ local brands proxy (`/api/brands/integration/emaldo/...`), no CDN/brands-repo PR needed.
+- Bump `manifest.json` → `1.0.0-beta21`.
+
 ## v1.0.0-beta20
 
 ### Fixed
