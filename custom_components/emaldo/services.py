@@ -455,11 +455,6 @@ async def async_handle_apply_bulk_schedule(
                 coord._reset_client()
             if attempt < 2:
                 time.sleep(1)
-        _LOGGER.error(
-            "Failed to apply bulk override after 3 attempts: %s%s",
-            last_err,
-            f" (reason={last_reason})" if last_err is None else "",
-        )
         # Legacy one-shot fallback (#47 Option C)
         try:
             fb_coord, fb_client = _get_coordinator_and_client(
@@ -470,10 +465,20 @@ async def async_handle_apply_bulk_schedule(
                 bytes(slot_values), high_marker=high, low_marker=low,
                 battery_range_override=bro,
             ):
-                _LOGGER.info("Bulk override applied via legacy one-shot fallback")
+                _LOGGER.info(
+                    "Bulk override retries failed (%s%s); applied via "
+                    "legacy one-shot fallback",
+                    last_err,
+                    f" (reason={last_reason})" if last_err is None else "",
+                )
                 return True
         except Exception:
             _LOGGER.debug("Legacy one-shot fallback also failed")
+        _LOGGER.error(
+            "Failed to apply bulk override after 3 attempts: %s%s",
+            last_err,
+            f" (reason={last_reason})" if last_err is None else "",
+        )
         return False
 
     await hass.async_add_executor_job(_do_bulk)

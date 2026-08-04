@@ -215,7 +215,8 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Handle a fetch failure: return stale data if available, else raise."""
         self._schedule_retry()
         if self.data is not None:
-            _LOGGER.warning(
+            # Transient failure — stale data served, backoff retry scheduled.
+            _LOGGER.info(
                 "%s — keeping previous data, retry %d in %ds",
                 message, self._retry_count,
                 min(self._RETRY_BASE_SECONDS * (2 ** (self._retry_count - 1)),

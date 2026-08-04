@@ -653,6 +653,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._keepalive_task: asyncio.Task | None = None
         self._empty_reads: int = 0
         self._consecutive_read_errors: int = 0
+        self._read_errors_since: float | None = None
+        self._read_errors_last_log: float | None = None
         self._consecutive_reconnects: int = 0
         self._episode_drops: int = 0
         # Set when a session teardown follows a confirmed failure (empty-read
@@ -1958,11 +1960,30 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 else "read_error"
             )
             self._record_reconnect(reconnect_reason, self.stats_last_failure)
+            if self._consecutive_read_errors == 1:
+                self._read_errors_since = _time.time()
+                self._read_errors_last_log = None
             if self._consecutive_read_errors >= self._MAX_EMPTY_READS:
-                _LOGGER.warning(
-                    "E2E power flow read failed %d times consecutively: %s",
-                    self._consecutive_read_errors, err,
-                )
+                now = _time.time()
+                persist_dur = now - (self._read_errors_since or now)
+                if persist_dur >= 60 and (
+                    self._read_errors_last_log is None
+                    or now - self._read_errors_last_log >= 300
+                ):
+                    # Transient backend/network blips self-heal on the next
+                    # poll; only escalate once the outage persists ~1 min and
+                    # then re-warn at most every 5 min.
+                    _LOGGER.warning(
+                        "E2E power flow read failed %d times consecutively "
+                        "for %.0fs: %s",
+                        self._consecutive_read_errors, persist_dur, err,
+                    )
+                    self._read_errors_last_log = now
+                elif self._read_errors_last_log is None:
+                    _LOGGER.info(
+                        "E2E power flow read failed %d times consecutively: %s",
+                        self._consecutive_read_errors, err,
+                    )
             else:
                 _LOGGER.debug(
                     "E2E power flow read failed (attempt %d/%d): %s",
@@ -2242,6 +2263,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._consecutive_read_errors,
             )
         self._consecutive_read_errors = 0
+        self._read_errors_since = None
+        self._read_errors_last_log = None
         self._empty_reconnect_deferral_streak = 0
         self._undecryptable_streak = 0
         self._consecutive_stream_stall_resets = 0

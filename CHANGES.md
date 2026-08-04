@@ -1,5 +1,29 @@
 # Changes
 
+## v1.0.0-beta22
+
+### Changed
+
+- **Transient connectivity warnings now log at INFO (no daily noise).** All three
+  self-healing paths served stale data and retried automatically, so their
+  WARNINGs fired on every daily `api.emaldo.com`/`dp.emaldo.com` blip even
+  though no user action was possible:
+  - `schedule_coordinator.py:218` — `Connection error … keeping previous data`
+    downgraded WARNING → INFO (stale data kept, exponential backoff scheduled;
+    a real outage still surfaces via `UpdateFailed` when no stale data exists).
+  - `coordinator.py:1962` — `E2E power flow read failed N times consecutively`
+    now logs INFO at the threshold (3) and escalates to WARNING only when the
+    outage persists ≥ 60s, re-warned at most every 5 min. Episode timers reset
+    on recovery.
+  - `coordinator.py:202` — REST fetch warning policy unchanged (already
+    throttled; ERROR only after > 1h).
+- **`services.py` bulk-override ERROR no longer false-positives.** The error was
+  logged before the legacy one-shot fallback ran, so a fallback success was
+  still reported as `Failed to apply bulk override after 3 attempts`. The ERROR
+  now fires only when the fallback also fails; fallback success logs INFO with
+  the retry cause.
+- Bump `manifest.json` → `1.0.0-beta22`.
+
 ## v1.0.0-beta21
 
 ### Added logo & icon
