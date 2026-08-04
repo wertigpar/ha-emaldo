@@ -19,7 +19,7 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 - **Third-party PV control** — Built-in switch for external PV routing; used by Battery Optimizer PV sell strategy
 - **Grid export controls** — Sell Back to Grid toggle and Sell Limit switch + daily threshold slider (kWh/day)
 - **Manual selling** — Switch + target kWh number for direct E2E grid-export selling (opcode 0x80/0x81)
-- **Emergency charge** — Force-charge the battery during a scheduled time window; configure start/end datetime entities then activate the switch (or automate via a service call)
+- **Emergency charge** — Force-charge the battery during a scheduled time window; configure start/end time entities then activate the switch (or automate via a service call)
 - **AI Battery Range controls** — Smart/Emergency reserve sliders and override switch
 - **Resilient polling** — On API failures, sensors keep their last-known values while exponential-backoff retries recover automatically (60 s → 120 s → 4 min → … capped at 30 min)
 - **Next-day schedule event** — Fires `emaldo_next_day_schedule_ready` when tomorrow's schedule appears
@@ -54,6 +54,7 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 | **App ID** | *(optional, only for testing)* Leave empty for default |
 | **App Secret** | *(optional, only for testing)* Leave empty for default |
 | **App Version** | *(optional, only for testing)* Leave empty for default |
+| **Device ID** | *(optional, only for testing)* Leave empty for default |
 | **Home ID** | *(optional)* Leave empty to auto-detect |
 
 ### Reconfiguring credentials
@@ -64,15 +65,14 @@ To update your email, password, app version, or encryption keys without removing
 
 All current values are pre-filled. After saving, the integration reloads automatically with the new credentials.
 
-### Options (Schedule Polling)
+### Options
 
-After setup, configure schedule polling via **Configure**:
+After setup, configure the integration via **Configure**:
 
 | Option | Description | Default |
 |---|---|---|
-| **Start hour** | Hour of day to begin schedule polling (0–23) | `14` |
-| **Start minute** | Minute to begin schedule polling (0–59) | `0` |
-| **Repeat interval** | Polling interval in seconds (600–86400) | `7200` (2 hours) |
+| **Schedule interval** | Schedule polling interval in seconds (60–600) | `600` (10 minutes) |
+| **Realtime stream mode** | Enable the realtime E2E stream for fast power updates | `true` |
 
 ## Sensors
 
@@ -88,7 +88,7 @@ Mixed source: slow REST polling (daily totals) and fast E2E polling (realtime po
 | Sensor | Unit | Description |
 |---|---|---|
 | **Battery SoC** | % | Current state of charge |
-| **Battery capacity** | kWh | Total battery capacity |
+| **Total energy** | Wh | Battery lifetime energy; `maximum_capacity_wh` attribute exposes total capacity |
 | **Battery charged today** | kWh | Energy charged today (cumulative) |
 | **Battery discharged today** | kWh | Energy discharged today (cumulative) |
 | **Solar energy today** | kWh | Total solar production today (internal strings + third-party PV) |
@@ -99,6 +99,8 @@ Mixed source: slow REST polling (daily totals) and fast E2E polling (realtime po
 | **Battery power** | W | Net battery power (HA convention: positive = discharging to home, negative = charging) |
 | **Grid power** | W | Net grid power (positive = importing, negative = exporting) |
 | **Consumption** | W | Household load power |
+| **Additional load power** | W | Additional household load (positive = consuming) |
+| **Other load power** | W | Other household load (positive = consuming) |
 
 ### Power Core-only Realtime Sensors
 
@@ -112,15 +114,24 @@ Available on Power Core models (e.g. `PC1-*`, `PC3-*`).
 
 ### Per-Module Battery Sensors
 
-One set of sensors per physical battery module, registered dynamically on the first successful battery poll (~10 minutes after startup). Module serials are used for stable `unique_id` values.
+One set of sensors per physical battery module, registered dynamically on the first successful battery poll. Slot-based `unique_id` values (module position, not serial) — stable across reconnects.
 
 | Sensor | Unit | Description |
 |---|---|---|
+| **Battery Module N Model** | — | Module model (diagnostic) |
 | **Battery Module N SoC** | % | Module state of charge |
-| **Battery Module N Temperature** | °C | BMS temperature |
-| **Battery Module N Voltage** | V | Pack voltage (diagnostic) |
+| **Battery Module N Current** | A | Module current (diagnostic) |
 | **Battery Module N Health** | % | State of health / capacity retention (diagnostic) |
+| **Battery Module N Cycles** | — | Charge/discharge cycle count (diagnostic) |
+| **Battery Module N Stored energy** | Wh | Energy currently stored (diagnostic) |
+| **Battery Module N Maximum capacity** | Wh | Maximum storable energy (diagnostic) |
+| **Battery Module N Temperature** | °C | BMS temperature |
+| **Battery Module N Cell A temperature** | °C | Cell A temperature (diagnostic) |
+| **Battery Module N Cell B temperature** | °C | Cell B temperature (diagnostic) |
+| **Battery Module N Nominal capacity** | Wh | Rated capacity (diagnostic) |
+| **Battery Module N Voltage** | V | Pack voltage (diagnostic) |
 | **Battery Module N Serial** | — | Module serial number (diagnostic) |
+| **Battery Module N Position** | — | Physical slot position (diagnostic) |
 
 ### Diagnostic Sensors
 
@@ -144,7 +155,7 @@ Read via E2E on every coordinator poll (best-effort — unavailable when E2E is 
 
 | Sensor | Description |
 |---|---|
-| **Balancing state** | Current grid frequency regulation state (`idle`, `pre_balancing`, `balancing`, `balancing_failed`) |
+| **Balancing state** | Current grid frequency regulation state (`idle`, `pre_balancing`, `fcr_n`, `fcr_d_up`, `fcr_d_down`, `fcr_d_up_down`, `mfrr_up`, `mfrr_down`, `balancing_failed`) |
 
 ### EV Charge Controls (Power Core models only)
 
@@ -194,8 +205,8 @@ The sensor uses `device_class: enum`. It is best-effort — if the E2E connectio
 | **Manual selling** | Switch | Starts direct grid-export via E2E; ON = start, OFF = stop (`set_manual_selling` 0x80) |
 | **Manual selling target** | Number | Total kWh to sell before auto-stopping (1–100 kWh). Configure before enabling |
 | **Emergency charge** | Switch | Starts a force-charge session for the configured time window; turn off to cancel |
-| **Emergency charge start** | Datetime | Window start time. If unset when the switch is turned on, defaults to now |
-| **Emergency charge end** | Datetime | Window end time. If unset when the switch is turned on, defaults to start + 1 hour |
+| **Emergency charge start** | Time | Window start time. If unset when the switch is turned on, defaults to now |
+| **Emergency charge end** | Time | Window end time. If unset when the switch is turned on, defaults to start + 1 hour |
 | **AI Battery Range override** | Switch | When ON, AI is constrained to the Smart/Emergency reserve band |
 | **AI Smart reserve** | Number | Upper SoC marker for AI battery range |
 | **AI Emergency reserve** | Number | Lower SoC marker for AI battery range |
@@ -228,18 +239,16 @@ automation:
       - platform: time
         at: "01:55:00"
     action:
-      - service: datetime.set_value
+      - service: time.set_value
         target:
-          entity_id: datetime.emaldo_battery_emergency_charge_start
+          entity_id: time.emaldo_battery_charge_start
         data:
-          datetime: >-
-            {{ (now().replace(hour=2, minute=0, second=0, microsecond=0)).isoformat() }}
-      - service: datetime.set_value
+          time: "02:00:00"
+      - service: time.set_value
         target:
-          entity_id: datetime.emaldo_battery_emergency_charge_end
+          entity_id: time.emaldo_battery_charge_stop
         data:
-          datetime: >-
-            {{ (now().replace(hour=5, minute=0, second=0, microsecond=0)).isoformat() }}
+          time: "05:00:00"
       - service: switch.turn_on
         target:
           entity_id: switch.emaldo_battery_emergency_charge
@@ -431,7 +440,7 @@ The Emaldo battery uses single-byte override values per 15-minute slot:
 
 | Event | Payload | Description |
 |---|---|---|
-| `emaldo_next_day_schedule_ready` | `{"entry_id": "..."}` | Fired when tomorrow's schedule first appears (typically after 14:00) |
+| `emaldo_next_day_schedule_ready` | `{"entry_id": "..."}` | Fired when the next-day schedule is fully available (more than 96 slots fetched in one poll) |
 
 Use this to trigger automations when the next-day schedule becomes available:
 
@@ -485,7 +494,7 @@ cards:
           min: 0
           max: 1.1
     series:
-      - entity: sensor.power_store_schedule_chart
+      - entity: sensor.emaldo_battery_schedule_chart
         name: Charge
         type: column
         color: '#2ecc71'
@@ -499,7 +508,7 @@ cards:
             new Date(s.t).getTime(),
             s.state === 'Charge' ? 1 : null
           ]);
-      - entity: sensor.power_store_schedule_chart
+      - entity: sensor.emaldo_battery_schedule_chart
         name: Discharge
         type: column
         color: '#e74c3c'
@@ -513,7 +522,7 @@ cards:
             new Date(s.t).getTime(),
             s.state === 'Discharge' ? 1 : null
           ]);
-      - entity: sensor.power_store_schedule_chart
+      - entity: sensor.emaldo_battery_schedule_chart
         name: Idle
         type: column
         color: '#95a5a6'
@@ -553,7 +562,7 @@ cards:
           min: 0
           max: 1.1
     series:
-      - entity: sensor.power_store_schedule_chart
+      - entity: sensor.emaldo_battery_schedule_chart
         name: Internal
         type: column
         color: '#95a5a6'
@@ -567,7 +576,7 @@ cards:
             new Date(s.t).getTime(),
             s.source === 'internal' ? 1 : null
           ]);
-      - entity: sensor.power_store_schedule_chart
+      - entity: sensor.emaldo_battery_schedule_chart
         name: User Override
         type: column
         color: '#3498db'
@@ -616,7 +625,7 @@ apex_config:
       title:
         text: c/kWh
 series:
-  - entity: sensor.power_store_schedule_chart
+  - entity: sensor.emaldo_battery_schedule_chart
     name: Solar Forecast
     type: area
     yaxis_id: solar
@@ -629,7 +638,7 @@ series:
     data_generator: |
       const schedule = entity.attributes.schedule || [];
       return schedule.map(s => [new Date(s.t).getTime(), s.solar * 10]);
-  - entity: sensor.power_store_schedule_chart
+  - entity: sensor.emaldo_battery_schedule_chart
     name: Price
     type: line
     yaxis_id: price
@@ -661,7 +670,7 @@ cards:
     name: Grid
     icon: mdi:transmission-tower
   - type: sensor
-    entity: sensor.emaldo_battery_load_power
+    entity: sensor.emaldo_battery_dual_power
     name: Load
     icon: mdi:home-lightning-bolt
 ```
@@ -683,7 +692,7 @@ cards:
 
 ### Schedule not updating
 
-- Check the schedule polling options: default is every 2 hours starting at 14:00.
+- Check the schedule polling options: default interval is 10 minutes.
 - Force a refresh: call `emaldo.refresh_schedule` from Developer Tools → Services.
 - Check logs for `emaldo` entries.
 
@@ -698,14 +707,17 @@ emaldo/
 ├── coordinator.py           # Power/battery data coordinator (60s polling)
 ├── manifest.json            # Integration manifest (version, requirements, dependencies)
 ├── number.py                # EV fixed charge amount + AI Battery Range number entities
+├── realtime_sanity.py       # Sanity checks for realtime E2E power-flow readings
 ├── schedule_coordinator.py  # Schedule + override coordinator (custom time triggers, E2E retry)
 ├── select.py                # Control priority + EV charge mode select entities
 ├── sensor.py                # Realtime + daily energy sensors, schedule sensors, balancing, diagnostics
 ├── services.py              # Override, EV schedule, solar backfill, AI Battery Range services
 ├── services.yaml            # Service UI descriptions
+├── shared_client.py         # Reference-counted REST client shared across config entries
 ├── strings.json             # Translation strings
 ├── switch.py                # Third-party PV, AI Battery Range override, and Emergency charge switches
 ├── time.py                  # Emergency charge start/end time entities
+├── brand/                   # Integration branding icons (logo, icon.png)
 ├── translations/            # Locale strings
 │   ├── da.json
 │   ├── en.json
