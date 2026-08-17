@@ -212,14 +212,38 @@ def _thirdparty_solar_energy_today(data: dict[str, Any]) -> float | None:
     return round(total * 5 / 60 / 1000, 3)
 
 
-def _grid_import_today(data: dict[str, Any]) -> float | None:
-    """Total grid import energy today.
+def _grid_import_components(
+    data: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    """Return today's grid import split as (smart, emergency) kWh.
 
     The grid stats endpoint with ``get_real=True`` returns 13 columns per row:
-    ``[time_offset, import_W, ?, export_W, ?, phantom_W, 0, ...]``.
+    ``[time_offset, smart_import_W, emergency_import_W, export_W, ...]``.
+    The official app draws these as two stacked "Imported" series ("Smart
+    Imported" = col 1, "Emergency Imported" = col 2), so the true daily
+    grid-import total is the sum of both columns (#60).
     """
     grid_resp = data.get("power", {}).get("grid")
-    return _sum_series(grid_resp, column=1)
+    smart = _sum_series(grid_resp, column=1)
+    emergency = _sum_series(grid_resp, column=2)
+    return smart, emergency
+
+
+def _grid_import_today(data: dict[str, Any]) -> float | None:
+    """Total grid import energy today (smart + emergency, cols 1 + 2)."""
+    smart, emergency = _grid_import_components(data)
+    if smart is None and emergency is None:
+        return None
+    return round((smart or 0.0) + (emergency or 0.0), 3)
+
+
+def _grid_import_attrs(data: dict[str, Any]) -> dict[str, Any]:
+    """Attribute split of today's grid import (smart vs emergency, kWh)."""
+    smart, emergency = _grid_import_components(data)
+    return {
+        "smart_import_today": smart,
+        "emergency_import_today": emergency,
+    }
 
 
 def _grid_export_today(data: dict[str, Any]) -> float | None:
@@ -324,6 +348,7 @@ class EmaldoSensorEntityDescription(SensorEntityDescription):
     """Describe an Emaldo sensor."""
 
     value_fn: Callable[[dict[str, Any]], float | None]
+    attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
 # Sensors that read from the slow REST coordinator (battery + energy totals)
@@ -378,6 +403,7 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL,
         value_fn=_grid_import_today,
+        attrs_fn=_grid_import_attrs,
     ),
     EmaldoSensorEntityDescription(
         key="grid_export_today",
@@ -682,6 +708,16 @@ class EmaldoSensor(_RealtimeRestoreSensor, CoordinatorEntity[EmaldoCoordinator])
         if self.entity_description.state_class == SensorStateClass.TOTAL:
             return dt_util.start_of_local_day()
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return extra attributes from the description's attrs_fn (if any)."""
+        if self.coordinator.data is None:
+            return None
+        attrs_fn = self.entity_description.attrs_fn
+        if attrs_fn is None:
+            return None
+        return attrs_fn(self.coordinator.data)
 
 
 # -- Helper to compute current slot index --

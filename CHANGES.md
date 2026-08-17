@@ -1,5 +1,22 @@
 # Changes
 
+## v1.0.0-beta23
+
+### Fixed
+
+- **Issue #60 — `grid_import_today` under-reported on Power Core (0.66 kWh vs
+  the Emaldo app's 10.9 kWh).** The grid stats endpoint (`get_real=True`)
+  returns the daily import split across two columns: col 1 = "Smart Imported"
+  and col 2 = "Emergency Imported", which together make up the total "Imported"
+  value. The integration summed only col 1, so Power Core units — which
+  actually use the emergency-import channel — lost most of the day's import.
+  Power Store units were unaffected because col 2 reads 0 there. **Fix:**
+  `_grid_import_today` now sums cols 1 + 2 (`sensor.py`), and the split is
+  exposed as `smart_import_today` / `emergency_import_today` attributes on the
+  same sensor (via the new optional `attrs_fn` on
+  `EmaldoSensorEntityDescription`).
+- Bump `manifest.json` → `1.0.0-beta23`.
+
 ## v1.0.0-beta22
 
 ### Changed
