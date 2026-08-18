@@ -1,5 +1,18 @@
 # Changes
 
+## v1.0.0-beta24
+
+### Fixed
+
+- **Device→relay push channel stall classification (#61).** When the relay is
+  delivering packets (`drain_packets>0`) but device push frames are absent
+  (`frames=0`), the stall was previously misclassified as a CGNAT/HA-side
+  network drop. The integration now correctly identifies this as a device→relay
+  push channel failure with a distinct diagnostic message. The poll-mode
+  recommendation now covers three cases: credential/decryption failure,
+  device→relay push channel failure, and CGNAT/HA-side network drop.
+- Bump `manifest.json` → `1.0.0-beta24`.
+
 ## v1.0.0-beta23
 
 ### Fixed

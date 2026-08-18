@@ -672,10 +672,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._stall_active: bool = False
         self._stall_snapshot: dict | None = None
         # Consecutive stream-mode full-reset escalations without a successful
-        # read in between. Repeated resets mean the device-push frames simply
-        # aren't reaching Home Assistant (restrictive NAT/firewall/CGNAT) — a
-        # transport limitation no client reset can fix (#41, #47). Used to emit
-        # a one-time "switch to poll mode" recommendation.
+        # read in between. Repeated resets indicate the device-push frames
+        # aren't reaching Home Assistant — either a device→relay failure
+        # (drain_packets>0, frames=0) or a network limitation (no traffic at
+        # all). Used to emit a one-time "switch to poll mode" recommendation
+        # with the correct classification (#41, #47, #61).
         self._consecutive_stream_stall_resets: int = 0
         self._stream_poll_mode_hint_logged: bool = False
         self._regulate_frequency: dict | None = None
@@ -2052,12 +2053,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         # than assuming a NAT/firewall drop. drain_packets counts
                         # datagrams the receiver actually pulled off the socket;
                         # drain_unparsed counts those it could not decrypt/parse.
-                        # If packets ARE arriving but cannot be decoded, this is
-                        # a credential/decryption problem (poll mode will not
-                        # help) — not the no-traffic NAT case (#41, #47).
                         _sd = self._stream_diag or {}
                         _pkts = int(_sd.get("drain_packets", 0) or 0)
                         _unparsed = int(_sd.get("drain_unparsed", 0) or 0)
+                        _frames = int(_sd.get("frames", 0) or 0)
                         if _pkts > 0 and _unparsed >= max(1, _pkts - 1):
                             _LOGGER.warning(
                                 "E2E realtime stream has stalled and been "
@@ -2072,16 +2071,31 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                                 _pkts,
                                 _unparsed,
                             )
+                        elif _pkts > 0 and _frames == 0:
+                            _LOGGER.warning(
+                                "E2E realtime stream has stalled and been "
+                                "force-reset %d times without recovering — the "
+                                "relay is delivering packets (%d seen) but the "
+                                "device's push frames (%d) are not arriving. "
+                                "This is a device→relay issue, not a network "
+                                "drop on the HA side. Turning OFF 'Realtime "
+                                "stream mode' under Settings → Devices & "
+                                "services → Emaldo Battery → Configure is "
+                                "recommended (#41, #47, #61).",
+                                self._consecutive_stream_stall_resets,
+                                _pkts,
+                                _frames,
+                            )
                         else:
                             _LOGGER.warning(
-                                "E2E realtime stream has stalled and been force-reset %d "
-                                "times without recovering — the device's push frames are "
-                                "not reaching Home Assistant (typically a restrictive "
-                                "NAT/firewall/CGNAT network). This cannot be fixed by "
-                                "reconnecting. Turn OFF 'Realtime stream mode' under "
-                                "Settings → Devices & services → Emaldo Battery → Configure "
-                                "to use the poll model, which traverses NAT reliably (#41, "
-                                "#47).",
+                                "E2E realtime stream has stalled and been "
+                                "force-reset %d times without recovering — no "
+                                "relay traffic reaching Home Assistant (likely "
+                                "NAT/firewall/CGNAT). Turn OFF 'Realtime stream "
+                                "mode' under Settings → Devices & services → "
+                                "Emaldo Battery → Configure to use the poll "
+                                "model, which traverses NAT reliably "
+                                "(#41, #47).",
                                 self._consecutive_stream_stall_resets,
                             )
                     return self._keep_last_or_fail()
