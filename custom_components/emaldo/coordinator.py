@@ -1022,29 +1022,35 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     )
             return new_creds
 
+        # Hold a LOCAL reference for everything below. Another thread's
+        # reconnect path can run _invalidate_session_ref() (self._session =
+        # None) while connect()'s handshake is in flight — re-reading
+        # self._session afterwards crashed with AttributeError: 'NoneType'
+        # object has no attribute 'last_handshake_response' (#61 log
+        # 2026-08-21) and orphaned an already-connected session. The freshly
+        # built session stays valid regardless; register it.
         self._session = PersistentE2ESession(
             creds,
             home_id=home_id,
             log=lambda msg: _LOGGER.debug("[E2E] %s", msg),
             creds_provider=_creds_provider,
         )
-        self._session.connect()
-        _session = self._session  # local ref for thread safety
+        _session = self._session
+        _session.connect()
         self.stats_last_handshake_response = _session.last_handshake_response
         self._set_device_session(_session)
         self._session_binding = binding
 
         # Home secret rotation callback — primary publishes after rotation
-        _s = self._session
         self._unregister_home_secret = client.register_home_secret_callback(
             self._parent.home_id,
-            lambda home_data, s=_s: (
+            lambda home_data, s=_session: (
                 s.rekey_home(home_data) if s is not None and not s.closed else None
             ),
         )
 
         if self._stream_mode:
-            self._session.start_stream(
+            _session.start_stream(
                 resubscribe_interval=RESUBSCRIBE_INTERVAL,
                 keepalive_interval=KEEPALIVE_INTERVAL,
                 frame_gap_resubscribe=STREAM_FRAME_GAP_RESUBSCRIBE,
@@ -1054,15 +1060,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
             import time as _time
             _first_frame_deadline = _time.perf_counter() + STREAM_FIRST_FRAME_WAIT
-            _session = self._session
-            # Guard: the session can be invalidated (rotate/reset ->
-            # _invalidate_session_ref sets self._session = None) between the
-            # stream-mode check above and here. Without this, the frame-wait
-            # loop calls None.get_latest_power_flow() -> AttributeError, which
-            # surfaces as a spurious read_error reconnect. Return the (None)
-            # session so the caller's normal re-create path handles it.
-            if _session is None:
-                return self._session
             while _time.perf_counter() < _first_frame_deadline:
                 if (
                     _session.get_latest_power_flow(max_age=STREAM_STALE_AFTER)
@@ -1070,7 +1067,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 ):
                     break
                 _time.sleep(0.2)
-        return self._session
+        return _session
 
     def _send_override_via_stream(
         self,

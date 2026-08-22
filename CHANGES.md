@@ -1,5 +1,23 @@
 # Changes
 
+## v1.0.0-beta25
+
+### Fixed
+
+- **`_ensure_session` race crash killed override commands (#61 log 2026-08-21).**
+  While a worker thread was inside `_ensure_session()` waiting for
+  `connect()`'s handshake (observed 5–10s during relay degradation), the main
+  thread's reconnect path could run `_invalidate_session_ref()`, setting
+  `self._session = None`. The worker then re-read `self._session` after the
+  handshake and crashed: `AttributeError: 'NoneType' object has no attribute
+  'last_handshake_response'` (coordinator.py:1033 via
+  `_send_override_via_stream`). The freshly connected session was orphaned and
+  the caller's bulk override failed all 3 attempts. **Fix:** hold a local
+  reference from session construction through registration/stream-start/return;
+  never re-read the shared `self._session` attribute inside the build block.
+  The now-dead mid-stream None guard was removed with it.
+- Bump `manifest.json` → `1.0.0-beta25`.
+
 ## v1.0.0-beta24
 
 ### Fixed
