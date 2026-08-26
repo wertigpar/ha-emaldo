@@ -1202,7 +1202,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             }
             return False
 
-    def _read_power_flow(self) -> dict | None:
+    def _read_power_flow(
+        self, newer_than: float | None = None,
+    ) -> dict | None:
         """Synchronous helper that runs in the executor."""
         if self._legacy_fallback_active:
             if not self._is_primary:
@@ -1241,6 +1243,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # all handled by the stream thread.
             data = session.get_latest_power_flow(
                 max_age=STREAM_STALE_AFTER, device_id=self.device_id,
+                min_recv_monotonic=newer_than,
             )
             self._accumulate_stream_stats(session)
             # Sample RTT here too: stream mode returns before the legacy RTT
@@ -1458,59 +1461,72 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "e2e_rtt_last_ms": self.stats_e2e_rtt_last_ms,
         }
 
-    #: Tolerate this many device-convergence retries before giving up and
-    #: logging a warning (#51). Separate from the transport-level retry
-    #: already inside each ``_write_*`` method — this retries the whole
-    #: write+read-back cycle when the command was transmitted successfully
-    #: but the device state never confirms the requested value.
-    _WRITE_VERIFY_RETRIES = 2
-    #: Delay between a write and reading back confirmed state, giving the
-    #: relay/device time to apply the command before we check.
-    _WRITE_VERIFY_DELAY_S = 1.0
+    #: After a write, poll the device's reported state until a frame received
+    #: AFTER the command (the ``newer_than`` gate in ``_write_verified``) shows
+    #: the requested value. A single 1s wait read a pre-command streamed
+    #: power-flow frame — the relay/device applies mode changes with internal
+    #: latency (observed: the official app also lags) and the cached frame can
+    #: be up to STREAM_STALE_AFTER seconds old, so confirmation falsely failed
+    #: and the caller (e.g. Battery Optimizer) re-fired the command in a loop
+    #: (#61 PV timing analysis). Poll every ``_WRITE_VERIFY_POLL_S`` up to
+    #: ``_WRITE_VERIFY_MAX_WAIT_S`` total.
+    _WRITE_VERIFY_POLL_S = 1.0
+    _WRITE_VERIFY_MAX_WAIT_S = 20.0
+    _WRITE_VERIFY_MAX_POLLS = 20
 
     def _write_verified(
         self,
-        write_fn: Callable[[], None],
-        read_fn: Callable[[], dict | None],
+        write_fn: Callable[..., None],
+        read_fn: Callable[..., dict | None],
         result_key: str,
         expected: Any,
         label: str,
     ) -> Any:
-        """Write a command and confirm the device actually applied it (#51).
+        """Write a command and confirm the device actually applied it (#51, #61).
 
-        Several switch commands were previously fire-and-forget: once the
-        write call returned without raising, the caller assumed success —
-        even though a command can be transmitted successfully and still
-        never take effect on the device. This retries the write up to
-        ``_WRITE_VERIFY_RETRIES`` times if the confirmed state read back via
-        ``read_fn`` does not match ``expected``, and logs a warning instead
-        of silently reporting success when it never converges.
+        Several switch commands were previously fire-and-forget: once the write
+        returned without raising, the caller assumed success — even though a
+        command can be transmitted successfully and still never take effect on
+        the device. This retries the write+read-back cycle and logs a warning
+        instead of silently reporting success when it never converges.
 
-        Returns the last confirmed value (which may differ from
-        ``expected``), or ``None`` if no read ever succeeded, so callers can
-        reflect the real device state instead of assuming the write worked.
+        Confirmation uses a *fresh-frame gate*: ``read_fn`` is passed the
+        ``time.perf_counter()`` instant of the write and only accepts a device
+        frame received afterwards, so a stale pre-command frame (normal for a
+        streamed power-flow read-back) never masks a successful apply. We poll
+        every ``_WRITE_VERIFY_POLL_S`` until the device reports ``expected`` or
+        ``_WRITE_VERIFY_MAX_WAIT_S`` elapse.
+
+        Returns the last confirmed value (which may differ from ``expected``), or
+        ``None`` if no read ever succeeded, so callers can reflect the real
+        device state instead of assuming the write worked.
         """
         import time
 
         confirmed_value = None
-        for attempt in range(self._WRITE_VERIFY_RETRIES + 1):
-            write_fn()
-            time.sleep(self._WRITE_VERIFY_DELAY_S)
-            confirmed = read_fn()
+        write_fn()
+        # Capture AFTER the command has left the socket. Only frames received
+        # later can reflect the new mode. Must use perf_counter to match the
+        # session's frame-recv clock used by get_latest_power_flow.
+        wrote_at = time.perf_counter()
+        deadline = wrote_at + self._WRITE_VERIFY_MAX_WAIT_S
+        for poll in range(self._WRITE_VERIFY_MAX_POLLS):
+            time.sleep(self._WRITE_VERIFY_POLL_S)
+            confirmed = read_fn(newer_than=wrote_at)
             if confirmed is not None:
                 confirmed_value = confirmed.get(result_key)
                 if confirmed_value == expected:
                     return confirmed_value
-            if attempt < self._WRITE_VERIFY_RETRIES:
-                _LOGGER.debug(
-                    "%s not yet confirmed (attempt %d/%d, target=%s, read=%s)",
-                    label, attempt + 1, self._WRITE_VERIFY_RETRIES + 1,
-                    expected, confirmed_value,
-                )
+            if time.perf_counter() >= deadline:
+                break
+            _LOGGER.debug(
+                "%s not yet confirmed (poll %d, target=%s, read=%s)",
+                label, poll + 1, expected, confirmed_value,
+            )
         _LOGGER.warning(
-            "%s command was not confirmed by the device after %d attempts "
+            "%s command was not confirmed by the device after %.0fs "
             "(target=%s, last confirmed=%s)",
-            label, self._WRITE_VERIFY_RETRIES + 1, expected, confirmed_value,
+            label, self._WRITE_VERIFY_MAX_WAIT_S, expected, confirmed_value,
         )
         return confirmed_value
 
@@ -1593,8 +1609,15 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if attempt == 1:
                     raise
 
-    def _read_virtualpowerplant(self) -> dict | None:
-        """Read sell-back-to-grid state (0x06) via the persistent session."""
+    def _read_virtualpowerplant(
+        self, newer_than: float | None = None,
+    ) -> dict | None:
+        """Read sell-back-to-grid state (0x06) via the persistent session.
+
+        ``newer_than`` is accepted for parity with ``_read_power_flow`` (the
+        write-verify path passes it) but ignored here: this is a direct device
+        query returning authoritative current state, not a cached frame.
+        """
         session = self._ensure_session()
         return session.read_virtualpowerplant()
 

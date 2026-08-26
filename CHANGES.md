@@ -1,5 +1,28 @@
 # Changes
 
+## v1.0.0-beta26
+
+### Fixed
+
+- **PV / override confirmation now waits for a *post-command* device frame (#61
+  PV timing analysis, 2026-08-26).** Both `thirdparty_pv_on` (Battery
+  Optimizer) and `sell_back_to_grid_on` writes use `_write_verified`, which
+  confirmed by reading the next streamed power-flow frame. That read hit
+  `_read_power_flow` → `get_latest_power_flow(max_age=STREAM_STALE_AFTER)`,
+  which returns the *most recently received* frame — up to `STREAM_STALE_AFTER`
+  (28s) old. With the 1s `read_fn` delay, the confirmation read a pre-command
+  frame, so an actually-applied PV-ON still reported `read=False`, the caller
+  (Battery Optimizer) treated it as failed and re-fired the command in a loop.
+  Live log: two PV-ON attempts × 3 tries ~1s apart, all `read=False`, no
+  transport errors — a timing bug, not a device rejection. **Fix:** added a
+  `min_recv_monotonic` gate to `get_latest_power_flow` (e2e.py) and a
+  `newer_than` parameter threaded through `_read_power_flow` /
+  `_read_virtualpowerplant`. `_write_verified` now captures `perf_counter()`
+  *after* the write and only accepts a frame received afterwards, polling every
+  1s up to 20s. Stale pre-command frames can no longer mask a successful apply.
+  `_read_virtualpowerplant` ignores `newer_than` (direct authoritative query).
+- Bump `manifest.json` → `1.0.0-beta26`.
+
 ## v1.0.0-beta25
 
 ### Fixed
