@@ -95,7 +95,13 @@
       "battery_module_nominal_capacity": { "name": "Batterimodul {module} Nominell kapacitet" },
       "battery_module_voltage": { "name": "Batterimodul {module} Spänning" },
       "battery_module_serial": { "name": "Batterimodul {module} Serienummer" },
-      "battery_module_position": { "name": "Batterimodul {module} Position" }
+      "battery_module_position": { "name": "Batterimodul {module} Position" },
+      "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
+      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
+      "water_sensor": { "name": "Vattensensor" },
+      "fan_pack_01": { "name": "Fläktpaket 01" },
+      "fan_pack_02": { "name": "Fläktpaket 02" },
+      "fan_pack_03": { "name": "Fläktpaket 03" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Tredjeparts solpanel" },

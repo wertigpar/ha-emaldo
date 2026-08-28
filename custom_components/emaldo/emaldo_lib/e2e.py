@@ -1336,6 +1336,277 @@ def read_battery_info(
         sock.close()
 
 
+# -- PowerStation accessories (Fan Pack / Water Sensor) -----------------------
+#
+# Wire types are the low byte of the MCU Msct OPTION_METHOD opcode (same
+# scheme as the existing 0x06 battery-info probe, which is opcode 4102 =
+# 0x1006).  Discovered from the Emaldo app 2.8.8 decompilation:
+#
+#   get_cabinet_allinfo   opcode 4110 (0x100E)  payload: none
+#   get_cabinet_state     opcode 4109 (0x100D)  payload: [index]
+#   get_inverter_info     opcode 4100 (0x1004)  payload: [index]
+#
+# The device also pushes unsolicited ``cabinet_state_changed`` frames
+# (opcode 8199, wire byte 0x07) with the same state layout as
+# ``get_cabinet_state``; this module polls the request/response types only.
+_CABINET_ALLINFO_TYPE = 0x0E
+_CABINET_STATE_TYPE = 0x0D
+_INVERTER_INFO_TYPE = 0x04
+
+
+def parse_cabinet_state(payload: bytes | None) -> dict | None:
+    """Parse a ``get_cabinet_state`` (type 0x0D) response payload.
+
+    Layout (per ``Mcu.Cabinet`` enums + ``sd/f0.java`` in the app; values
+    on the wire are the enums' *stateValue*, not their code):
+
+        byte 0   water state  (0 = valid/dry, 1 = exception/water)
+        byte 1   smoke state  (0 = valid, 1 = exception)
+        byte 2   fan state    (0 = stopped, 1 = running, 2 = exception)
+        byte 3   exception bitmap (bit 0 = Communication)
+        byte 4   firmware version length N
+        bytes 5..5+N   firmware version (ASCII)
+        byte 5+N cabinet index
+
+    Returns a dict with ``water``, ``smoke``, ``fan``, ``exceptions`` and
+    ``index`` keys, or *None* if the payload is too short.
+    """
+    if not payload or len(payload) < 5:
+        return None
+    water = payload[0]
+    smoke = payload[1]
+    fan = payload[2]
+    exc_bits = payload[3]
+    exceptions: list[int] = []
+    if (exc_bits >> 0) & 1:
+        exceptions.append(4)  # Mcu.Cabinet.CabinetException.Communication
+    ver_len = payload[4]
+    offset = 5 + ver_len
+    if len(payload) < offset + 1:
+        return None
+    index = payload[offset]
+    return {
+        # Normalise to the app's enum codes: 1 = valid/stop, 2 = exception,
+        # 2 = running for fans, 3 = fan exception (CabinetFanState codes).
+        "water": 2 if water == 1 else 1 if water == 0 else -1,
+        "smoke": 2 if smoke == 1 else 1 if smoke == 0 else -1,
+        "fan": 3 if fan == 2 else 2 if fan == 1 else 1 if fan == 0 else -1,
+        "exceptions": exceptions,
+        "version": payload[5 : 5 + ver_len].decode("utf-8", "replace") if ver_len else "",
+        "index": index,
+    }
+
+
+def parse_inverter_info(payload: bytes | None) -> dict | None:
+    """Parse a ``get_inverter_info`` (type 0x04) response payload.
+
+    Layout (per ``sd/v0.smali`` in the app):
+
+        byte 0      inverter state (raw stateValue)
+        bytes 1-2   battery exceptions bitmap (u16 LE)
+        bytes 3-4   inverter exceptions bitmap (u16 LE)
+        bytes 5-6   grid exceptions bitmap (u16 LE)
+        bytes 7-8   system exceptions bitmap (u16 LE, bit 12 = Fan fault)
+        bytes 9-10  MPPT exceptions bitmap (u16 LE)
+        bytes 11-12 present exceptions bitmap (u16 LE)
+        bytes 13-14 DC exceptions bitmap (u16 LE)
+        byte 15     idInfo length N, then N bytes ASCII idInfo
+        byte (var)  version length M, then M bytes firmware version
+        byte (var)  fan state (0 = stopped, 1 = running)
+        byte (var)  inverter index
+
+    Returns a dict with ``state``, ``system_exceptions``, ``fan_state``
+    and ``index`` keys, or *None* if the payload is too short.
+    """
+    if not payload or len(payload) < 19:
+        return None
+    offset = 15
+    id_len = payload[offset]
+    offset += 1 + id_len
+    if len(payload) < offset + 1:
+        return None
+    ver_len = payload[offset]
+    offset += 1 + ver_len
+    if len(payload) < offset + 2:
+        return None
+    fan_raw = payload[offset]
+    index = payload[offset + 1]
+
+    def _bits(raw: int) -> list[int]:
+        return [bit + 1 for bit in range(16) if (raw >> bit) & 1]
+
+    system = _bits(int.from_bytes(payload[7:9], "little"))
+    return {
+        "state": payload[0],
+        "system_exceptions": system,
+        # InverterFanState codes: 1 = STOP, 2 = RUNNING; the enum cannot
+        # represent a fan *fault* (that arrives via InverterSystemException
+        # Fan = 13), so raw values outside 0/1 map to -1 (unknown).
+        "fan_state": 2 if fan_raw == 1 else 1 if fan_raw == 0 else -1,
+        "index": index,
+    }
+
+
+def read_accessories(
+    e2e_creds: dict,
+    *,
+    timeout: float = 4.0,
+    probe_timeout: float = 1.5,
+    inverters: int = 3,
+    log: Callable[..., None] | None = None,
+) -> dict | None:
+    """Read PowerStation accessory state (fans + water sensor) via E2E.
+
+    Performs the full session flow (alive → heartbeat) on a one-shot socket
+    then issues, in order:
+
+    * ``get_cabinet_allinfo`` (0x0E) → number of battery cabinets
+    * ``get_cabinet_state`` (0x0D, cabinet 0) → water/smoke/fan state
+    * ``get_inverter_info`` (0x04, inverters 0..N-1) → per-inverter fan
+      state (Fans Pack 01..03 on three-phase hardware)
+
+    Args:
+        e2e_creds: E2E credentials (from ``EmaldoClient.get_e2e_credentials``).
+        timeout: Socket timeout (seconds) for the handshake packets.
+        probe_timeout: Socket timeout (seconds) for each state probe.
+        inverters: Number of inverter indices to probe (1 = single-phase,
+            3 = three-phase "Fans Pack 01-03").
+        log: Optional log callback.
+
+    Returns:
+        Dict with ``cabinet_count``, ``cabinet`` (dict, cabinet 0 state) and
+        ``inverters`` (dict keyed by inverter index), or *None* if the
+        cabinet-allinfo probe failed entirely.
+    """
+    session_nonce = generate_nonce()
+
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B → got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            if log:
+                log(f"{label}: sent {len(pkt)}B → no response")
+            return None
+
+    def _probe(pkt_label: str, pkt: bytes, validate: Callable[[bytes], bool]):
+        """Send one request and return its decrypted payload (or None)."""
+        _drain(sock)
+        raw = _send(pkt, pkt_label)
+        if not raw:
+            return None
+        decrypted = decrypt_response(
+            raw, e2e_creds["chat_secret"],
+            payload_validator=validate,
+            silent=True,
+        )
+        if decrypted is None:
+            # First datagram may be a subscription ACK — try one follow-up.
+            try:
+                raw2, _ = sock.recvfrom(4096)
+                if log:
+                    log(f"{pkt_label} follow-up: {len(raw2)}B")
+                decrypted = decrypt_response(
+                    raw2, e2e_creds["chat_secret"],
+                    payload_validator=validate,
+                    silent=True,
+                )
+            except socket.timeout:
+                pass
+        return decrypted
+
+    result: dict = {"cabinet_count": 0, "cabinet": None, "inverters": {}}
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+        sock.settimeout(probe_timeout)
+
+        # 1) Cabinet count (0x0E, empty payload)
+        pkt = build_subscription_packet(
+            e2e_creds, _CABINET_ALLINFO_TYPE, session_nonce,
+            payload=b"", request_mode=True,
+        )
+        dec = _probe(
+            "CabinetAllInfo", pkt, lambda p: len(p) >= 1,
+        )
+        if dec is None:
+            return None
+        result["cabinet_count"] = dec[0]
+
+        # 2) Cabinet 0 state (0x0D, payload [index]).
+        # Validators also constrain the raw state bytes (0/1 water+smoke,
+        # 0-2 fan) so the relay's decrypted JSON status frames
+        # (``{"__time"...``) cannot pass a bare length check.
+        pkt = build_subscription_packet(
+            e2e_creds, _CABINET_STATE_TYPE, session_nonce,
+            payload=bytes([0]), request_mode=True,
+        )
+        dec = _probe(
+            "CabinetState", pkt,
+            lambda p: len(p) >= 5 and p[0] in (0, 1) and p[1] in (0, 1)
+            and p[2] in (0, 1, 2),
+        )
+        if dec is not None:
+            result["cabinet"] = parse_cabinet_state(dec)
+
+        # 3) Inverter info per index (0x04, payload [index]).
+        # Byte 0 = InverterState raw value (0-2); constrain it like the
+        # cabinet-state validator so JSON status frames cannot pass.
+        for idx in range(max(1, inverters)):
+            pkt = build_subscription_packet(
+                e2e_creds, _INVERTER_INFO_TYPE, session_nonce,
+                payload=bytes([idx]), request_mode=True,
+            )
+            dec = _probe(
+                f"InverterInfo(idx={idx})", pkt,
+                lambda p: len(p) >= 19 and p[0] in (0, 1, 2),
+            )
+            if dec is not None:
+                info = parse_inverter_info(dec)
+                if info is not None:
+                    result["inverters"][idx] = info
+
+        return result
+    finally:
+        sock.close()
+
+
+def _drain(sock: socket.socket) -> None:
+    """Discard stale UDP datagrams queued on *sock* (late replies)."""
+    cur_timeout = sock.gettimeout()
+    sock.settimeout(0)
+    while True:
+        try:
+            sock.recvfrom(4096)
+        except OSError:
+            break
+    sock.settimeout(cur_timeout)
+
+
 def _log_power_flow_raw(payload: bytes, log: Callable[..., None]) -> None:
     """Dump raw power flow payload for debugging."""
     log(f"Raw payload ({len(payload)}B): {payload.hex()}")

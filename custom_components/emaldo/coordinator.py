@@ -45,6 +45,7 @@ from .emaldo_lib.e2e import (
     _VIRTUALPOWERPLANT_SET_TYPE,
     _build_vpp_payload,
     read_battery_info as _standalone_read_battery_info,
+    read_accessories as _standalone_read_accessories,
     read_power_flow as _standalone_read_power_flow,
 )
 
@@ -67,6 +68,7 @@ from .const import (
     STREAM_LONG_STALL_RECONNECT,
     STREAM_STALL_FULL_RESET_SECONDS,
     STREAM_FIRST_FRAME_WAIT,
+    THREE_PHASE_MODELS,
 )
 from .emaldo_lib.const import DEFAULT_MARKER_HIGH, DEFAULT_MARKER_LOW
 from .realtime_sanity import (
@@ -111,6 +113,8 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._emergency_charge_start_t: object = None  # datetime.time | None
         self._emergency_charge_end_t: object = None    # datetime.time | None
         self._ev_poll_counter: int = 0
+        self._contract_poll_counter: int = 0
+        self._contract: dict = {}
         self._dual_power_fail_count: int = 0
         self._dual_power_fail_since: float | None = None
         self._dual_power_last_log: float = 0.0
@@ -306,6 +310,25 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 _LOGGER.debug("EV state fetch failed: %s", err)
 
+        # Balance-contract info (Facility ID GSRN numbers) — best-effort and
+        # throttled to every 5th poll (~5 min): the values are static once
+        # registered and the extra cloud call must not add API load.
+        self._contract_poll_counter += 1
+        if self._contract_poll_counter >= 5:
+            self._contract_poll_counter = 0
+            try:
+                contract = await self.hass.async_add_executor_job(
+                    client.get_contract, self.home_id
+                )
+                contract_data = (contract or {}).get("data") or {}
+                if contract_data:
+                    self._contract = {
+                        "consumption_meter": contract_data.get("consumption_meter"),
+                        "production_meter": contract_data.get("production_meter"),
+                    }
+            except Exception as err:
+                _LOGGER.debug("Balance contract fetch failed: %s", err)
+
         import time as _time
         dp_ok = (
             battery.get("dual_power") is not None
@@ -346,6 +369,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "power": power,
             "solar": solar,
             "ev": ev,
+            "contract": self._contract,
             "emergency_charge_active": self._emergency_charge_active,
             "emergency_charge_start_t": self._emergency_charge_start_t,
             "emergency_charge_end_t": self._emergency_charge_end_t,
@@ -698,6 +722,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # a stable HA sensor even when modules respond in different orders or
         # some slots are temporarily silent (#23).
         self._battery_module_slots: dict[int, dict] = {}
+        # Accessory state (Fans Pack 01-03 + Water Sensor) read via the
+        # 0x0E/0x0D/0x04 one-shot accessory session (see
+        # ``emaldo_lib.e2e.read_accessories``). Refreshed as a background task
+        # on the same pattern as the battery-module scan so the scans never
+        # hold the realtime session lock.
+        self._accessories: dict = {}
+        self._accessories_poll_counter: int = 9  # trigger on first successful poll
+        self._accessories_scan_task: asyncio.Task | None = None
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
@@ -854,6 +886,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             except (asyncio.CancelledError, Exception):
                 pass
             self._battery_scan_task = None
+        if self._accessories_scan_task is not None:
+            self._accessories_scan_task.cancel()
+            try:
+                await self._accessories_scan_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._accessories_scan_task = None
         if self._session is not None:
             _LOGGER.debug(
                 "Shutdown: closing E2E session for device %s",
@@ -2447,8 +2486,23 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     name=f"{DOMAIN}_battery_scan",
                 )
 
+        # Poll accessory state (Fans Pack + Water Sensor) every 10 successful
+        # reads (~100 s). Accessory values change slowly (fan spin-up/down,
+        # water leak events), so a modest cadence keeps the extra one-shot
+        # E2E session (~5 request/response rounds) negligible.
+        self._accessories_poll_counter += 1
+        if self._accessories_poll_counter >= 10:
+            self._accessories_poll_counter = 0
+            if self._accessories_scan_task is None or self._accessories_scan_task.done():
+                self._accessories_scan_task = self._entry.async_create_background_task(
+                    self.hass,
+                    self._async_scan_accessories(),
+                    name=f"{DOMAIN}_accessories_scan",
+                )
+
         data["battery_modules"] = self._battery_modules
         data["battery_module_slots"] = self._battery_module_slots
+        data["accessories"] = self._accessories
 
         return data
 
@@ -2508,6 +2562,82 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
+
+    def _read_accessories_standalone(self) -> dict | None:
+        """Read accessory state (fans + water sensor) on a one-shot session.
+
+        Mirrors :meth:`_read_battery_info_standalone`: the accessory probes
+        run on a dedicated throwaway UDP socket so the persistent realtime
+        session is never held busy (keepalive starvation, #37).
+        """
+        client = self._parent._ensure_client()  # noqa: SLF001 - intended
+        home_id = self._parent.home_id
+        device_id = self._parent._device_id  # noqa: SLF001
+        model = self._parent._model  # noqa: SLF001
+        if device_id is None or model is None:
+            return None
+
+        import time as _time
+        # App's L8.isThreePhase(): one fan pack per inverter phase.
+        inverters = 3 if model in THREE_PHASE_MODELS else 1
+        for attempt in range(2):
+            try:
+                creds = client.get_e2e_credentials(
+                    home_id, device_id, model, force_refresh=(attempt > 0)
+                )
+                return _standalone_read_accessories(
+                    creds,
+                    inverters=inverters,
+                    log=lambda msg: _LOGGER.debug("[E2E accessories] %s", msg),
+                )
+            except EmaldoAuthError:
+                self._parent._reset_client()  # noqa: SLF001
+                if attempt == 0:
+                    continue
+                raise
+            except EmaldoConnectionError:
+                self._parent._reset_client()  # noqa: SLF001
+                if attempt == 0:
+                    _time.sleep(1)
+                    continue
+                raise
+
+        return None
+
+    async def _async_scan_accessories(self) -> None:
+        """Run the 0x0E/0x0D/0x04 accessory scan off the realtime poll path.
+
+        Updates ``_accessories`` and notifies listeners so the Fan Pack and
+        Water Sensor sensors pick up new data without blocking a realtime
+        power-flow refresh.
+        """
+        try:
+            accessories = await self.hass.async_add_executor_job(
+                self._read_accessories_standalone
+            )
+            if accessories:
+                self._accessories = accessories
+                if isinstance(self.data, dict):
+                    self.data["accessories"] = self._accessories
+                _LOGGER.debug(
+                    "Accessory state poll: cabinet_count=%s cabinet=%s inverters=%s",
+                    accessories.get("cabinet_count"),
+                    accessories.get("cabinet"),
+                    sorted(accessories.get("inverters", {})),
+                )
+            else:
+                _LOGGER.debug(
+                    "Accessory state poll returned no data; retaining previous state"
+                )
+            self.async_update_listeners()
+        except EmaldoConnectionError as err:
+            _LOGGER.debug(
+                "Accessory state poll skipped due to transient connection error; "
+                "retaining previous state: %s",
+                err,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Accessory state read failed: %s", err, exc_info=True)
 
     @property
     def regulate_frequency(self) -> dict | None:

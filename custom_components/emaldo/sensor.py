@@ -45,6 +45,7 @@ from .const import (
     EV_UNSUPPORTED_MODELS,
     PV_UNSUPPORTED_MODELS,
     STREAM_STALE_AFTER,
+    THREE_PHASE_MODELS,
 )
 from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
@@ -340,6 +341,56 @@ def _other_load_power(data: dict[str, Any]) -> float | None:
     return None
 
 
+# -- Facility ID (GSRN) + accessory value extraction --
+
+
+def _facility_consumption(data: dict[str, Any]) -> str | None:
+    """Facility ID - Consumption (GSRN) from the balance-contract info."""
+    value = (data.get("contract") or {}).get("consumption_meter")
+    return value or None
+
+
+def _facility_production(data: dict[str, Any]) -> str | None:
+    """Facility ID - Production (GSRN) from the balance-contract info."""
+    value = (data.get("contract") or {}).get("production_meter")
+    return value or None
+
+
+def _water_sensor_state(data: dict[str, Any]) -> str | None:
+    """Cabinet water sensor state ('dry'/'wet', or None when unread).
+
+    Protocol: ``get_cabinet_state`` (E2E type 0x0D) byte 0 — mapped to the
+    app's ``Mcu.Cabinet.CabinetWaterState`` codes by
+    ``emaldo_lib.e2e.parse_cabinet_state`` (1 = valid/dry, 2 = exception/wet).
+    """
+    accessories = data.get("accessories") or {}
+    cabinet = accessories.get("cabinet") or {}
+    water = cabinet.get("water")
+    if water is None:
+        return None
+    return {1: "dry", 2: "wet"}.get(water, "unknown")
+
+
+def _fan_pack_state(data: dict[str, Any], index: int) -> str | None:
+    """Fan Pack state ('stopped'/'running'/'fault', or None when unread).
+
+    Protocol: ``get_inverter_info`` (E2E type 0x04) — fan state byte mapped
+    to ``Mcu.Inverter.InverterFanState`` codes (1 = STOP, 2 = RUNNING) plus
+    the ``InverterSystemException`` Fan (13) bit from the system-exceptions
+    bitmap, exactly like the app's Accessories screen.
+    """
+    inverters = (data.get("accessories") or {}).get("inverters") or {}
+    info = inverters.get(index)
+    if not info:
+        return None
+    if 13 in (info.get("system_exceptions") or []):
+        return "fault"
+    fan = info.get("fan_state")
+    if fan is None:
+        return None
+    return {1: "stopped", 2: "running"}.get(fan, "unknown")
+
+
 # -- Sensor descriptions --
 
 
@@ -347,7 +398,7 @@ def _other_load_power(data: dict[str, Any]) -> float | None:
 class EmaldoSensorEntityDescription(SensorEntityDescription):
     """Describe an Emaldo sensor."""
 
-    value_fn: Callable[[dict[str, Any]], float | None]
+    value_fn: Callable[[dict[str, Any]], Any]
     attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
@@ -422,6 +473,20 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL,
         value_fn=_load_energy_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="facility_id_consumption",
+        translation_key="facility_id_consumption",
+        icon="mdi:transmission-tower-import",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_facility_consumption,
+    ),
+    EmaldoSensorEntityDescription(
+        key="facility_id_production",
+        translation_key="facility_id_production",
+        icon="mdi:solar-power",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_facility_production,
     ),
 )
 
@@ -515,6 +580,33 @@ EV_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
 )
 
+# PowerStation accessory sensors (Fans Pack 01-03 + Water Sensor).
+#
+# State comes from the one-shot accessory E2E session (types 0x0E/0x0D/0x04,
+# see ``emaldo_lib.e2e.read_accessories``), matching the app's Accessories
+# screen: one Water Sensor per battery cabinet (cabinet 0 here) and one
+# "Fans Pack" per inverter phase.
+WATER_SENSOR_DESCRIPTION = EmaldoSensorEntityDescription(
+    key="water_sensor",
+    translation_key="water_sensor",
+    icon="mdi:water-alert",
+    device_class=SensorDeviceClass.ENUM,
+    options=["dry", "wet", "unknown"],
+    value_fn=_water_sensor_state,
+)
+
+FAN_PACK_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = tuple(
+    EmaldoSensorEntityDescription(
+        key=f"fan_pack_{n:02d}",
+        translation_key=f"fan_pack_{n:02d}",
+        icon="mdi:fan",
+        device_class=SensorDeviceClass.ENUM,
+        options=["stopped", "running", "fault", "unknown"],
+        value_fn=(lambda d, idx=n - 1: _fan_pack_state(d, idx)),
+    )
+    for n in range(1, 4)
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -558,6 +650,18 @@ async def async_setup_entry(
                 EmaldoSensor(realtime_coordinator, desc)
                 for desc in EV_REALTIME_DESCRIPTIONS
             )
+
+        # PowerStation accessories: Water Sensor (cabinet 0) + one Fans Pack
+        # per inverter phase (3 on three-phase models, 1 otherwise). States
+        # stay "unknown" until the first accessory scan completes.
+        entities.append(
+            EmaldoSensor(realtime_coordinator, WATER_SENSOR_DESCRIPTION)
+        )
+        fan_count = 3 if model in THREE_PHASE_MODELS else 1
+        entities.extend(
+            EmaldoSensor(realtime_coordinator, desc)
+            for desc in FAN_PACK_DESCRIPTIONS[:fan_count]
+        )
 
         # Diagnostic: realtime connection status
         entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
@@ -685,7 +789,7 @@ class EmaldoSensor(_RealtimeRestoreSensor, CoordinatorEntity[EmaldoCoordinator])
         )
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> Any:
         """Return the sensor value."""
         if self.coordinator.data is None:
             return self._cold_start_value()
@@ -693,8 +797,20 @@ class EmaldoSensor(_RealtimeRestoreSensor, CoordinatorEntity[EmaldoCoordinator])
         if value is not None:
             self._last_valid_native_value = value
             return value
+        # Hold the last valid reading when a refresh produced no value.
+        # Slow REST sensors: everything except daily totals. Realtime
+        # sensors: only ENUM descriptions (Fans Pack / Water Sensor) — a
+        # missed one-shot accessory probe must not flip the sensor to
+        # unknown, the state simply carries over until the next scan.
+        # Realtime power/energy readings intentionally do NOT hold stale
+        # values: a stale watt reading is misleading, unknown is correct.
+        coordinator_is_slow = isinstance(self.coordinator, EmaldoCoordinator)
+        coordinator_is_realtime_enum = (
+            isinstance(self.coordinator, EmaldoRealtimeCoordinator)
+            and self.entity_description.device_class == SensorDeviceClass.ENUM
+        )
         if (
-            isinstance(self.coordinator, EmaldoCoordinator)
+            (coordinator_is_slow or coordinator_is_realtime_enum)
             and self.entity_description.state_class != SensorStateClass.TOTAL
             and self.coordinator.last_update_success
             and self._last_valid_native_value is not None

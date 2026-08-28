@@ -95,7 +95,13 @@
       "battery_module_nominal_capacity": { "name": "Batterimodul {module} Nominel kapacitet" },
       "battery_module_voltage": { "name": "Batterimodul {module} Spænding" },
       "battery_module_serial": { "name": "Batterimodul {module} Serienummer" },
-      "battery_module_position": { "name": "Batterimodul {module} Placering" }
+      "battery_module_position": { "name": "Batterimodul {module} Placering" },
+      "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
+      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
+      "water_sensor": { "name": "Vandsensor" },
+      "fan_pack_01": { "name": "Ventilatorpakke 01" },
+      "fan_pack_02": { "name": "Ventilatorpakke 02" },
+      "fan_pack_03": { "name": "Ventilatorpakke 03" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Tredjeparts solpanel" },

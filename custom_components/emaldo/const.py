@@ -12,7 +12,7 @@ CONF_APP_VERSION = "app_version"
 
 DEFAULT_APP_ID = "CXRqKjx2MzSAkdyucR9NDyPiiQR2vQcQ"
 DEFAULT_APP_SECRET = "FpF4Uqiio9k8p9VUSX36UZxy9wLs7ybT"
-DEFAULT_APP_VERSION = "2.8.6"
+DEFAULT_APP_VERSION = "2.8.8"
 
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 # Fast E2E power-flow polling. Must stay below the relay's power-flow session
@@ -126,6 +126,19 @@ EV_UNSUPPORTED_MODELS: frozenset[str] = frozenset({
     "HP5001",          # Legacy
     "PSE1",            # Power Sense 1
     "PSE2",            # Power Sense 2
+})
+
+# Three-phase models expose one cooling fan per inverter phase in the app
+# ("Fans Pack 01/02/03"); single-phase models expose a single fan pack.
+# Matches the app's L8.isThreePhase() device-classification (2.8.8).
+THREE_PHASE_MODELS: frozenset[str] = frozenset({
+    "HP5000",          # Legacy HP5000
+    "PC1-BAK15-HS10",  # Power Core 2.0
+    "PC3",             # Power Core 3.0
+    "VB1-BAK5-HS10",   # Power Pulse
+    "PS1-BAK10-HS10",  # Power Store
+    "PSE1",            # Power Sense 1 (13 kW)
+    "PSE2",            # Power Sense 2 (15 kW)
 })
 
 # Event names

@@ -1,5 +1,39 @@
 # Changes
 
+## v1.0.0-beta27
+
+### Added
+
+- **Facility ID (GSRN) + PowerStation accessory sensors (Emaldo app 2.8.8
+  protocol).** Four new sensor groups following the official app's protocol,
+  wired into the integration:
+  - `facility_id_consumption` / `facility_id_production` — the GSRN metering
+    point IDs shown in the app's Grid Rewards → Facility ID screen. Source:
+    cloud REST `/bmt/get-family-balance-contract-info/` (existing
+    `EmaldoClient.get_contract`, previously unused) → `Result.data.consumption_meter`
+    / `production_meter`. Fetched best-effort, throttled to every 5th REST
+    poll (~5 min); exposed as diagnostic sensors from the slow coordinator.
+  - `water_sensor` — cabinet water-leak sensor. Source: E2E one-shot session
+    `get_cabinet_state` (wire type `0x0D`, payload `[index]`, response
+    `[water, smoke, fan, exc_bits, verLen, ver..., index]`; water raw 0 = dry,
+    1 = wet → app's `CabinetWaterState`). Polls cabinet 0.
+  - `fan_pack_01` … `fan_pack_03` — per-inverter cooling fan state, mirroring
+    the app's Accessories screen ("Fans Pack 01-03"; one pack per inverter
+    phase). Source: E2E `get_inverter_info` (wire type `0x04`, payload
+    `[index]`, response layout per the app's inverter-info handler: state,
+    7×u16 LE exception bitmaps, idInfo, version, fanState, index).
+    `stopped`/`running` from the
+    fan byte; `fault` when system-exceptions bitmap carries
+    `InverterSystemException.Fan` (13). Pack count = 3 on three-phase models
+    (`THREE_PHASE_MODELS` in const.py, matching the app's
+    `L8.isThreePhase()`), 1 otherwise.
+  - Cabinet discovery uses `get_cabinet_allinfo` (wire type `0x0E`).
+  - All accessory reads run on a dedicated throwaway UDP session
+    (`emaldo_lib.e2e.read_accessories`) as a background task every 10 realtime
+    polls (~100 s), keeping the persistent realtime session lock free (#37
+    pattern). Parsers verified against synthetic wire samples.
+- Bump `manifest.json` → `1.0.0-beta27`.
+
 ## v1.0.0-beta26
 
 ### Fixed
