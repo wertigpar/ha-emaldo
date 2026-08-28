@@ -1529,12 +1529,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         the device. This retries the write+read-back cycle and logs a warning
         instead of silently reporting success when it never converges.
 
-        Confirmation uses a *fresh-frame gate*: ``read_fn`` is passed the
-        ``time.perf_counter()`` instant of the write and only accepts a device
-        frame received afterwards, so a stale pre-command frame (normal for a
-        streamed power-flow read-back) never masks a successful apply. We poll
-        every ``_WRITE_VERIFY_POLL_S`` until the device reports ``expected`` or
-        ``_WRITE_VERIFY_MAX_WAIT_S`` elapse.
+        The write is retried across ``_WRITE_VERIFY_MAX_POLLS`` attempts: a
+        single command can be dropped or ignored by the device on the first
+        try (UDP / relay unreliability), so re-sending on every attempt is what
+        lets confirmation converge. After each write we wait
+        ``_WRITE_VERIFY_POLL_S`` and read back the live device state; if it
+        matches ``expected`` we return, otherwise we retry. This is the beta25
+        retry model, restored after beta26's read-only poll regressed
+        confirmation for every verified switch write (#61).
 
         Returns the last confirmed value (which may differ from ``expected``), or
         ``None`` if no read ever succeeded, so callers can reflect the real
@@ -1543,29 +1545,31 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         import time
 
         confirmed_value = None
-        write_fn()
-        # Capture AFTER the command has left the socket. Only frames received
-        # later can reflect the new mode. Must use perf_counter to match the
-        # session's frame-recv clock used by get_latest_power_flow.
-        wrote_at = time.perf_counter()
-        deadline = wrote_at + self._WRITE_VERIFY_MAX_WAIT_S
-        for poll in range(self._WRITE_VERIFY_MAX_POLLS):
+        # Retry the full write+read-back cycle. beta26 removed this retry and
+        # only polled reads behind a fresh-frame gate (calling
+        # read_fn(newer_than=...), which only _read_power_flow accepts — the
+        # other three verified switches would have raised). The first 0x41 send
+        # is sometimes dropped by the relay, so without the retry the device
+        # never re-received the command and confirmation never converged.
+        # Restore the working beta25 model.
+        for attempt in range(self._WRITE_VERIFY_MAX_POLLS):
+            write_fn()
             time.sleep(self._WRITE_VERIFY_POLL_S)
-            confirmed = read_fn(newer_than=wrote_at)
+            confirmed = read_fn()
             if confirmed is not None:
                 confirmed_value = confirmed.get(result_key)
                 if confirmed_value == expected:
                     return confirmed_value
-            if time.perf_counter() >= deadline:
-                break
-            _LOGGER.debug(
-                "%s not yet confirmed (poll %d, target=%s, read=%s)",
-                label, poll + 1, expected, confirmed_value,
-            )
+            if attempt < self._WRITE_VERIFY_MAX_POLLS - 1:
+                _LOGGER.debug(
+                    "%s not yet confirmed (attempt %d/%d, target=%s, read=%s)",
+                    label, attempt + 1, self._WRITE_VERIFY_MAX_POLLS,
+                    expected, confirmed_value,
+                )
         _LOGGER.warning(
-            "%s command was not confirmed by the device after %.0fs "
+            "%s command was not confirmed by the device after %d attempts "
             "(target=%s, last confirmed=%s)",
-            label, self._WRITE_VERIFY_MAX_WAIT_S, expected, confirmed_value,
+            label, self._WRITE_VERIFY_MAX_POLLS, expected, confirmed_value,
         )
         return confirmed_value
 

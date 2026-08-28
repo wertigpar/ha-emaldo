@@ -29,9 +29,29 @@
     `L8.isThreePhase()`), 1 otherwise.
   - Cabinet discovery uses `get_cabinet_allinfo` (wire type `0x0E`).
   - All accessory reads run on a dedicated throwaway UDP session
-    (`emaldo_lib.e2e.read_accessories`) as a background task every 10 realtime
-    polls (~100 s), keeping the persistent realtime session lock free (#37
-    pattern). Parsers verified against synthetic wire samples.
+   (`emaldo_lib.e2e.read_accessories`) as a background task every 10 realtime
+   polls (~100 s), keeping the persistent realtime session lock free (#37
+   pattern). Parsers verified against synthetic wire samples.
+
+### Fixed
+
+- **Third-party PV (and all verified switch writes) confirmation regressed in
+  beta26 (#61 follow-up, 2026-08-27).** beta26 replaced the write+read *retry
+  loop* in `_write_verified` with a single send followed by a fresh-frame poll
+  gate (`read_fn(newer_than=...)`). The 0x41 PV command is sometimes dropped
+  by the relay on first send, and the backend also takes ~5s to reflect a PV
+  toggle (unlike other params which update immediately). With no retry, a
+  dropped first send never re-delivered, the device never flipped, and the
+  gate polled the unchanged frame for the full 20s → "command was not
+  confirmed" warning (observed `last confirmed=True` for an OFF target). The
+  official app and beta25 both work because they re-send. **Fix:** restore the
+  beta25 retry model — `_write_verified` re-issues the write on every attempt
+  (up to `_WRITE_VERIFY_MAX_POLLS` × `_WRITE_VERIFY_POLL_S` ≈ 20s), reading the
+  live device state after each send with no `newer_than` gate. This covers
+  both the dropped-send and the 5s backend-delay cases. Trade-off: the beta26
+  fresh-frame gate (added to stop #61's pre-command stale-read false
+  negatives) is no longer used for confirmation; beta25's retry model was
+  already shipped and confirmed working, so this reverts to that baseline.
 - Bump `manifest.json` → `1.0.0-beta27`.
 
 ## v1.0.0-beta26
