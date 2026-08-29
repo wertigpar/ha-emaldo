@@ -102,6 +102,9 @@
       "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
       "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
       "water_sensor": { "name": "Water Sensor" },
+      "water_sensor_2": { "name": "Water Sensor (Cabinet 2)" },
+      "water_sensor_3": { "name": "Water Sensor (Cabinet 3)" },
+      "water_sensor_4": { "name": "Water Sensor (Cabinet 4)" },
       "fan_pack_01": { "name": "Fans Pack 01" },
       "fan_pack_02": { "name": "Fans Pack 02" },
       "fan_pack_03": { "name": "Fans Pack 03" }

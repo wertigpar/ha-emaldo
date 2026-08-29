@@ -2629,6 +2629,22 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     accessories.get("cabinet"),
                     sorted(accessories.get("inverters", {})),
                 )
+                # Register Water Sensors for any additional cabinets beyond
+                # the first (multi-cabinet installs, issue #63). Cabinet 0 is
+                # created at sensor setup; this adds cabinet 1+ on discovery.
+                cabinet_count = accessories.get("cabinet_count") or 0
+                if cabinet_count > 1:
+                    entry_item = self.hass.data.get(DOMAIN, {}).get(
+                        self.config_entry.entry_id
+                    )
+                    add_cb = entry_item.get("water_async_add") if entry_item else None
+                    created = entry_item.get("water_cabinets_created") if entry_item else None
+                    if add_cb is not None and created is not None:
+                        from .sensor import add_water_sensors_for_cabinets
+
+                        add_water_sensors_for_cabinets(
+                            self, cabinet_count, add_cb, created
+                        )
             else:
                 _LOGGER.debug(
                     "Accessory state poll returned no data; retaining previous state"

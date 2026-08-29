@@ -356,15 +356,20 @@ def _facility_production(data: dict[str, Any]) -> str | None:
     return value or None
 
 
-def _water_sensor_state(data: dict[str, Any]) -> str | None:
+def _water_sensor_state(data: dict[str, Any], cabinet_index: int = 0) -> str | None:
     """Cabinet water sensor state ('dry'/'wet', or None when unread).
 
     Protocol: ``get_cabinet_state`` (E2E type 0x0D) byte 0 — mapped to the
     app's ``Mcu.Cabinet.CabinetWaterState`` codes by
     ``emaldo_lib.e2e.parse_cabinet_state`` (1 = valid/dry, 2 = exception/wet).
+    ``cabinet_index`` selects which cabinet (0 = first) for multi-cabinet
+    installs.
     """
     accessories = data.get("accessories") or {}
-    cabinet = accessories.get("cabinet") or {}
+    cabinets = accessories.get("cabinets") or {}
+    cabinet = cabinets.get(cabinet_index) or (
+        accessories.get("cabinet") if cabinet_index == 0 else None
+    ) or {}
     water = cabinet.get("water")
     if water is None:
         return None
@@ -584,16 +589,46 @@ EV_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
 #
 # State comes from the one-shot accessory E2E session (types 0x0E/0x0D/0x04,
 # see ``emaldo_lib.e2e.read_accessories``), matching the app's Accessories
-# screen: one Water Sensor per battery cabinet (cabinet 0 here) and one
-# "Fans Pack" per inverter phase.
-WATER_SENSOR_DESCRIPTION = EmaldoSensorEntityDescription(
-    key="water_sensor",
-    translation_key="water_sensor",
-    icon="mdi:water-alert",
-    device_class=SensorDeviceClass.ENUM,
-    options=["dry", "wet", "unknown"],
-    value_fn=_water_sensor_state,
-)
+# screen: one Water Sensor per battery cabinet and one "Fans Pack" per inverter
+# phase. Multi-cabinet installs get a Water Sensor per cabinet — cabinet 0 is
+# created at setup, additional cabinets are added dynamically once the
+# accessory scan reports ``cabinet_count > 1`` (see ``add_water_sensors_for_cabinets``).
+WATER_SENSOR_MAX_CABINETS = 4  # sane upper bound on battery cabinets per device
+
+
+def _water_sensor_description(cabinet_index: int) -> EmaldoSensorEntityDescription:
+    """Build a Water Sensor description for *cabinet_index* (0 = first)."""
+    key = "water_sensor" if cabinet_index <= 0 else f"water_sensor_{cabinet_index + 1}"
+    return EmaldoSensorEntityDescription(
+        key=key,
+        translation_key=key,
+        icon="mdi:water-alert",
+        device_class=SensorDeviceClass.ENUM,
+        options=["dry", "wet", "unknown"],
+        value_fn=(lambda d, cidx=cabinet_index: _water_sensor_state(d, cidx)),
+    )
+
+
+WATER_SENSOR_DESCRIPTION = _water_sensor_description(0)
+
+
+def add_water_sensors_for_cabinets(
+    realtime_coordinator: EmaldoRealtimeCoordinator,
+    cabinet_count: int,
+    async_add_entities: AddEntitiesCallback,
+    created: set[int],
+) -> None:
+    """Create + register Water Sensors for cabinets 1..cabinet_count-1.
+
+    Called from the realtime coordinator once an accessory scan reveals more
+    than one cabinet. ``created`` tracks which cabinet indices already have an
+    entity so each is added exactly once.
+    """
+    for cidx in range(1, min(WATER_SENSOR_MAX_CABINETS, cabinet_count)):
+        if cidx in created:
+            continue
+        async_add_entities([EmaldoSensor(realtime_coordinator, _water_sensor_description(cidx))])
+        created.add(cidx)
 
 FAN_PACK_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = tuple(
     EmaldoSensorEntityDescription(
@@ -653,7 +688,9 @@ async def async_setup_entry(
 
         # PowerStation accessories: Water Sensor (cabinet 0) + one Fans Pack
         # per inverter phase (3 on three-phase models, 1 otherwise). States
-        # stay "unknown" until the first accessory scan completes.
+        # stay "unknown" until the first accessory scan completes. Extra
+        # Water Sensors for cabinet 1+ are added dynamically by the realtime
+        # coordinator once the accessory scan reports cabinet_count > 1.
         entities.append(
             EmaldoSensor(realtime_coordinator, WATER_SENSOR_DESCRIPTION)
         )
@@ -662,6 +699,12 @@ async def async_setup_entry(
             EmaldoSensor(realtime_coordinator, desc)
             for desc in FAN_PACK_DESCRIPTIONS[:fan_count]
         )
+
+        # Stash the entity-adder + a per-device "which water cabinets exist"
+        # set so the realtime coordinator can register additional Water
+        # Sensors when a multi-cabinet install is discovered.
+        item["water_async_add"] = async_add_entities
+        item.setdefault("water_cabinets_created", {0})
 
         # Diagnostic: realtime connection status
         entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))

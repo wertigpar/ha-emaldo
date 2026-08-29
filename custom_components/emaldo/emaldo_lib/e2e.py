@@ -1461,7 +1461,8 @@ def read_accessories(
     then issues, in order:
 
     * ``get_cabinet_allinfo`` (0x0E) → number of battery cabinets
-    * ``get_cabinet_state`` (0x0D, cabinet 0) → water/smoke/fan state
+    * ``get_cabinet_state`` (0x0D, cabinets 0..count-1) → per-cabinet
+      water/smoke/fan state
     * ``get_inverter_info`` (0x04, inverters 0..N-1) → per-inverter fan
       state (Fans Pack 01..03 on three-phase hardware)
 
@@ -1474,7 +1475,9 @@ def read_accessories(
         log: Optional log callback.
 
     Returns:
-        Dict with ``cabinet_count``, ``cabinet`` (dict, cabinet 0 state) and
+        Dict with ``cabinet_count``, ``cabinets`` (dict keyed by cabinet
+        index, each a parsed cabinet state), ``cabinet`` (alias of
+        ``cabinets[0]``, kept for the single-cabinet Water Sensor) and
         ``inverters`` (dict keyed by inverter index), or *None* if the
         cabinet-allinfo probe failed entirely.
     """
@@ -1536,7 +1539,7 @@ def read_accessories(
                 pass
         return decrypted
 
-    result: dict = {"cabinet_count": 0, "cabinet": None, "inverters": {}}
+    result: dict = {"cabinet_count": 0, "cabinets": {}, "cabinet": None, "inverters": {}}
     try:
         _send(home_alive, "Alive(home)")
         _send(dev_alive, "Alive(device)")
@@ -1557,21 +1560,28 @@ def read_accessories(
             return None
         result["cabinet_count"] = dec[0]
 
-        # 2) Cabinet 0 state (0x0D, payload [index]).
-        # Validators also constrain the raw state bytes (0/1 water+smoke,
-        # 0-2 fan) so the relay's decrypted JSON status frames
-        # (``{"__time"...``) cannot pass a bare length check.
-        pkt = build_subscription_packet(
-            e2e_creds, _CABINET_STATE_TYPE, session_nonce,
-            payload=bytes([0]), request_mode=True,
-        )
-        dec = _probe(
-            "CabinetState", pkt,
-            lambda p: len(p) >= 5 and p[0] in (0, 1) and p[1] in (0, 1)
-            and p[2] in (0, 1, 2),
-        )
-        if dec is not None:
-            result["cabinet"] = parse_cabinet_state(dec)
+        # 2) Per-cabinet state (0x0D, payload [index]) for every cabinet
+        # the device reported. Validators also constrain the raw state
+        # bytes (0/1 water+smoke, 0-2 fan) so the relay's decrypted JSON
+        # status frames (``{"__time"...``) cannot pass a bare length check.
+        cabinets: dict[int, dict] = {}
+        for cidx in range(max(1, result["cabinet_count"])):
+            pkt = build_subscription_packet(
+                e2e_creds, _CABINET_STATE_TYPE, session_nonce,
+                payload=bytes([cidx]), request_mode=True,
+            )
+            dec = _probe(
+                f"CabinetState(idx={cidx})", pkt,
+                lambda p: len(p) >= 5 and p[0] in (0, 1) and p[1] in (0, 1)
+                and p[2] in (0, 1, 2),
+            )
+            if dec is not None:
+                state = parse_cabinet_state(dec)
+                if state is not None:
+                    cabinets[cidx] = state
+        result["cabinets"] = cabinets
+        # Backward-compatible alias for the single-cabinet Water Sensor.
+        result["cabinet"] = cabinets.get(0)
 
         # 3) Inverter info per index (0x04, payload [index]).
         # Byte 0 = InverterState raw value (0-2); constrain it like the

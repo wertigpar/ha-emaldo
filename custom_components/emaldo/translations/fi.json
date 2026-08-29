@@ -99,6 +99,9 @@
       "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
       "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
       "water_sensor": { "name": "Vesianturi" },
+      "water_sensor_2": { "name": "Vesianturi (Kaappi 2)" },
+      "water_sensor_3": { "name": "Vesianturi (Kaappi 3)" },
+      "water_sensor_4": { "name": "Vesianturi (Kaappi 4)" },
       "fan_pack_01": { "name": "Tuulettinpakka 01" },
       "fan_pack_02": { "name": "Tuulettinpakka 02" },
       "fan_pack_03": { "name": "Tuulettinpakka 03" }

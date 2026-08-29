@@ -1,5 +1,21 @@
 # Changes
 
+## v1.0.0-beta28
+
+### Added
+
+- **Multi-cabinet Water Sensor (issue #63).** Installations with more than
+  one battery cabinet now get a Water Sensor per cabinet. `read_accessories`
+  enumerates every cabinet reported by `get_cabinet_allinfo` (type 0x0E);
+  the first (`water_sensor`, cabinet 0) is created at setup as before, and
+  additional `water_sensor_2` … `water_sensor_4` are registered dynamically
+  the first time an accessory scan reports `cabinet_count > 1`. Fans Pack
+  sensors stay per-inverter and are unaffected. Capped at 4 cabinets.
+
+### Fixed
+
+- Bump `manifest.json` → `1.0.0-beta28`.
+
 ## v1.0.0-beta27
 
 ### Added
