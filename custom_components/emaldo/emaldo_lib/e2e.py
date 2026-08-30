@@ -1554,26 +1554,25 @@ def read_accessories(
         time.sleep(0.2)
         sock.settimeout(probe_timeout)
 
-        # 1) Cabinet allinfo (0x0E, empty payload). Its first byte reports the
-        # cabinet count; we keep it for discovery but NEVER use it to bound the
-        # loop (it can decode to a bogus large value on some firmware), so the
-        # per-cabinet probes are capped at ACCESSORY_MAX_CABINETS.
-        pkt = build_subscription_packet(
-            e2e_creds, _CABINET_ALLINFO_TYPE, session_nonce,
-            payload=b"", request_mode=True,
+        # 1) Cabinet allinfo (0x0E, empty payload). Its first byte is NOT a
+        # usable cabinet count — it decodes to 2/3/4 on single-cabinet devices
+        # and to a runaway ~194 on others — so we NEVER use it to bound the
+        # loop or drive discovery. We only probe a bounded set of indices and
+        # keep whichever cabinets actually reply.
+        _probe(
+            "CabinetAllInfo", build_subscription_packet(
+                e2e_creds, _CABINET_ALLINFO_TYPE, session_nonce,
+                payload=b"", request_mode=True,
+            ),
+            lambda p: len(p) >= 1,
         )
-        allinfo = _probe(
-            "CabinetAllInfo", pkt, lambda p: len(p) >= 1,
-        )
-        reported_count = allinfo[0] if allinfo else 0
-        count = max(1, min(reported_count, ACCESSORY_MAX_CABINETS))
 
         # 2) Per-cabinet state (0x0D, payload [index]) for a BOUNDED set of
         # cabinet indices. Validators also constrain the raw state bytes
         # (0/1 water+smoke, 0-2 fan) so the relay's decrypted JSON status
         # frames (``{"__time"...``) cannot pass a bare length check.
         cabinets: dict[int, dict] = {}
-        for cidx in range(count):
+        for cidx in range(ACCESSORY_MAX_CABINETS):
             pkt = build_subscription_packet(
                 e2e_creds, _CABINET_STATE_TYPE, session_nonce,
                 payload=bytes([cidx]), request_mode=True,
@@ -1588,9 +1587,10 @@ def read_accessories(
                 if state is not None:
                     cabinets[cidx] = state
         result["cabinets"] = cabinets
-        # Bounded reported count (drives Water Sensor discovery in the
-        # coordinator). The device can legitimately report 2+ cabinets.
-        result["cabinet_count"] = count
+        # Number of cabinets that ACTUALLY replied (drives Water Sensor
+        # discovery). Single-cabinet devices report 1, two-cabinet devices 2,
+        # regardless of what the allinfo first byte claims.
+        result["cabinet_count"] = len(cabinets)
         # Backward-compatible alias for the single-cabinet Water Sensor.
         result["cabinet"] = cabinets.get(0)
 
