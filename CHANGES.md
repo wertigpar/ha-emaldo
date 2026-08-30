@@ -1,5 +1,61 @@
 # Changes
 
+## v1.0.0-beta30
+
+### Fixed
+
+- **Fans Pack + Water Sensor sensors show unknown for up to ~100 s after
+  restart.** The accessory scan was throttled to every 10th realtime poll
+  (~100 s), so a fresh restart left the Fans Pack 01-03 and Water Sensor
+  sensors as unknown until the first throttle window elapsed. The counter
+  now starts at 9 so the scan fires on the **first** poll after startup (no
+  wait), then repeats every 10 polls (~100 s) as a safety net — accessory
+  values are static between fan spin-up/down and leak events, but a scan can
+  abort on a transient E2E failure and the once-only model would then leave
+  the sensors unknown until a restart. Periodic re-scan keeps them
+  recoverable without adding meaningful API load. Multi-cabinet Water Sensor
+  discovery still happens on the first successful scan.
+
+- Bump `manifest.json` → `1.0.0-beta30`.
+
+## v1.0.0-beta29
+
+### Added
+
+- **`ai_raw` attribute on the schedule chart sensor (issue #64, upstreamed
+  local patch from leifkristianssonl).** `EmaldoScheduleChartSensor` now
+  exposes a second time series alongside `schedule`:
+  - `schedule` — the final plan with overrides applied (unchanged; an
+    overridden slot carries `source="override"`).
+  - `ai_raw` — the original AI/base schedule (`hope_charge_discharges`)
+    **before** overrides, as a list of `{t, mode}` dicts (`t` = Unix seconds
+    at each slot's `day_start + i*gap`). Lets users read the raw AI plan
+    independently of overrides. Same data, no new API calls, no behavior or
+    service changes.
+  Both series are excluded from the recorder (`_unrecorded_attributes`) to
+  avoid recorder bloat, mirroring the existing `schedule` guard.
+
+- Bump `manifest.json` → `1.0.0-beta29`.
+
+### Fixed
+
+- **Phantom Cabinet 2 Water Sensor on single-cabinet devices (#63).** With
+  `cabinet_count` driven by the number of cabinet-state replies, a relay echo
+  or a reply for a different index could pass the water/smoke/fan validator
+  on a single-cabinet device, making `len(cabinets)` = 2 and spawning a
+  `water_sensor_2` entity that mirrors cabinet 0. `read_accessories` now only
+  accepts a cabinet-state reply when the device's own index byte matches the
+  index that was actually probed, so `cabinet_count` cannot exceed the real
+  number of cabinets.
+
+- **Facility ID (GSRN) sensors show unknown for up to 5 min after restart.**
+  The balance-contract fetch was throttled to every 5th REST poll (~5 min),
+  so a fresh install showed the two Facility ID sensors as unknown until the
+  first throttle window elapsed. The GSRN values are static once registered,
+  so they are now fetched **once** (retrying on failure until the first
+  success) and never again — no more 5-min wait, and no cloud API call on
+  every poll.
+
 ## v1.0.0-beta28
 
 ### Added

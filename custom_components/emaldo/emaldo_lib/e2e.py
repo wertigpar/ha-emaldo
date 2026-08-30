@@ -1584,7 +1584,12 @@ def read_accessories(
             )
             if dec is not None:
                 state = parse_cabinet_state(dec)
-                if state is not None:
+                # The validator above only constrains water/smoke/fan bytes, so a
+                # relay echo or a reply for a different cabinet index could pass.
+                # The device reports its own cabinet index in the payload — only
+                # accept it when it matches the index we actually probed, so a
+                # single-cabinet device can never drive cabinet_count > 1 (#63).
+                if state is not None and state.get("index") == cidx:
                     cabinets[cidx] = state
         result["cabinets"] = cabinets
         # Number of cabinets that ACTUALLY replied (drives Water Sensor

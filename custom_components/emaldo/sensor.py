@@ -1037,14 +1037,20 @@ class EmaldoScheduleChartSensor(
 
     State: numeric mode of the current slot (1=charge, -1=discharge, 0=idle).
     Attributes:
-      - schedule: list of {t, mode, price, solar} dicts for charting
+      - schedule: list of {t, mode, state, price, solar, source} dicts for
+        charting, with overrides applied (source="override" on overridden
+        slots).
+      - ai_raw: the original AI/base schedule (hope_charge_discharges) BEFORE
+        overrides are applied (#64). Same {t, mode} shape as schedule slots.
       - overrides: list of {t, mode} dicts for today's overrides
     """
 
     _attr_has_entity_name = True
     _attr_translation_key = "schedule_chart"
     _attr_icon = "mdi:chart-timeline-variant"
-    _unrecorded_attributes = frozenset({"schedule"})
+    # Both time-series attrs are large and only change on schedule refresh;
+    # keep them out of the recorder (mirrors `schedule`).
+    _unrecorded_attributes = frozenset({"schedule", "ai_raw"})
 
     def __init__(self, coordinator: EmaldoScheduleCoordinator) -> None:
         super().__init__(coordinator)
@@ -1156,9 +1162,20 @@ class EmaldoScheduleChartSensor(
                 "source": "override" if is_overridden else "internal",
             })
 
+        # Raw AI/base schedule before overrides, exposed separately so
+        # callers can read the original plan independently of overrides (#64).
+        ai_raw = []
+        for i, value in enumerate(slots):
+            slot_time = day_start + timedelta(minutes=i * gap)
+            ai_raw.append({
+                "t": int(slot_time.timestamp()),
+                "mode": _schedule_slot_to_numeric(value),
+            })
+
         return {
             "start_date": day_start.date().isoformat(),
             "schedule": sched_data,
+            "ai_raw": ai_raw,
             "slot_count": len(slots),
             "gap_minutes": gap,
         }

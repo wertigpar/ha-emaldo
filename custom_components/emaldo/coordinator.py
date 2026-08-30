@@ -113,7 +113,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._emergency_charge_start_t: object = None  # datetime.time | None
         self._emergency_charge_end_t: object = None    # datetime.time | None
         self._ev_poll_counter: int = 0
-        self._contract_poll_counter: int = 0
+        self._contract_fetched: bool = False
         self._contract: dict = {}
         self._dual_power_fail_count: int = 0
         self._dual_power_fail_since: float | None = None
@@ -310,12 +310,12 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 _LOGGER.debug("EV state fetch failed: %s", err)
 
-        # Balance-contract info (Facility ID GSRN numbers) — best-effort and
-        # throttled to every 5th poll (~5 min): the values are static once
-        # registered and the extra cloud call must not add API load.
-        self._contract_poll_counter += 1
-        if self._contract_poll_counter >= 5:
-            self._contract_poll_counter = 0
+        # Balance-contract info (Facility ID GSRN numbers). These values are static
+        # once registered, so fetch once and never again — a ~5 min throttle
+        # just means a fresh restart shows unknown for up to 5 min. Retry on
+        # failure until the first success, then stop calling the cloud API
+        # entirely (no competing UDP session, no API load).
+        if not self._contract_fetched:
             try:
                 contract = await self.hass.async_add_executor_job(
                     client.get_contract, self.home_id
@@ -326,6 +326,9 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "consumption_meter": contract_data.get("consumption_meter"),
                         "production_meter": contract_data.get("production_meter"),
                     }
+                # Mark done whether or not the fields were present: a missing
+                # meter is a device/config fact, not a transient failure.
+                self._contract_fetched = True
             except Exception as err:
                 _LOGGER.debug("Balance contract fetch failed: %s", err)
 
@@ -728,6 +731,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # on the same pattern as the battery-module scan so the scans never
         # hold the realtime session lock.
         self._accessories: dict = {}
+        # Accessory state (Fans Pack + Water Sensor) is polled every 10
+        # successful realtime reads (~100 s). The counter starts at 9 so the
+        # scan fires on the FIRST poll after startup (no 100 s wait for the
+        # values to appear), then repeats as a safety net: accessory values
+        # are static between fan spin-up/down and leak events, but a scan can
+        # abort (transient E2E failure) and the once-only model would then
+        # leave the sensors unknown until a restart. Periodic re-scan keeps
+        # them recoverable without adding meaningful API load.
         self._accessories_poll_counter: int = 9  # trigger on first successful poll
         self._accessories_scan_task: asyncio.Task | None = None
         # -- Stats for diagnostic sensor --
