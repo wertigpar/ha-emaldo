@@ -1,5 +1,24 @@
 # Changes
 
+## v1.0.0-beta29
+
+### Added
+
+- **`ai_raw` attribute on the schedule chart sensor (issue #64, upstreamed
+  local patch from leifkristianssonl).** `EmaldoScheduleChartSensor` now
+  exposes a second time series alongside `schedule`:
+  - `schedule` — the final plan with overrides applied (unchanged; an
+    overridden slot carries `source="override"`).
+  - `ai_raw` — the original AI/base schedule (`hope_charge_discharges`)
+    **before** overrides, as a list of `{t, mode}` dicts (`t` = Unix seconds
+    at each slot's `day_start + i*gap`). Lets users read the raw AI plan
+    independently of overrides. Same data, no new API calls, no behavior or
+    service changes.
+  Both series are excluded from the recorder (`_unrecorded_attributes`) to
+  avoid recorder bloat, mirroring the existing `schedule` guard.
+
+- Bump `manifest.json` → `1.0.0-beta29`.
+
 ## v1.0.0-beta28
 
 ### Added
