@@ -1352,6 +1352,12 @@ def read_battery_info(
 _CABINET_ALLINFO_TYPE = 0x0E
 _CABINET_STATE_TYPE = 0x0D
 _INVERTER_INFO_TYPE = 0x04
+# Bounded set of cabinet indices probed for accessory state. The
+# ``get_cabinet_allinfo`` (0x0E) first byte is NOT a reliable cabinet count
+# (it decodes to a large/unstable value on real firmware), so we never use
+# it to bound the per-cabinet loop — we probe a fixed range and keep whichever
+# cabinets actually reply. 4 matches the Water Sensor design (issue #63).
+ACCESSORY_MAX_CABINETS = 4
 
 
 def parse_cabinet_state(payload: bytes | None) -> dict | None:
@@ -1548,24 +1554,26 @@ def read_accessories(
         time.sleep(0.2)
         sock.settimeout(probe_timeout)
 
-        # 1) Cabinet count (0x0E, empty payload)
+        # 1) Cabinet allinfo (0x0E, empty payload). Its first byte reports the
+        # cabinet count; we keep it for discovery but NEVER use it to bound the
+        # loop (it can decode to a bogus large value on some firmware), so the
+        # per-cabinet probes are capped at ACCESSORY_MAX_CABINETS.
         pkt = build_subscription_packet(
             e2e_creds, _CABINET_ALLINFO_TYPE, session_nonce,
             payload=b"", request_mode=True,
         )
-        dec = _probe(
+        allinfo = _probe(
             "CabinetAllInfo", pkt, lambda p: len(p) >= 1,
         )
-        if dec is None:
-            return None
-        result["cabinet_count"] = dec[0]
+        reported_count = allinfo[0] if allinfo else 0
+        count = max(1, min(reported_count, ACCESSORY_MAX_CABINETS))
 
-        # 2) Per-cabinet state (0x0D, payload [index]) for every cabinet
-        # the device reported. Validators also constrain the raw state
-        # bytes (0/1 water+smoke, 0-2 fan) so the relay's decrypted JSON
-        # status frames (``{"__time"...``) cannot pass a bare length check.
+        # 2) Per-cabinet state (0x0D, payload [index]) for a BOUNDED set of
+        # cabinet indices. Validators also constrain the raw state bytes
+        # (0/1 water+smoke, 0-2 fan) so the relay's decrypted JSON status
+        # frames (``{"__time"...``) cannot pass a bare length check.
         cabinets: dict[int, dict] = {}
-        for cidx in range(max(1, result["cabinet_count"])):
+        for cidx in range(count):
             pkt = build_subscription_packet(
                 e2e_creds, _CABINET_STATE_TYPE, session_nonce,
                 payload=bytes([cidx]), request_mode=True,
@@ -1580,6 +1588,9 @@ def read_accessories(
                 if state is not None:
                     cabinets[cidx] = state
         result["cabinets"] = cabinets
+        # Bounded reported count (drives Water Sensor discovery in the
+        # coordinator). The device can legitimately report 2+ cabinets.
+        result["cabinet_count"] = count
         # Backward-compatible alias for the single-cabinet Water Sensor.
         result["cabinet"] = cabinets.get(0)
 

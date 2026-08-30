@@ -592,7 +592,8 @@ EV_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
 # screen: one Water Sensor per battery cabinet and one "Fans Pack" per inverter
 # phase. Multi-cabinet installs get a Water Sensor per cabinet — cabinet 0 is
 # created at setup, additional cabinets are added dynamically once the
-# accessory scan reports ``cabinet_count > 1`` (see ``add_water_sensors_for_cabinets``).
+# accessory scan reports ``cabinet_count > 1`` (see
+# ``add_water_sensors_for_cabinets``).
 WATER_SENSOR_MAX_CABINETS = 4  # sane upper bound on battery cabinets per device
 
 

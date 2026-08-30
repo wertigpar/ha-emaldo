@@ -2632,13 +2632,26 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # Register Water Sensors for any additional cabinets beyond
                 # the first (multi-cabinet installs, issue #63). Cabinet 0 is
                 # created at sensor setup; this adds cabinet 1+ on discovery.
+                # ``water_async_add``/``water_cabinets_created`` live on the
+                # per-device item (set in sensor.async_setup_entry), so find the
+                # item whose realtime coordinator *is* this one — looking up the
+                # entry-level dict by entry_id returns None, which silently
+                # skipped registration (fixed here).
                 cabinet_count = accessories.get("cabinet_count") or 0
                 if cabinet_count > 1:
-                    entry_item = self.hass.data.get(DOMAIN, {}).get(
+                    entry_data = self.hass.data.get(DOMAIN, {}).get(
                         self.config_entry.entry_id
                     )
-                    add_cb = entry_item.get("water_async_add") if entry_item else None
-                    created = entry_item.get("water_cabinets_created") if entry_item else None
+                    item = next(
+                        (
+                            i
+                            for i in (entry_data or {}).get("devices", [])
+                            if i.get("realtime") is self
+                        ),
+                        None,
+                    )
+                    add_cb = item.get("water_async_add") if item else None
+                    created = item.get("water_cabinets_created") if item else None
                     if add_cb is not None and created is not None:
                         from .sensor import add_water_sensors_for_cabinets
 
