@@ -413,6 +413,58 @@ data:
   enable: true
 ```
 
+### `emaldo.set_scheduled_mode`
+
+Switches the battery to **Scheduled mode** and writes the hourly schedule (E2E opcode `0x19`).
+
+A scheduled-mode hour carries a *target percentage*, not an on/off flag, so each hour takes one
+of six actions: `neither`, `charge_to_emergency`, `charge_to_smart`, `charge_to_full`,
+`discharge_to_smart`, `discharge_to_emergency`. An integer works too — positive charges up to
+N%, negative discharges down to N%. Hours left out are `neither`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `weekday_hours` | dict[int, str\|int] | no | `{hour: action}` for Mon–Fri |
+| `weekend_hours` | dict[int, str\|int] | no | `{hour: action}` for Sat–Sun; only takes effect when `sync: false` |
+| `sync` | boolean | no | Default `true`. On: the battery discards `weekend_hours` and applies the weekday schedule all week |
+| `smart_pct` | int | no | Upper SoC threshold (0–100). Omit to keep the battery's current value |
+| `emergency_pct` | int | no | Lower SoC threshold (0–100). Omit to keep the battery's current value |
+| `device_id` | string | no | Target a specific device; defaults to the first |
+| `weekdays` | list[int] | no | *Deprecated.* Hours to charge, all to `charge_pct` |
+| `weekend` | list[int] | no | *Deprecated.* As `weekdays` |
+| `charge_pct` | int | no | *Deprecated.* Charge target for the hour lists (default 100) |
+
+The named actions resolve against the battery range **being written in the same call**, so
+changing `smart_pct` and using `charge_to_smart` together encodes against the new value.
+
+`smart_pct`/`emergency_pct` cannot be skipped on the wire — opcode `0x19` carries them in bytes
+2–3 on every write — so omitting them makes the service read the current range from `0x5B` and
+send it back unchanged.
+
+```yaml
+# Charge overnight, discharge through the evening peak
+service: emaldo.set_scheduled_mode
+data:
+  weekday_hours:
+    0: charge_to_full
+    1: charge_to_full
+    2: charge_to_full
+    17: discharge_to_emergency
+    18: discharge_to_emergency
+  sync: true
+```
+
+```yaml
+# Different weekend plan, with an explicit range
+service: emaldo.set_scheduled_mode
+data:
+  weekday_hours: { 3: charge_to_smart, 18: discharge_to_emergency }
+  weekend_hours: { 10: charge_to_full, 20: discharge_to_smart }
+  smart_pct: 80
+  emergency_pct: 20
+  sync: false
+```
+
 ## Slot Encoding
 
 The Emaldo battery uses single-byte override values per 15-minute slot:
