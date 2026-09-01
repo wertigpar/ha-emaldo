@@ -20,7 +20,14 @@ from .emaldo_lib.const import (
 )
 from .emaldo_lib.e2e import (
     EV_MODE_SCHEDULED,
+    RESERVE_MODE_SCHEDULED,
+    SCHEDULE_ACTIONS,
+    SLOT_NEITHER,
+    describe_slot,
+    encode_schedule_day,
+    read_reserve_mode_config,
     set_ev_charging_mode_smart,
+    set_reserve_mode,
 )
 from .emaldo_lib.exceptions import (
     EmaldoAuthError,
@@ -50,12 +57,77 @@ SERVICE_REFRESH_SCHEDULE = "refresh_schedule"
 SERVICE_SET_EV_SCHEDULE = "set_ev_schedule"
 SERVICE_BACKFILL_SOLAR = "backfill_solar"
 SERVICE_SET_BATTERY_RANGE = "set_battery_range"
+SERVICE_SET_SCHEDULED_MODE = "set_scheduled_mode"
+
+# Shared by set_ev_schedule and set_scheduled_mode: lists of hour integers 0-23
+# when the feature is active. Empty list or omitted key means "no hours selected".
+_SCHEMA_HOUR_LISTS = {
+    vol.Optional("weekdays", default=list): vol.All(
+        [vol.All(int, vol.Range(min=0, max=23))],
+    ),
+    vol.Optional("weekend", default=list): vol.All(
+        [vol.All(int, vol.Range(min=0, max=23))],
+    ),
+}
+
+
+def _hours_to_slots(hours: list[int]) -> list[int]:
+    """Expand a list of hour integers 0-23 into 24 per-hour 0/1 flags.
+
+    For set_ev_schedule, whose hours are packed into a bitmap where 1 simply means
+    "active". Scheduled mode does not use this: an hour there carries a target
+    percentage, so it goes through encode_schedule_day instead.
+    """
+    slots = [0] * 24
+    for h in hours:
+        slots[h] = 1
+    return slots
+
 
 SCHEMA_SET_BATTERY_RANGE = vol.Schema(
     {
         vol.Required("smart_pct"): vol.All(int, vol.Range(min=0, max=100)),
         vol.Required("emergency_pct"): vol.All(int, vol.Range(min=0, max=100)),
         vol.Optional("enable", default=True): cv.boolean,
+        vol.Optional("device_id"): cv.string,
+    }
+)
+
+# An hour is either one of the named actions or an int: positive charges up to
+# N%, negative discharges down to N%. Named actions follow the battery range,
+# which matters because that range changes.
+_SLOT_ACTION = vol.Any(
+    vol.In(SCHEDULE_ACTIONS),
+    vol.All(vol.Coerce(int), vol.Range(min=-100, max=100)),
+)
+
+#: ``{hour: action}``. YAML gives string keys, so coerce.
+_SCHEMA_HOUR_ACTIONS = vol.Schema(
+    {vol.All(vol.Coerce(int), vol.Range(min=0, max=23)): _SLOT_ACTION}
+)
+
+SCHEMA_SET_SCHEDULED_MODE = vol.Schema(
+    {
+        # Preferred: one action per hour, so discharge and per-hour targets are
+        # expressible. The device stores a target percentage per hour, not a flag.
+        vol.Optional("weekday_hours"): _SCHEMA_HOUR_ACTIONS,
+        vol.Optional("weekend_hours"): _SCHEMA_HOUR_ACTIONS,
+
+        # Deprecated shorthand: lists of hours to charge, all to the same target.
+        # Kept working, but it can only express charge - a third of the protocol.
+        **_SCHEMA_HOUR_LISTS,
+        vol.Optional("charge_pct", default=100): vol.All(int, vol.Range(min=1, max=100)),
+
+        # Deliberately no defaults: omitted means "leave the battery range as it
+        # is", which the handler resolves by reading the device. Defaulting here
+        # would silently reset a range the user set via set_battery_range, because
+        # smart/emergency ride along on every 0x19 write.
+        vol.Optional("smart_pct"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("emergency_pct"): vol.All(int, vol.Range(min=0, max=100)),
+
+        # With sync on the device discards the weekend array entirely and the app
+        # derives the weekend from the weekday. Verified live.
+        vol.Optional("sync", default=True): cv.boolean,
         vol.Optional("device_id"): cv.string,
     }
 )
@@ -95,14 +167,7 @@ SCHEMA_APPLY_BULK_SCHEDULE = vol.Schema(
 
 SCHEMA_SET_EV_SCHEDULE = vol.Schema(
     {
-        # Lists of hour integers 0-23 when EV charging is allowed.
-        # Empty list or omitted key means "no hours selected".
-        vol.Optional("weekdays", default=list): vol.All(
-            [vol.All(int, vol.Range(min=0, max=23))],
-        ),
-        vol.Optional("weekend", default=list): vol.All(
-            [vol.All(int, vol.Range(min=0, max=23))],
-        ),
+        **_SCHEMA_HOUR_LISTS,
         vol.Optional("sync", default=False): cv.boolean,
         vol.Optional("device_id"): cv.string,
     }
@@ -850,12 +915,8 @@ async def async_handle_set_ev_schedule(
     sync = call.data.get("sync", False)
     device_id = call.data.get("device_id")
 
-    weekdays = [0] * 24
-    for h in weekday_hours:
-        weekdays[h] = 1
-    weekend = [0] * 24
-    for h in weekend_hours:
-        weekend[h] = 1
+    weekdays = _hours_to_slots(weekday_hours)
+    weekend = _hours_to_slots(weekend_hours)
 
     def _do_set():
         power_coord, client = _get_coordinator_and_client(
@@ -1148,6 +1209,160 @@ async def async_handle_set_battery_range(
                     await sched.async_request_refresh()
 
 
+async def async_handle_set_scheduled_mode(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Handle the set_scheduled_mode service call.
+
+    Switches the battery to Scheduled mode and writes the hourly schedule via E2E
+    opcode 0x19.
+
+    Preferred input is ``weekday_hours`` / ``weekend_hours``, an ``{hour: action}``
+    mapping. An hour is a target, not a flag, so the actions are:
+
+        neither, charge_to_emergency, charge_to_smart, charge_to_full,
+        discharge_to_smart, discharge_to_emergency
+
+    or an int - positive charges up to N%, negative discharges down to N%. Hours
+    left out are "neither".
+
+    The older ``weekdays`` / ``weekend`` hour lists with ``charge_pct`` still work
+    but can only express charging.
+
+    ``smart_pct``/``emergency_pct`` are optional: omit them to leave the battery
+    range untouched. They cannot be skipped on the wire - opcode 0x19 carries them
+    in bytes 2-3 on every write - so an omitted value is resolved by reading the
+    device first.
+
+    Note ``sync``: with it on, the device discards the weekend array and the app
+    shows the weekday schedule for both. Pass ``sync: false`` to set the weekend
+    independently.
+    """
+    smart = call.data.get("smart_pct")
+    emergency = call.data.get("emergency_pct")
+    sync = call.data.get("sync", True)
+    device_id = call.data.get("device_id")
+
+    weekday_actions = call.data.get("weekday_hours")
+    weekend_actions = call.data.get("weekend_hours")
+
+    if weekday_actions is None and weekend_actions is None:
+        # Deprecated path: hour lists, one shared charge target.
+        charge_pct = call.data.get("charge_pct", 100)
+        weekday_actions = {h: charge_pct for h in call.data.get("weekdays", [])}
+        weekend_actions = {h: charge_pct for h in call.data.get("weekend", [])}
+        if weekday_actions or weekend_actions:
+            _LOGGER.debug(
+                "set_scheduled_mode: using the deprecated weekdays/weekend lists; "
+                "weekday_hours/weekend_hours can also express discharge"
+            )
+    else:
+        weekday_actions = weekday_actions or {}
+        weekend_actions = weekend_actions or {}
+
+    # Filled in by _do_set: the range actually written, and the encoded hours, so
+    # the log line below describes what went on the wire instead of re-deriving it.
+    written: dict[str, Any] = {}
+
+    def _do_set():
+        power_coord, client = _get_coordinator_and_client(
+            hass, coordinator_key="power", device_id=device_id
+        )
+        for attempt in range(2):
+            try:
+                creds = client.e2e_login(
+                    power_coord.home_id,
+                    power_coord._device_id,  # noqa: SLF001
+                    power_coord._model,      # noqa: SLF001
+                )
+                write_smart, write_emergency = smart, emergency
+                if write_smart is None or write_emergency is None:
+                    # The range must come from 0x5B. It is carried in bytes 2-3 of
+                    # every 0x19 write, so an omitted value has to be resolved
+                    # rather than defaulted - defaulting would overwrite whatever
+                    # the user set via set_battery_range.
+                    current = read_reserve_mode_config(creds)
+                    if current is None:
+                        raise EmaldoE2EError(
+                            "Could not read the current battery range (opcode 0x5B), "
+                            "so set_scheduled_mode would have to guess it. Pass "
+                            "smart_pct and emergency_pct explicitly, or retry."
+                        )
+                    if write_smart is None:
+                        write_smart = current["smart"]
+                    if write_emergency is None:
+                        write_emergency = current["emergency"]
+
+                # Encode only now. charge_to_smart must resolve against the range
+                # being written in THIS command, not whatever the device held
+                # before: a call that changes the range and uses symbolic targets
+                # would otherwise encode against the old one.
+                weekday_slots = encode_schedule_day(
+                    weekday_actions, write_smart, write_emergency
+                )
+                weekend_slots = encode_schedule_day(
+                    weekend_actions, write_smart, write_emergency
+                )
+
+                written.update(
+                    smart=write_smart,
+                    emergency=write_emergency,
+                    weekday_slots=weekday_slots,
+                    weekend_slots=weekend_slots,
+                )
+                return set_reserve_mode(
+                    creds, RESERVE_MODE_SCHEDULED,
+                    weekday_slots=weekday_slots,
+                    weekend_slots=weekend_slots,
+                    smart_pct=write_smart, emergency_pct=write_emergency,
+                    sync=sync,
+                )
+            except EmaldoAuthError:
+                if attempt == 0:
+                    _LOGGER.debug("Session expired, re-authenticating")
+                    power_coord._reset_client()  # noqa: SLF001
+                else:
+                    raise
+
+    ok = await hass.async_add_executor_job(_do_set)
+    if ok:
+        write_smart = written["smart"]
+        write_emergency = written["emergency"]
+
+        def _describe(slots: list[int]) -> dict[int, str]:
+            return {
+                hour: describe_slot(raw, write_smart, write_emergency)
+                for hour, raw in enumerate(slots)
+                if raw != SLOT_NEITHER
+            }
+
+        weekday_desc = _describe(written["weekday_slots"])
+        weekend_desc = (
+            "mirrored from weekday (sync on)"
+            if sync
+            else _describe(written["weekend_slots"])
+        )
+        _LOGGER.info(
+            "Scheduled mode set: smart=%d%%, emergency=%d%%, sync=%s, weekday=%s, weekend=%s",
+            write_smart, write_emergency, sync, weekday_desc, weekend_desc,
+        )
+    else:
+        _LOGGER.warning("Scheduled mode write was not acknowledged")
+
+    # Refresh the schedule coordinator so the new plan reaches the sensors.
+    if device_id:
+        target_set = _get_target_set(
+            hass, coordinator_key="schedule", device_id=device_id
+        )
+        await target_set["schedule"].async_request_refresh()
+    else:
+        for entry_data in _get_entry_data(hass).values():
+            for item in _iter_device_sets(entry_data):
+                sched = item.get("schedule")
+                if sched is not None:
+                    await sched.async_request_refresh()
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Register Emaldo services."""
     if hass.services.has_service(DOMAIN, SERVICE_SET_SLOT_RANGE):
@@ -1173,6 +1388,9 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def handle_set_battery_range(call: ServiceCall) -> None:
         await async_handle_set_battery_range(hass, call)
+
+    async def handle_set_scheduled_mode(call: ServiceCall) -> None:
+        await async_handle_set_scheduled_mode(hass, call)
 
     hass.services.async_register(
         DOMAIN,
@@ -1216,6 +1434,12 @@ def async_register_services(hass: HomeAssistant) -> None:
         handle_set_battery_range,
         schema=SCHEMA_SET_BATTERY_RANGE,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_SCHEDULED_MODE,
+        handle_set_scheduled_mode,
+        schema=SCHEMA_SET_SCHEDULED_MODE,
+    )
 
 
 def async_unregister_services(hass: HomeAssistant) -> None:
@@ -1228,3 +1452,4 @@ def async_unregister_services(hass: HomeAssistant) -> None:
         hass.services.async_remove(DOMAIN, SERVICE_SET_EV_SCHEDULE)
         hass.services.async_remove(DOMAIN, SERVICE_BACKFILL_SOLAR)
         hass.services.async_remove(DOMAIN, SERVICE_SET_BATTERY_RANGE)
+        hass.services.async_remove(DOMAIN, SERVICE_SET_SCHEDULED_MODE)

@@ -5542,3 +5542,577 @@ class PersistentE2ESession:
                 if not has_more:
                     break
         return False
+
+
+# ---------------------------------------------------------------------------
+# Scheduled mode (reserve mode) — E2E set/get
+# ---------------------------------------------------------------------------
+#
+# Write — ``set_reservemode``, APK dispatch-table case 43 ('+').
+# Opcode 0x19 (short -24551 = 0xA019), subscribe mode, 54-byte payload.
+_RESERVE_MODE_SET_TYPE = 0x19
+
+# Read — ``get_schedule_reservemode``, the scheduled-mode hourly schedule.
+# Opcode 0x18, subscribe mode, empty payload, 57-byte response.
+#
+# Layout, per the APK callback (``module_bmt/zd/q0.java``) and confirmed against a
+# live battery: [0] smart, [1] emergency, [2] lowpower alert, [3] battery protect,
+# [4..27] weekday hours, [28..51] weekend hours, [52] sync, [53..56] full charge.
+#
+# Not to be confused with ``get_custom_schedulemode`` (opcode 0x46), a separate
+# block that reads back 0x80 (unset) for every hour regardless of the app's
+# setting, and whose bytes 0-1 are a fixed header rather than the battery range.
+_SCHEDULE_MODE_GET_TYPE = 0x18
+
+RESERVE_MODE_PRICE_TRACKING = 1
+RESERVE_MODE_SCHEDULED = 2
+RESERVE_MODE_AI_ADAPTER = 3
+
+
+def set_reserve_mode(
+    e2e_creds: dict,
+    reserve_mode: int,
+    weekday_slots: list[int] | None = None,
+    weekend_slots: list[int] | None = None,
+    *,
+    smart_pct: int,
+    emergency_pct: int,
+    sync: bool = False,
+    enable: int = 0,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> bool:
+    """Set the battery reserve mode via E2E (opcode 0x19).
+
+    Args:
+        reserve_mode: 1=priceTracking, 2=scheduled, 3=aiAdapter.
+        weekday_slots: 24 wire values, one per hour, for Mon–Fri. An hour carries
+            a *target percentage*, not an on/off flag — see :func:`encode_slot`.
+            Required when *reserve_mode* is ``RESERVE_MODE_SCHEDULED``.
+        weekend_slots: 24 wire values for Sat–Sun. Same encoding.
+        smart_pct: Smart battery percentage (high marker). Required, with no
+            default: bytes 2-3 carry it on *every* write, so a default here would
+            silently overwrite whatever range the battery is set to. Read the
+            current value with :func:`read_reserve_mode_config` and pass it back
+            when the caller does not mean to change it.
+        emergency_pct: Emergency battery percentage (low marker). As *smart_pct*.
+        sync: Synchronise weekday/weekend schedules.
+        enable: Enable flag (int, sent as byte 53).
+
+    Returns:
+        *True* if the device acknowledged the command.
+    """
+    assert reserve_mode in (1, 2, 3), f"Invalid reserve_mode: {reserve_mode}"
+
+    payload = bytearray(54)
+    payload[0] = reserve_mode - 1
+
+    has_slots = (
+        weekday_slots is not None
+        and weekend_slots is not None
+        and (len(weekday_slots) > 0 or len(weekend_slots) > 0)
+    )
+    if reserve_mode == RESERVE_MODE_SCHEDULED and not has_slots:
+        payload[1] = 1
+    else:
+        payload[1] = 0
+
+    payload[2] = smart_pct & 0xFF
+    payload[3] = emergency_pct & 0xFF
+
+    if has_slots:
+        for i, v in enumerate(weekday_slots[:24]):
+            payload[4 + i] = v & 0xFF
+        for i, v in enumerate(weekend_slots[:24]):
+            payload[28 + i] = v & 0xFF
+
+    payload[52] = 1 if sync else 0
+    payload[53] = enable & 0xFF
+
+    session_nonce = generate_nonce()
+    pkt = build_subscription_packet(
+        e2e_creds, _RESERVE_MODE_SET_TYPE, session_nonce,
+        payload=bytes(payload),
+    )
+    results = _run_session(
+        e2e_creds, [("SetReserveMode(0x19)", pkt)],
+        timeout=timeout, log=log,
+    )
+    _, resp = results[0]
+    return resp is not None
+
+
+def _parse_schedule_mode_response(payload: bytes) -> dict | None:
+    """Parse a get_schedule_reservemode (0x18) response payload."""
+    if payload is None or len(payload) < 57:
+        return None
+    return {
+        "smart": payload[0],
+        "emergency": payload[1],
+        "lowpower_alert": payload[2],
+        "battery_protect": payload[3],
+        "weekday_slots": list(payload[4:28]),
+        "weekend_slots": list(payload[28:52]),
+        "sync": payload[52] == 1,
+        "full_charge": int.from_bytes(payload[53:57], "little"),
+        "enable": payload[57] if len(payload) > 57 else 0,
+    }
+
+
+# Upper bound on distinct hour values in a genuine schedule.
+_MAX_DISTINCT_SLOT_VALUES = 6
+
+
+def _is_plausible_slot_value(b: int) -> bool:
+    """A slot value the device could legitimately report.
+
+    Override slot encoding: 0x00 idle, 1-100 charge below N%, 0x80 no setting,
+    129-255 discharge above (256-N)%. 101-127 is not a valid value.
+    """
+    return b in (0x00, 0x80) or 1 <= b <= 100 or b >= 129
+
+
+def _is_schedule_mode_payload(payload: bytes) -> bool:
+    """Identify a real get_schedule_reservemode (0x18) payload.
+
+    This does more work than it looks like it should, because
+    :func:`decrypt_response` brute-forces the AES IV and every 16-aligned tail
+    offset and returns the FIRST candidate this accepts. So the check is not a
+    sanity assertion — it is what selects the correct decryption. Wrong-offset
+    garbage unpads cleanly often enough that a loose check will pick it and parse
+    it as an empty schedule with nonsense thresholds.
+
+    Every constraint below therefore comes from the documented layout, to leave
+    random plaintext as little room to qualify as possible.
+    """
+    # Exact lengths, not ">= 57". The offset search yields nested candidates that are
+    # all suffixes of each other - 57, 74, 90, 106 bytes and so on - and a longer one
+    # whose first 57 bytes happen to satisfy the shape checks would be accepted and
+    # parsed as real. 0x18 returns 57 bytes, 0x46 returns 58.
+    if payload is None or len(payload) not in (57, 58):
+        return False
+    if payload[0] > 100 or payload[1] > 100:      # smart, emergency
+        return False
+    if payload[2] > 100 or payload[3] > 100:      # lowpower alert, battery protect
+        return False
+    # Hour values. The device uses the same encoding as the override block, not the
+    # plain 0/1 the APK writes: 0x00 idle, 1-100 charge below N%, 0x80 for an hour
+    # with no setting, 129-255 discharge above (256-N)%. 101-127 is unused.
+    slots = payload[4:52]
+    if any(not _is_plausible_slot_value(b) for b in slots):
+        return False
+    # A real schedule draws from a handful of values (unset, idle, one charge
+    # target, one discharge target); random plaintext spreads across many. This
+    # carries most of the discriminating power now that the per-byte range is wide.
+    if len(set(slots)) > _MAX_DISTINCT_SLOT_VALUES:
+        return False
+    if payload[52] > 1:                           # sync boolean
+        return False
+    # The APK checks length >= 57 but then reads byte 57, so a real payload has it;
+    # when present it is a flag.
+    if len(payload) > 57 and payload[57] > 1:     # enable flag
+        return False
+    # A device always has non-zero thresholds with the upper above the lower.
+    # Without these two a run of zero bytes satisfies everything above.
+    if payload[0] == 0 and payload[1] == 0:
+        return False
+    if payload[0] <= payload[1]:
+        return False
+    return True
+
+
+def read_schedule_mode(
+    e2e_creds: dict,
+    *,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> dict | None:
+    """Read the current scheduled mode configuration via E2E (opcode 0x18).
+
+    Returns a dict with ``smart``, ``emergency``, ``weekday_slots`` (24 ints),
+    ``weekend_slots`` (24 ints), ``sync``, ``full_charge``, ``enable``;
+    or *None* on failure.
+
+    Structured like :func:`read_overrides` rather than going through
+    ``_run_session``: the first datagram back after a subscribe is often a relay
+    or keepalive frame, so the socket is drained until one validates as a
+    schedule-mode response rather than taking whatever arrives first.
+    """
+    session_nonce = generate_nonce()
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+    sub_pkt = build_subscription_packet(
+        e2e_creds, _SCHEDULE_MODE_GET_TYPE, session_nonce,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B -> got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            if log:
+                log(f"{label}: timeout")
+            return None
+
+    def _try(resp: bytes | None, label: str) -> dict | None:
+        if not resp:
+            return None
+        decrypted = decrypt_response(
+            resp, e2e_creds["chat_secret"],
+            payload_validator=_is_schedule_mode_payload,
+            # Benign relay frames are not schedule-mode payloads; silence the
+            # per-call decrypt failure flood.
+            silent=True,
+        )
+        if log:
+            log(f"0x18 {label}: " + (
+                f"{len(decrypted)}B = {decrypted.hex()}" if decrypted
+                else "did not decrypt / failed validation"))
+        return _parse_schedule_mode_response(decrypted)
+
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+
+        result = _try(_send(sub_pkt, "Subscribe(0x18)"), "subscribe response")
+        if result is not None:
+            return result
+
+        # The first response may not be the right type; try a few more.
+        for i in range(5):
+            try:
+                resp, _ = sock.recvfrom(4096)
+            except socket.timeout:
+                break
+            result = _try(resp, f"drained frame {i + 1}")
+            if result is not None:
+                return result
+
+        if log:
+            log("read_schedule_mode: no frame validated as a schedule-mode response")
+        return None
+    finally:
+        sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Reserve mode configuration - opcode 0x5B
+# ---------------------------------------------------------------------------
+#
+# Named "peak shaving config" above, but the 20-byte response actually carries
+# the reserve-mode configuration. Layout established by observation against a
+# real battery rather than from the APK: the range was changed in the app and
+# bytes 15 and 17 followed it exactly, twice (63/25 → 55/30 → 25/10), in plain
+# binary.
+#
+#   [0..6]   always zero so far
+#   [7..10]  full charge capacity, Wh, uint32 LE
+#   [11..14] uint32 LE, static, meaning unknown (NOT current energy - it stayed
+#            at 7128 while SoC was 54% of 15288)
+#   [15]     emergency (lower) reserve %
+#   [16]     always 100 so far, meaning unknown (not plenty_reserve, which is 98)
+#   [17]     smart (upper) reserve %
+#   [18]     reserve mode: 1 price tracking, 2 scheduled, 3 AI adapter
+#   [19]     enabled flag
+#
+# This is the only read that reports the current reserve mode. For the battery
+# range it agrees with 0x18, so the two can be cross-checked; 0x46 cannot be used
+# for either — its first two bytes read 0x50 0x0F regardless of the app's setting,
+# because they are a fixed header rather than smart/emergency.
+
+_RESERVE_CONFIG_GET_TYPE = 0x5B
+_RESERVE_CONFIG_LENGTH = 20
+
+
+def _is_reserve_config_payload(payload: bytes) -> bool:
+    """Identify a 0x5B reserve-config payload.
+
+    As with the schedule-mode read, this selects the AES offset rather than
+    merely sanity-checking, so it constrains every field the layout pins down.
+    """
+    if payload is None or len(payload) != _RESERVE_CONFIG_LENGTH:
+        return False
+    if payload[15] > 100 or payload[16] > 100 or payload[17] > 100:
+        return False
+    if payload[18] not in (RESERVE_MODE_PRICE_TRACKING,
+                           RESERVE_MODE_SCHEDULED,
+                           RESERVE_MODE_AI_ADAPTER):
+        return False
+    if payload[19] > 1:
+        return False
+    # Upper reserve sits above the lower one, and a real device is never 0/0.
+    if payload[17] <= payload[15]:
+        return False
+    return True
+
+
+def _parse_reserve_config(payload: bytes | None) -> dict | None:
+    """Parse a 0x5B reserve-config response."""
+    if payload is None or len(payload) != _RESERVE_CONFIG_LENGTH:
+        return None
+    return {
+        "full_charge_wh": int.from_bytes(payload[7:11], "little"),
+        "unknown_11": int.from_bytes(payload[11:15], "little"),
+        "emergency": payload[15],
+        "unknown_16": payload[16],
+        "smart": payload[17],
+        "reserve_mode": payload[18],
+        "enabled": payload[19] == 1,
+    }
+
+
+def read_reserve_mode_config(
+    e2e_creds: dict,
+    *,
+    timeout: float = 3.0,
+    log: Callable[..., None] | None = None,
+) -> dict | None:
+    """Read the reserve-mode configuration via E2E (opcode 0x5B).
+
+    Returns a dict with ``smart``, ``emergency``, ``reserve_mode``, ``enabled``
+    and ``full_charge_wh``; or *None* on failure.
+
+    :func:`read_schedule_mode` (0x18) also reports the battery range, and the two
+    can be cross-checked against each other. This is the only read that reports
+    which reserve mode the battery is currently in.
+    """
+    session_nonce = generate_nonce()
+    home_alive = build_alive_packet(
+        sender_end_id=e2e_creds["home_end_id"],
+        sender_group_id=e2e_creds["home_group_id"],
+        end_secret=e2e_creds["home_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        sender_end_id=e2e_creds["sender_end_id"],
+        sender_group_id=e2e_creds["sender_group_id"],
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+    sub_pkt = build_subscription_packet(
+        e2e_creds, _RESERVE_CONFIG_GET_TYPE, session_nonce,
+    )
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B -> got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            if log:
+                log(f"{label}: timeout")
+            return None
+
+    def _try(resp: bytes | None, label: str) -> dict | None:
+        if not resp:
+            return None
+        decrypted = decrypt_response(
+            resp, e2e_creds["chat_secret"],
+            payload_validator=_is_reserve_config_payload,
+            # Benign relay frames are not reserve-config payloads; silence the
+            # per-call decrypt failure flood.
+            silent=True,
+        )
+        if log:
+            log(f"0x5B {label}: " + (
+                f"{len(decrypted)}B = {decrypted.hex()}" if decrypted
+                else "did not decrypt / failed validation"))
+        return _parse_reserve_config(decrypted)
+
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+
+        result = _try(_send(sub_pkt, "Subscribe(0x5B)"), "subscribe response")
+        if result is not None:
+            return result
+
+        # The first response may not be the right type; try a few more.
+        for i in range(5):
+            try:
+                resp, _ = sock.recvfrom(4096)
+            except socket.timeout:
+                break
+            result = _try(resp, f"drained frame {i + 1}")
+            if result is not None:
+                return result
+
+        if log:
+            log("read_reserve_mode_config: no frame validated as a 0x5B response")
+        return None
+    finally:
+        sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Scheduled-mode hour actions
+# ---------------------------------------------------------------------------
+#
+# A scheduled-mode hour carries a target percentage, not an on/off flag:
+#
+#     0         neither charge nor discharge
+#     1..100    charge up to N%
+#     0x80      no setting
+#     129..255  discharge down to (256-N)%
+#     101..127  not a valid value
+#
+# Verified live against the battery: five hours were each set to a different
+# option in the app and read back from opcode 0x18 with smart=25, emergency=10,
+# giving 100, 25, 10, 231, 246. Writing the same five back reproduced those bytes
+# and the app agreed.
+
+SLOT_NEITHER = 0
+SLOT_UNSET = 0x80
+SLOT_MAX_CHARGE = 100
+SLOT_MIN_DISCHARGE_RAW = 129
+
+ACTION_NEITHER = "neither"
+ACTION_CHARGE_TO_EMERGENCY = "charge_to_emergency"
+ACTION_CHARGE_TO_SMART = "charge_to_smart"
+ACTION_CHARGE_TO_FULL = "charge_to_full"
+ACTION_DISCHARGE_TO_SMART = "discharge_to_smart"
+ACTION_DISCHARGE_TO_EMERGENCY = "discharge_to_emergency"
+
+#: The five options the app offers, plus "neither".
+SCHEDULE_ACTIONS = (
+    ACTION_NEITHER,
+    ACTION_CHARGE_TO_EMERGENCY,
+    ACTION_CHARGE_TO_SMART,
+    ACTION_CHARGE_TO_FULL,
+    ACTION_DISCHARGE_TO_SMART,
+    ACTION_DISCHARGE_TO_EMERGENCY,
+)
+
+
+def charge_to_slot(pct: int) -> int:
+    """Wire value for "charge up to *pct*%"."""
+    if not 1 <= pct <= SLOT_MAX_CHARGE:
+        raise ValueError(f"A charge target must be 1-{SLOT_MAX_CHARGE}%, got {pct}.")
+    return pct
+
+
+def discharge_to_slot(pct: int) -> int:
+    """Wire value for "discharge down to *pct*%"."""
+    if not 1 <= pct <= SLOT_MAX_CHARGE:
+        raise ValueError(f"A discharge target must be 1-{SLOT_MAX_CHARGE}%, got {pct}.")
+    return 256 - pct
+
+
+def encode_slot(action: str | int, smart_pct: int, emergency_pct: int) -> int:
+    """Resolve one hour's action to its wire value.
+
+    *action* is either one of :data:`SCHEDULE_ACTIONS`, or an int: positive means
+    "charge up to N%", negative means "discharge down to N%".
+
+    The symbolic actions resolve against *smart_pct* / *emergency_pct*, which must
+    be the values going out in the SAME 0x19 write — not whatever the device holds
+    now. A write that changes the battery range and uses symbolic targets in the
+    same command must encode against the new range: verified live, where setting
+    80/20 encoded charge_to_smart as 80 rather than the device's previous 25.
+    """
+    if isinstance(action, bool):
+        raise ValueError(f"Invalid hour action: {action!r}")
+
+    if isinstance(action, int):
+        if action == 0:
+            return SLOT_NEITHER
+        return charge_to_slot(action) if action > 0 else discharge_to_slot(-action)
+
+    if action == ACTION_NEITHER:
+        return SLOT_NEITHER
+    if action == ACTION_CHARGE_TO_EMERGENCY:
+        return charge_to_slot(emergency_pct)
+    if action == ACTION_CHARGE_TO_SMART:
+        return charge_to_slot(smart_pct)
+    if action == ACTION_CHARGE_TO_FULL:
+        return charge_to_slot(100)
+    if action == ACTION_DISCHARGE_TO_SMART:
+        return discharge_to_slot(smart_pct)
+    if action == ACTION_DISCHARGE_TO_EMERGENCY:
+        return discharge_to_slot(emergency_pct)
+
+    raise ValueError(
+        f"Unknown hour action {action!r}; expected one of {SCHEDULE_ACTIONS}, "
+        "or an int (positive = charge to N%, negative = discharge to N%)."
+    )
+
+
+def encode_schedule_day(hour_actions: dict, smart_pct: int, emergency_pct: int) -> list[int]:
+    """Build 24 wire values from an ``{hour: action}`` mapping.
+
+    Hours not present are :data:`SLOT_NEITHER`.
+    """
+    slots = [SLOT_NEITHER] * 24
+    for hour, action in (hour_actions or {}).items():
+        hour = int(hour)
+        if not 0 <= hour <= 23:
+            raise ValueError(f"Hour must be 0-23, got {hour}.")
+        slots[hour] = encode_slot(action, smart_pct, emergency_pct)
+    return slots
+
+
+def describe_slot(raw: int, smart_pct: int, emergency_pct: int) -> str:
+    """Human description of a wire value, naming the symbolic target when it matches."""
+    if raw == SLOT_NEITHER:
+        return "neither"
+    if raw == SLOT_UNSET:
+        return "unset"
+
+    if 1 <= raw <= SLOT_MAX_CHARGE:
+        if raw == 100:
+            return "charge to 100%"
+        if raw == smart_pct:
+            return f"charge to smart ({raw}%)"
+        if raw == emergency_pct:
+            return f"charge to emergency ({raw}%)"
+        return f"charge to {raw}%"
+
+    if raw >= SLOT_MIN_DISCHARGE_RAW:
+        pct = 256 - raw
+        if pct == smart_pct:
+            return f"discharge to smart ({pct}%)"
+        if pct == emergency_pct:
+            return f"discharge to emergency ({pct}%)"
+        return f"discharge to {pct}%"
+
+    return f"invalid (0x{raw:02X})"
+
+
+def decode_schedule_day(slots: list[int], smart_pct: int, emergency_pct: int) -> dict:
+    """``{hour: description}`` for every hour that is not "neither"."""
+    return {
+        hour: describe_slot(raw, smart_pct, emergency_pct)
+        for hour, raw in enumerate(slots)
+        if raw != SLOT_NEITHER
+    }

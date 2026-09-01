@@ -170,6 +170,89 @@ backfill_solar:
           max: 90
           step: 1
 
+set_scheduled_mode:
+  name: Set scheduled mode
+  description: >
+    Switch the battery to Scheduled mode and write the hourly schedule
+    (E2E opcode 0x19). An hour carries a target percentage, not an on/off
+    flag, so each hour is set to one of six actions.
+  fields:
+    weekday_hours:
+      name: Weekday hours
+      description: >
+        Map of hour (0-23) to action. Actions: neither, charge_to_emergency,
+        charge_to_smart, charge_to_full, discharge_to_smart,
+        discharge_to_emergency. An integer also works - positive charges up to
+        N%, negative discharges down to N%. Hours left out are "neither".
+        The named actions follow the battery range, so they stay correct when
+        that range changes.
+      example: "{1: charge_to_full, 2: charge_to_smart, 18: discharge_to_emergency}"
+      selector:
+        object:
+    weekend_hours:
+      name: Weekend hours
+      description: >
+        Same format as weekday_hours. Only has an effect when sync is off -
+        with sync on the battery discards the weekend schedule and uses the
+        weekday one for every day.
+      example: "{9: discharge_to_smart, 10: discharge_to_smart}"
+      selector:
+        object:
+    sync:
+      name: Sync weekday/weekend
+      description: >
+        On: the battery ignores weekend_hours and applies the weekday schedule
+        to the whole week. Off: weekday and weekend are stored separately.
+      default: true
+      selector:
+        boolean:
+    smart_pct:
+      name: Smart reserve %
+      description: >
+        Upper SoC threshold. Leave empty to keep the battery's current setting -
+        opcode 0x19 always carries this value, so it is read from the device
+        rather than defaulted. When set, charge_to_smart and discharge_to_smart
+        in the same call resolve to this new value.
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    emergency_pct:
+      name: Emergency reserve %
+      description: >
+        Lower SoC threshold. Leave empty to keep the battery's current setting.
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    weekdays:
+      name: Weekday charge hours (deprecated)
+      description: >
+        Deprecated. List of hours to charge, all to the same charge_pct target.
+        Cannot express discharge or per-hour targets; use weekday_hours instead.
+      example: "[0, 1, 2, 3, 4, 5]"
+      selector:
+        object:
+    weekend:
+      name: Weekend charge hours (deprecated)
+      description: Deprecated. Use weekend_hours instead.
+      example: "[0, 1, 2, 3, 4, 5]"
+      selector:
+        object:
+    charge_pct:
+      name: Charge target % (deprecated)
+      description: >
+        Deprecated. The charge target used for every hour listed in the
+        weekdays/weekend lists.
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+
 set_battery_range:
   name: Set AI Battery Range
   description: >

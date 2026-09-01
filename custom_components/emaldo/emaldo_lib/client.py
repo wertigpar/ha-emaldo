@@ -1559,3 +1559,55 @@ class EmaldoClient:
         """
         creds = self.e2e_login(home_id, device_id, model)
         return _e2e.get_manual_selling(creds, log=log)
+
+    # ── Scheduled mode (reserve mode) ────────────────────────────────
+
+    def get_schedule_mode(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        *,
+        log: Callable[..., None] | None = None,
+    ) -> dict | None:
+        """Read the scheduled mode configuration via E2E (opcode 0x18).
+
+        Returns a dict with ``smart``, ``emergency``, ``weekday_slots``,
+        ``weekend_slots``, ``sync``, ``full_charge``, ``enable``; or *None*.
+        """
+        creds = self.e2e_login(home_id, device_id, model)
+        return _e2e.read_schedule_mode(creds, log=log)
+
+    def set_reserve_mode(
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        reserve_mode: int,
+        weekday_slots: list[int] | None = None,
+        weekend_slots: list[int] | None = None,
+        *,
+        smart_pct: int,
+        emergency_pct: int,
+        sync: bool = False,
+        enable: int = 0,
+        log: Callable[..., None] | None = None,
+    ) -> bool:
+        """Set the battery reserve mode via E2E (opcode 0x19).
+
+        Args:
+            reserve_mode: 1=priceTracking, 2=scheduled, 3=aiAdapter.
+            weekday_slots: 24 wire values for Mon–Fri. An hour carries a target
+                percentage, not a flag — see ``e2e.encode_slot``.
+            weekend_slots: 24 wire values for Sat–Sun.
+            smart_pct: Smart battery % (high marker). Required, with no default:
+                opcode 0x19 carries it on every write, so a default would
+                overwrite the battery's current range.
+            emergency_pct: Emergency battery % (low marker). As *smart_pct*.
+        """
+        creds = self.e2e_login(home_id, device_id, model)
+        return _e2e.set_reserve_mode(
+            creds, reserve_mode, weekday_slots, weekend_slots,
+            smart_pct=smart_pct, emergency_pct=emergency_pct,
+            sync=sync, enable=enable, log=log,
+        )
