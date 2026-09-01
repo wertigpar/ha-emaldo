@@ -1,5 +1,27 @@
 # Changes
 
+## v1.0.0-beta31
+
+### Fixed
+
+- **Phantom Water Sensors created on multi-cabinet installs (issue #63,
+  report + fix from Falconlord68).** With a 2-cabinet device, the accessory
+  scan (type 0x0D probe loop in `read_accessories`) probed a fixed range of
+  cabinet indices 0–3 and registered 4 Water Sensors even though only 2
+  cabinets physically exist; cabinets 3 and 4 simply duplicated cabinet 2's
+  data. The previous guard accepted a reply only when its reported index
+  matched the probed index — but the device *echoes the probed index* for
+  every probe, including replies for non-existent cabinets, so the
+  index-only check could not distinguish real from phantom. The reliable
+  discriminator is the firmware version field: real cabinets reply with a
+  non-empty version (e.g. `0x12`), while phantom replies for absent cabinets
+  carry an all-zero version (`0x00`). The probe loop now also requires the
+  version to contain at least one non-NUL byte before counting a cabinet, so
+  a 2-cabinet device yields exactly `cabinet_count == 2` and only
+  `sensor.emaldo_vattensensor` / `..._skap_2` are created.
+
+- Bump `manifest.json` → `1.0.0-beta31`.
+
 ## v1.0.0-beta30
 
 ### Added

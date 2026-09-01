@@ -1586,11 +1586,17 @@ def read_accessories(
                 state = parse_cabinet_state(dec)
                 # The validator above only constrains water/smoke/fan bytes, so a
                 # relay echo or a reply for a different cabinet index could pass.
-                # The device reports its own cabinet index in the payload — only
-                # accept it when it matches the index we actually probed, so a
-                # single-cabinet device can never drive cabinet_count > 1 (#63).
+                # The device reports its own cabinet index in the payload — but it
+                # ECHOES the index we probed even for cabinets that do not exist,
+                # so an index-only guard cannot tell real from phantom (#63). Real
+                # cabinets reply with a non-empty firmware version (e.g. 0x12);
+                # phantom replies for absent cabinets carry an all-zero version
+                # (0x00). Require a real, non-empty, non-NUL version on top of the
+                # index match, so a phantom reply never inflates cabinet_count.
                 if state is not None and state.get("index") == cidx:
-                    cabinets[cidx] = state
+                    version = state.get("version") or ""
+                    if any(ord(c) != 0 for c in version):
+                        cabinets[cidx] = state
         result["cabinets"] = cabinets
         # Number of cabinets that ACTUALLY replied (drives Water Sensor
         # discovery). Single-cabinet devices report 1, two-cabinet devices 2,
