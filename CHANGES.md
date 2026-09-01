@@ -2,6 +2,34 @@
 
 ## v1.0.0-beta30
 
+### Added
+
+- **Scheduled mode support (PR #65, by jbjakobs).** New
+  `emaldo.set_scheduled_mode` service writing the battery's own hourly
+  schedule over E2E opcode `0x19`. A scheduled-mode hour carries a *target
+  percentage*, not an on/off flag, so each hour is one of `neither`,
+  `charge_to_emergency`, `charge_to_smart`, `charge_to_full`,
+  `discharge_to_smart`, `discharge_to_emergency`, or a raw int (positive
+  charges up to N%, negative discharges down to N%). The named actions
+  resolve against the battery range **being written in the same call**;
+  `smart_pct`/`emergency_pct` are optional and never defaulted — bytes 2–3
+  of every `0x19` write carry the range, so an omitted value is resolved by
+  reading `0x5B` and sent back unchanged. `sync` defaults to `true`.
+  Two new E2E reads back it: `0x18` (`get_schedule_reservemode`, the hourly
+  schedule and battery range) and `0x5B` (`read_reserve_mode_config`, the
+  range plus the current reserve mode — the only read that reports it),
+  exposed on `EmaldoClient` as `get_schedule_mode` and `set_reserve_mode`.
+  Protocol corrections: the schedule lives in `0x18` not `0x46` (which reads
+  back `0x80` for every hour and whose bytes 0–1 are a fixed header), hour
+  values are targets not flags, and `0x5B` is the reserve-mode config, not
+  peak shaving. The `0x18`/`0x5B` payload validators are load-bearing:
+  `decrypt_response` brute-forces the AES IV and every 16-aligned tail
+  offset and returns the first candidate a validator accepts, so the
+  validator *selects* the decryption — they constrain every documented
+  field and require an exact payload length. Docs updated in
+  `README.md` (service reference) and `docs/PROTOCOL.md` (§7.5 corrected,
+  new §7.5b, §8b, §8c).
+
 ### Fixed
 
 - **Fans Pack + Water Sensor sensors show unknown for up to ~100 s after

@@ -227,31 +227,6 @@ set_scheduled_mode:
           min: 0
           max: 100
           unit_of_measurement: "%"
-    weekdays:
-      name: Weekday charge hours (deprecated)
-      description: >
-        Deprecated. List of hours to charge, all to the same charge_pct target.
-        Cannot express discharge or per-hour targets; use weekday_hours instead.
-      example: "[0, 1, 2, 3, 4, 5]"
-      selector:
-        object:
-    weekend:
-      name: Weekend charge hours (deprecated)
-      description: Deprecated. Use weekend_hours instead.
-      example: "[0, 1, 2, 3, 4, 5]"
-      selector:
-        object:
-    charge_pct:
-      name: Charge target % (deprecated)
-      description: >
-        Deprecated. The charge target used for every hour listed in the
-        weekdays/weekend lists.
-      default: 100
-      selector:
-        number:
-          min: 1
-          max: 100
-          unit_of_measurement: "%"
 
 set_battery_range:
   name: Set AI Battery Range
