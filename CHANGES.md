@@ -20,6 +20,18 @@
   a 2-cabinet device yields exactly `cabinet_count == 2` and only
   `sensor.emaldo_vattensensor` / `..._skap_2` are created.
 
+- **ENUM sensors (Fans Pack, Water Sensor) flash unknown briefly on cold
+  start.** The `_RealtimeRestoreSensor` mixin restored the previous reading
+  from the recorder into `_restored_native_value`, and `_cold_start_value()`
+  served it while `coordinator.data` was `None`. But once the first realtime
+  poll completed and `coordinator.data` became a dict, the cold-start path
+  was bypassed — `value_fn(data)` returned `None` (accessories not yet
+  scanned), and the ENUM hold-back at line 859 failed because
+  `_last_valid_native_value` was still `None` (never seeded from the restored
+  value). Fixed by seeding `_last_valid_native_value` from the cold-start
+  value so the hold-back preserves the restored reading across the gap until
+  the accessory scan populates live data.
+
 - Bump `manifest.json` → `1.0.0-beta31`.
 
 ## v1.0.0-beta30

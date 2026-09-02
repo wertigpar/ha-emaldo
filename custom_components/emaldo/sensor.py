@@ -836,7 +836,10 @@ class EmaldoSensor(_RealtimeRestoreSensor, CoordinatorEntity[EmaldoCoordinator])
     def native_value(self) -> Any:
         """Return the sensor value."""
         if self.coordinator.data is None:
-            return self._cold_start_value()
+            val = self._cold_start_value()
+            if val is not None:
+                self._last_valid_native_value = val
+            return val
         value = self.entity_description.value_fn(self.coordinator.data)
         if value is not None:
             self._last_valid_native_value = value
