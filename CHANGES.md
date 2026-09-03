@@ -5,20 +5,25 @@
 ### Fixed
 
 - **Phantom Water Sensors created on multi-cabinet installs (issue #63,
-  report + fix from Falconlord68).** With a 2-cabinet device, the accessory
-  scan (type 0x0D probe loop in `read_accessories`) probed a fixed range of
-  cabinet indices 0–3 and registered 4 Water Sensors even though only 2
-  cabinets physically exist; cabinets 3 and 4 simply duplicated cabinet 2's
-  data. The previous guard accepted a reply only when its reported index
-  matched the probed index — but the device *echoes the probed index* for
-  every probe, including replies for non-existent cabinets, so the
-  index-only check could not distinguish real from phantom. The reliable
-  discriminator is the firmware version field: real cabinets reply with a
-  non-empty version (e.g. `0x12`), while phantom replies for absent cabinets
-  carry an all-zero version (`0x00`). The probe loop now also requires the
-  version to contain at least one non-NUL byte before counting a cabinet, so
-  a 2-cabinet device yields exactly `cabinet_count == 2` and only
-  `sensor.emaldo_vattensensor` / `..._skap_2` are created.
+  report + fix from Falconlord68).** The accessory scan (type 0x0D probe
+  loop in `read_accessories`) probes a fixed range of cabinet indices and
+  registers a Water Sensor per cabinet that replies. Two defense layers:
+  (1) **E2E layer** — the probe loop accepts a reply only when its reported
+  index matches the probed index AND its firmware version contains a
+  non-NUL byte, so all-zero-version phantom replies never count; (2)
+  **coordinator layer (the authoritative guard)** — the relay *reuses real
+  cabinet 0's data* (a valid firmware version, water/smoke/fan, index) when
+  echoing absent cabinet indices, so a pure payload check can still admit a
+  phantom. On a single-cabinet device this produced a bogus
+  `sensor.power_store_water_sensor_cabinet_2`. A cabinet that physically
+  holds a battery module reports its own 0-based `cabinet_index` (parsed in
+  `parse_battery_data`), which the relay cannot fake. The coordinator now
+  only creates a Water Sensor for an extra cabinet N (N>0) when a battery
+  module reports `cabinet_index == N` AND the accessory scan returned a
+  cabinet entry for N. A single-cabinet device (all modules report cabinet
+  1) therefore yields no extra Water Sensor regardless of relay echo; a
+  genuine two-cabinet device still gets its second sensor once a battery
+  module in cabinet 2 has been scanned.
 
 - **ENUM sensors (Fans Pack, Water Sensor) flash unknown briefly on cold
   start.** The `_RealtimeRestoreSensor` mixin restored the previous reading

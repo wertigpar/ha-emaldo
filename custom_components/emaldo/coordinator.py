@@ -2640,16 +2640,39 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     accessories.get("cabinet"),
                     sorted(accessories.get("inverters", {})),
                 )
-                # Register Water Sensors for any additional cabinets beyond
-                # the first (multi-cabinet installs, issue #63). Cabinet 0 is
+                # Register Water Sensors for any ADDITIONAL cabinets beyond the
+                # first (multi-cabinet installs, issue #63). Cabinet 0 is
                 # created at sensor setup; this adds cabinet 1+ on discovery.
                 # ``water_async_add``/``water_cabinets_created`` live on the
                 # per-device item (set in sensor.async_setup_entry), so find the
                 # item whose realtime coordinator *is* this one — looking up the
                 # entry-level dict by entry_id returns None, which silently
                 # skipped registration (fixed here).
-                cabinet_count = accessories.get("cabinet_count") or 0
-                if cabinet_count > 1:
+                #
+                # PHANTOM-GUARD (issue #63): a cabinet that physically holds a
+                # battery module reports its 0-based ``cabinet_index`` (parsed
+                # in ``parse_battery_data``). The relay reuses real cabinet 0's
+                # data (version, water/smoke/fan, index) when echoing phantom
+                # cabinet indices, so the accessory ``cabinet_count`` alone
+                # cannot distinguish a real second cabinet from a phantom one.
+                # A battery module CAN: only cabinets that actually hold a
+                # battery module may receive a Water Sensor. This is the single
+                # un-spoofable ground truth in the protocol. If no battery
+                # modules have been scanned yet (cold start), the set is empty
+                # and no extra cabinets are created until a battery scan lands;
+                # that is the safe default (never create a phantom).
+                battery_cabinets = {
+                    m.get("cabinet_index")
+                    for m in self._battery_module_slots.values()
+                    if isinstance(m.get("cabinet_index"), int)
+                }
+                relay_cabinets = set(accessories.get("cabinets", {}).keys())
+                confirmed_cabinets = battery_cabinets & relay_cabinets
+                # Cabinet 0 is created at setup and needs no confirmation; only
+                # N>0 (a genuine second+ cabinet) requires battery proof.
+                confirmed_cabinets.discard(0)
+                confirmed_cabinets.discard(None)
+                if confirmed_cabinets:
                     entry_data = self.hass.data.get(DOMAIN, {}).get(
                         self.config_entry.entry_id
                     )
@@ -2667,7 +2690,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         from .sensor import add_water_sensors_for_cabinets
 
                         add_water_sensors_for_cabinets(
-                            self, cabinet_count, add_cb, created
+                            self, confirmed_cabinets, add_cb, created
                         )
             else:
                 _LOGGER.debug(

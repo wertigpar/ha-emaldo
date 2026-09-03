@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Iterable
 
 from homeassistant.components.sensor import (
     RestoreSensor,
@@ -615,17 +615,23 @@ WATER_SENSOR_DESCRIPTION = _water_sensor_description(0)
 
 def add_water_sensors_for_cabinets(
     realtime_coordinator: EmaldoRealtimeCoordinator,
-    cabinet_count: int,
+    cabinet_indices: Iterable[int],
     async_add_entities: AddEntitiesCallback,
     created: set[int],
 ) -> None:
-    """Create + register Water Sensors for cabinets 1..cabinet_count-1.
+    """Create + register Water Sensors for confirmed extra cabinets.
 
-    Called from the realtime coordinator once an accessory scan reveals more
-    than one cabinet. ``created`` tracks which cabinet indices already have an
-    entity so each is added exactly once.
+    Called from the realtime coordinator once an accessory scan reveals
+    cabinets beyond the first *and* the cabinets are corroborated by
+    battery-module ground truth (a real extra cabinet must physically hold a
+    battery module). ``cabinet_indices`` is the set of 0-based cabinet indices
+    (excluding 0, which is created at setup) that are confirmed to exist.
+    ``created`` tracks which cabinet indices already have an entity so each is
+    added exactly once. Cabinet 0 is never created here.
     """
-    for cidx in range(1, min(WATER_SENSOR_MAX_CABINETS, cabinet_count)):
+    for cidx in cabinet_indices:
+        if cidx <= 0 or cidx >= WATER_SENSOR_MAX_CABINETS:
+            continue
         if cidx in created:
             continue
         async_add_entities([EmaldoSensor(realtime_coordinator, _water_sensor_description(cidx))])
