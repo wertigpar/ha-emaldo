@@ -2566,6 +2566,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     "Battery module info poll returned no modules; retaining cached_modules=%d",
                     cached_count,
                 )
+                # Re-arm so the next successful poll retries the scan instead
+                # of waiting the full 60-poll gate with stale/empty data.
+                self._battery_modules_poll_counter = 59
             # Notify listeners so battery-module sensors reflect the new data.
             self.async_update_listeners()
         except EmaldoConnectionError as err:
@@ -2575,8 +2578,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "retaining cached modules: %s",
                 err,
             )
+            # Re-arm so the next successful poll retries the scan.  The
+            # cadence stays safe: still gated by 60-poll (~10 min) intervals
+            # on recovered polls — this only avoids the extra-long wait when
+            # the cold-start scan fails during a rejection storm.
+            self._battery_modules_poll_counter = 59
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
+            self._battery_modules_poll_counter = 59
 
     def _read_accessories_standalone(self) -> dict | None:
         """Read accessory state (fans + water sensor) on a one-shot session.
@@ -2696,6 +2705,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 _LOGGER.debug(
                     "Accessory state poll returned no data; retaining previous state"
                 )
+                # Re-arm so the next successful poll retries the scan.
+                self._accessories_poll_counter = 9
             self.async_update_listeners()
         except EmaldoConnectionError as err:
             _LOGGER.debug(
@@ -2703,8 +2714,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "retaining previous state: %s",
                 err,
             )
+            # Re-arm so the next successful poll retries the scan.  Same
+            # safety note as battery modules: the 10-poll (~100 s) cadence
+            # on recovered polls prevents backend hammering.
+            self._accessories_poll_counter = 9
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Accessory state read failed: %s", err, exc_info=True)
+            self._accessories_poll_counter = 9
 
     @property
     def regulate_frequency(self) -> dict | None:

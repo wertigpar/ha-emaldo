@@ -39,6 +39,34 @@
 
 - Bump `manifest.json` → `1.0.0-beta31`.
 
+- **Battery module sensors absent/unavailable after a cold restart during a
+  relay rejection storm (no version bump).** The standalone one-shot E2E
+  sessions for the battery-module scan and accessory scan are vulnerable to
+  backend/relay rejection (flapping 1–5 min, 990+ transitions on 2026-09-02).
+  A cold restart inside such a window leaves `_battery_module_slots = {}`, so
+  `_maybe_add_battery_modules` never created the module sensors and they
+  stayed absent (not merely unknown) until a later scan succeeded. Two-layer
+  fix, mirroring the `_RealtimeRestoreSensor` hold-back philosophy from the
+  previous entry:
+  - **Eager registration (sensor.py):** on setup, `async_setup_entry` now
+    derives slot indices the entity registry already knows
+    (`<base>_module_slot_<N>_<metric>` unique_ids) and registers module
+    sensors for `slots ∪ registry_known_slots`. A physical slot scanned in a
+    prior run survives a cold-start scan failure and can serve restored
+    readings instead of vanishing. Registry-derived slots are guarded by
+    `config_entry_id` + domain, and `slots.get(slot_index)` guards the loop so
+    a registry-derived slot not present in the live scan cannot KeyError.
+  - **Value hold-back (sensor.py):** `EmaldoBatteryModuleSensor.native_value`
+    now returns `_cold_start_value() or _restored_native_value` when the live
+    module is absent — bridging the "power flow up, module scan pending" gap
+    so the entity reports its last-known reading rather than going blank.
+  - **Scan retry / backoff (coordinator.py):** `_async_scan_battery_modules`
+    and `_async_scan_accessories` re-arm their poll counters (59 / 9) when the
+    scan returns empty, raises `EmaldoConnectionError`, or fails generically.
+    The next successful poll retries immediately instead of waiting the full
+    60-poll (~10 min) / 10-poll (~100 s) gate with stale or empty data. The
+    cadence on recovered polls stays gated, so the backend is not hammered.
+
 ## v1.0.0-beta30
 
 ### Added

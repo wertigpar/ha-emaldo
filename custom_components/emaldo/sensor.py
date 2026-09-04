@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -748,16 +749,42 @@ async def async_setup_entry(
             new_entities: list[SensorEntity] = []
             ent_reg = er.async_get(hass)
             base = _uid_base(realtime)
-            for slot_index in sorted(slots):
+
+            # Discover slot indices that the entity registry already knows from
+            # a prior successful scan.  On a cold restart during a relay
+            # rejection storm the live battery-module scan may fail, leaving
+            # `slots` empty, but entities registered in a previous run still
+            # exist in the registry with unique_ids of the form
+            # "<base>_module_slot_<N>_<metric>".  We re-create sensors for
+            # those slots so they can serve restored readings immediately
+            # instead of appearing absent/unavailable until the scan succeeds.
+            registry_slot_pattern = re.compile(
+                rf"^{re.escape(base)}_module_slot_(\d+)_"
+            )
+            registry_known_slots: set[int] = set()
+            for reg_entry in ent_reg.entities.values():
+                if reg_entry.domain != DOMAIN or reg_entry.config_entry_id != entry.entry_id:
+                    continue
+                m = registry_slot_pattern.match(reg_entry.unique_id)
+                if m is not None:
+                    registry_known_slots.add(int(m.group(1)))
+
+            for slot_index in sorted(set(slots) | registry_known_slots):
                 if slot_index in registered:
                     continue
                 registered.add(slot_index)
+                is_registry_known = slot_index not in slots
+                if is_registry_known:
+                    _LOGGER.debug(
+                        "Battery module slot %d registry-derived, pending live scan",
+                        slot_index,
+                    )
                 # Migrate pre-beta12a serial-based unique_ids to the slot-based
                 # scheme so existing entities keep their history/dashboards
                 # instead of being recreated (#43). The serial->slot mapping is
                 # only known after a live scan, which is why this runs here
                 # rather than in async_migrate_entry.
-                serial = (slots[slot_index] or {}).get("serial")
+                serial = (slots.get(slot_index) or {}).get("serial")
                 for metric in _BATTERY_MODULE_METRIC_CONFIG:
                     if serial:
                         old_uid = f"{base}_module_{serial}_{metric}"
@@ -1601,7 +1628,13 @@ class EmaldoBatteryModuleSensor(
         """Return the metric value for the module in this slot."""
         module = self._module_for_slot()
         if module is None:
-            return self._cold_start_value()
+            # During a relay rejection storm the standalone battery-module scan
+            # may fail while the realtime power-flow stream is healthy.  The
+            # module scan lags behind the first successful refresh, so
+            # _cold_start_value() returns None (first refresh already landed).
+            # Fall back to the restored reading so the entity reports its
+            # last-known value rather than going blank.
+            return self._cold_start_value() or self._restored_native_value
         if self._metric == "serial":
             return module.get("serial") or None
         if self._metric == "position":
