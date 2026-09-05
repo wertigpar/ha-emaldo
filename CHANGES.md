@@ -39,6 +39,20 @@
 
 - Bump `manifest.json` → `1.0.0-beta31`.
 
+- **Fans Pack sensors stuck `unknown` on three-phase installs (accessory-scan
+  starvation, no version bump).** The persistent-socket accessory scan
+  (`read_accessories_state`) shares one `max_duration` budget across all its
+  probe loops, and every probe whose first datagram fails its payload
+  validator (typically a subscription ACK) burns a follow-up `recvfrom` wait
+  of up to ~1.5 s — a stall of ~2.1 s worst case per probe. With the 0x04
+  InverterInfo loop added late and 0x0D cabinet probes running first, a 6.0 s
+  budget was consumed by the 0x0E/0x0D probes and four ~2.1 s cabinet stalls
+  before the very first InverterInfo iteration, so the fan/smoke/water
+  descriptors stayed `unknown` all day. Fixed two ways: probe order reversed
+  to InverterInfo (0x04) first — value-critical probes run before cheap or
+  discovery probes — and `max_duration` raised from 6.0 s to 12.0 s, with
+  every loop re-checking the budget before each probe.
+
 - **Battery module sensors absent/unavailable after a cold restart during a
   relay rejection storm (no version bump).** The standalone one-shot E2E
   sessions for the battery-module scan and accessory scan are vulnerable to

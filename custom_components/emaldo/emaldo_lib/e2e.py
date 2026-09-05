@@ -4925,6 +4925,146 @@ class PersistentE2ESession:
             return None
         return parse_regulate_frequency_state(decrypted)
 
+    def read_accessories_state(self, inverters: int = 3, *, max_duration: float = 12.0) -> dict | None:
+        """Read PowerStation accessory state (fans + water sensor) over the session.
+
+        Runs the 0x0E / 0x0D / 0x04 probes on the persistent realtime socket
+        (reusing the established nonce/creds, no Alive/Wake/Heartbeat) so a
+        probe never supersedes or expires the realtime session.  Each probe
+        takes the session lock only for its own send/receive, letting the
+        stream keepalive/receiver interleave.
+
+        Returns a dict with ``cabinet_count``, ``cabinets``, ``cabinet`` and
+        ``inverters`` — same shape as the free ``read_accessories`` — or *None*
+        if nothing was read / the session expired.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+
+        class _Expired(Exception):
+            pass
+
+        started = time.perf_counter()
+        cabinets: dict[int, dict] = {}
+        inverters_dict: dict[int, dict] = {}
+
+        def _probe(label: str, pkt: bytes, validate) -> bytes | None:
+            """Send one request under the lock; return decrypted payload or None.
+
+            Raises ``_Expired`` when the relay reports session expiry (21204);
+            the caller aborts the whole scan (stream reconnect machinery owns
+            recovery here — never handshake inside a probe).
+            """
+            with self._lock:
+                if self._sock is None or self._closed:
+                    return None
+                prev_timeout = self._sock.gettimeout()
+                self._sock.settimeout(min(self._timeout, 1.5))
+                try:
+                    resp = self._send_raw(pkt, label)
+                    if resp is None:
+                        return None
+                    if self._is_session_expired(resp):
+                        raise _Expired()
+                    try:
+                        decrypted = decrypt_response(
+                            resp, self._creds["chat_secret"],
+                            payload_validator=validate, silent=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        decrypted = None
+                    if decrypted is None:
+                        # First datagram may be a subscription ACK — follow-up.
+                        try:
+                            resp2, _ = self._sock.recvfrom(4096)
+                            if self._is_session_expired(resp2):
+                                raise _Expired()
+                            try:
+                                decrypted = decrypt_response(
+                                    resp2, self._creds["chat_secret"],
+                                    payload_validator=validate, silent=True,
+                                )
+                            except Exception:  # noqa: BLE001
+                                decrypted = None
+                        except socket.timeout:
+                            pass
+                    return decrypted
+                finally:
+                    self._sock.settimeout(prev_timeout)
+
+        if self._log:
+            self._log(f"Accessories scan start: inverters={inverters}")
+
+        try:
+            # 1) Inverter info per index (0x04).
+            for idx in range(max(1, inverters)):
+                if time.perf_counter() - started > max_duration:
+                    break
+                pkt = build_subscription_packet(
+                    self._creds, _INVERTER_INFO_TYPE, self._session_nonce,
+                    payload=bytes([idx]), request_mode=True,
+                )
+                dec = _probe(
+                    f"InverterInfo(idx={idx})", pkt,
+                    lambda p: len(p) >= 19 and p[0] in (0, 1, 2),
+                )
+                if dec is None:
+                    continue
+                info = parse_inverter_info(dec)
+                if info is not None:
+                    inverters_dict[idx] = info
+
+            # 2) Per-cabinet state (0x0D, bounded indices) + phantom guard #63.
+            for cidx in range(ACCESSORY_MAX_CABINETS):
+                if time.perf_counter() - started > max_duration:
+                    break
+                pkt = build_subscription_packet(
+                    self._creds, _CABINET_STATE_TYPE, self._session_nonce,
+                    payload=bytes([cidx]), request_mode=True,
+                )
+                dec = _probe(
+                    f"CabinetState(idx={cidx})", pkt,
+                    lambda p: len(p) >= 5 and p[0] in (0, 1) and p[1] in (0, 1)
+                    and p[2] in (0, 1, 2),
+                )
+                if dec is None:
+                    continue
+                state = parse_cabinet_state(dec)
+                if state is not None and state.get("index") == cidx:
+                    version = state.get("version") or ""
+                    if any(ord(c) != 0 for c in version):
+                        cabinets[cidx] = state
+
+            # 3) Cabinet allinfo (0x0E, empty payload). Result unused — only a
+            #    bounded probe set; NEVER drives discovery (see read_accessories).
+            if time.perf_counter() - started <= max_duration:
+                _probe(
+                    "CabinetAllInfo",
+                    build_subscription_packet(
+                        self._creds, _CABINET_ALLINFO_TYPE, self._session_nonce,
+                        payload=b"", request_mode=True,
+                    ),
+                    lambda p: len(p) >= 1,
+                )
+        except _Expired:
+            return None
+        except Exception:  # noqa: BLE001 - best-effort scan
+            pass
+
+        if not cabinets and not inverters_dict:
+            return None
+        if self._log:
+            self._log(
+                f"Accessories scan complete: cabinets={len(cabinets)} "
+                f"inverters={len(inverters_dict)}"
+            )
+        return {
+            "cabinet_count": len(cabinets),
+            "cabinets": cabinets,
+            "cabinet": cabinets.get(0),
+            "inverters": inverters_dict,
+        }
+
     def _try_parse_power_flow(self, resp: bytes, chat_secret: str | None = None) -> dict | None:
         """Decrypt+parse a response as a power flow payload. Returns None on mismatch.
 

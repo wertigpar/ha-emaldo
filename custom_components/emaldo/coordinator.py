@@ -44,8 +44,6 @@ from .emaldo_lib.e2e import (
     _SELLING_PROTECTION_SET_TYPE,
     _VIRTUALPOWERPLANT_SET_TYPE,
     _build_vpp_payload,
-    read_battery_info as _standalone_read_battery_info,
-    read_accessories as _standalone_read_accessories,
     read_power_flow as _standalone_read_power_flow,
 )
 
@@ -1772,56 +1770,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
 
     def _read_battery_info_standalone(self) -> list[dict]:
-        """Read per-module battery info on a throwaway one-shot E2E session.
+        """Read per-module battery info (0x06) over the persistent session.
 
-        The 0x06 scan probes up to 13 cabinet slots, each with its own
-        request/response round trip.  Running it on the persistent realtime
-        socket would hold the session lock for tens of seconds, starving the
-        keepalive task (7 s) and letting the relay drop the realtime session
-        (#37).  Opening a dedicated socket that is torn down immediately after
-        the scan keeps the realtime session healthy.
+        Session-method read_battery_info already exists (e2e.py) and probes
+        tiered slot indices with consecutive-timeout abort.  Option A (2026):
+        no more one-shot Alive session superseding the realtime session.
         """
-        client = self._parent._ensure_client()  # noqa: SLF001 - intended
-        home_id = self._parent.home_id
-        device_id = self._parent._device_id  # noqa: SLF001
-        model = self._parent._model  # noqa: SLF001
-        if device_id is None or model is None:
+        session = self._session
+        if session is None or session.closed:
             return self._battery_modules
-
-        import time as _time
-        # Serial -> slot map from prior scans so a stray late datagram (a module
-        # whose rightful slot timed out this round) cannot be misassigned to the
-        # slot it leaked into (#44).
-        known_serial_slots = {
-            m["serial"]: slot
-            for slot, m in self._battery_module_slots.items()
-            if m.get("serial")
-        }
-        for attempt in range(2):
-            try:
-                creds = client.get_e2e_credentials(
-                    home_id, device_id, model, force_refresh=(attempt > 0)
-                )
-                return _standalone_read_battery_info(
-                    creds,
-                    known_serial_slots=known_serial_slots,
-                    log=lambda msg: _LOGGER.debug("[E2E battery] %s", msg),
-                )
-            except EmaldoAuthError:
-                # Token/session may have expired between polls.
-                self._parent._reset_client()  # noqa: SLF001
-                if attempt == 0:
-                    continue
-                raise
-            except EmaldoConnectionError:
-                # Short cloud/API disconnect — rebuild client once and retry.
-                self._parent._reset_client()  # noqa: SLF001
-                if attempt == 0:
-                    _time.sleep(1)
-                    continue
-                raise
-
-        return self._battery_modules
+        return session.read_battery_info()
 
     #: Tolerate this many consecutive empty reads before surfacing unavailable.
     _MAX_EMPTY_READS = 3
@@ -2588,45 +2546,18 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._battery_modules_poll_counter = 59
 
     def _read_accessories_standalone(self) -> dict | None:
-        """Read accessory state (fans + water sensor) on a one-shot session.
+        """Read accessory state (fans + water sensor) over the persistent session.
 
-        Mirrors :meth:`_read_battery_info_standalone`: the accessory probes
-        run on a dedicated throwaway UDP socket so the persistent realtime
-        session is never held busy (keepalive starvation, #37).
+        Option A (2026): runs on the realtime session socket under per-probe
+        lock instead of a throwaway one-shot UDP session — the one-shot Alive
+        superseded the realtime session and caused 21204 expiry storms on the
+        stream.
         """
-        client = self._parent._ensure_client()  # noqa: SLF001 - intended
-        home_id = self._parent.home_id
-        device_id = self._parent._device_id  # noqa: SLF001
-        model = self._parent._model  # noqa: SLF001
-        if device_id is None or model is None:
+        session = self._session
+        if session is None or session.closed:
             return None
-
-        import time as _time
-        # App's L8.isThreePhase(): one fan pack per inverter phase.
-        inverters = 3 if model in THREE_PHASE_MODELS else 1
-        for attempt in range(2):
-            try:
-                creds = client.get_e2e_credentials(
-                    home_id, device_id, model, force_refresh=(attempt > 0)
-                )
-                return _standalone_read_accessories(
-                    creds,
-                    inverters=inverters,
-                    log=lambda msg: _LOGGER.debug("[E2E accessories] %s", msg),
-                )
-            except EmaldoAuthError:
-                self._parent._reset_client()  # noqa: SLF001
-                if attempt == 0:
-                    continue
-                raise
-            except EmaldoConnectionError:
-                self._parent._reset_client()  # noqa: SLF001
-                if attempt == 0:
-                    _time.sleep(1)
-                    continue
-                raise
-
-        return None
+        inverters = 3 if self.device_model in THREE_PHASE_MODELS else 1
+        return session.read_accessories_state(inverters=inverters)
 
     async def _async_scan_accessories(self) -> None:
         """Run the 0x0E/0x0D/0x04 accessory scan off the realtime poll path.

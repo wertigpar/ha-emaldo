@@ -286,9 +286,12 @@ session.
 | Type | Mode | Direction | Payload | Response |
 |------|------|-----------|---------|----------|
 | `0x01` | `0xA0` | Write | `[on u8, start u32le, end u32le]` 9B (zeros=cancel) | ACK 161B |
+| `0x04` | `0x10` | Read | `[inverter_idx u8]` 1B | InverterInfo ≥19B (§7.11) |
 | `0x05` | `0xA0` | Write | `[on u8, len u8, user_id utf8]` | set_virtualpowerplant – Sell Back to Grid (fire-and-forget; user_id required for auth) |
 | `0x06` | `0x10` | Read | `[cabinet_idx u8]` 1B | Battery info ≥80B |
 | `0x06` | `0xA0` | Subscribe | (empty) | get_virtualpowerplant – sell-back state 1B |
+| `0x0D` | `0x10` | Read | `[cabinet_idx u8]` 1B | CabinetState ≥5B (§7.12) |
+| `0x0E` | `0x10` | Read | (empty) | CabinetAllInfo — first byte NOT a reliable count; never drives discovery |
 | `0x1A` | `0xA0` | Write | Override payload (see §4.7) | ACK 161B |
 | `0x1B` | `0xA0` | Subscribe | (empty) | Override state (see §7.2) |
 | `0x20` | `0xA0` | Subscribe | (empty) | EV charging mode 6B |
@@ -469,6 +472,42 @@ The write command (`0x5E`) payload format is **different** — it does **not** i
 byte 0:   on              (1=enable protection, 0=disable)
 bytes 1–4: threshold_kwh  (LE u32; daily kWh cap; 0 = safe default)
 ```
+
+### 7.11 Inverter Info (`0x04`, ≥19 bytes, request mode `0x10`)
+
+Parsed by `parse_inverter_info` (e2e.py). Layout per `sd/v0.smali` in the app.
+
+| Offset | Type | Field | Notes |
+|--------|------|-------|-------|
+| 0 | `u8` | `state` | raw inverter state stateValue |
+| 1–2 | `u16le` | `battery_exceptions` | bitmap |
+| 3–4 | `u16le` | `inverter_exceptions` | bitmap |
+| 5–6 | `u16le` | `grid_exceptions` | bitmap |
+| 7–8 | `u16le` | `system_exceptions` | bitmap; bit 12 = Fan fault → SystemException code 13 |
+| 9–10 | `u16le` | `mppt_exceptions` | bitmap |
+| 11–12 | `u16le` | `present_exceptions` | bitmap |
+| 13–14 | `u16le` | `dc_exceptions` | bitmap |
+| 15 | `u8` len + N | `id_info` | ASCII |
+| var | `u8` len + M | `version` | firmware version, ASCII |
+| var | `u8` | `fan_state` | raw 0 = stopped, 1 = running → FanState 1=STOP, 2=RUNNING, else unknown |
+| var | `u8` | `index` | inverter index |
+
+The parser maps `fan_state` to the app's `InverterFanState` codes (1 = STOP, 2 = RUNNING); the enum cannot represent a fan fault — that arrives via `InverterSystemException` Fan = 13 in `system_exceptions`.
+
+### 7.12 Cabinet State (`0x0D`, ≥5 bytes, request mode `0x10`)
+
+Parsed by `parse_cabinet_state` (e2e.py). Layout per `Mcu.Cabinet` enums + `sd/f0.java`; wire values are the enums' *stateValue*, not their code.
+
+| Offset | Type | Field | Notes |
+|--------|------|-------|-------|
+| 0 | `u8` | `water_state` | 0 = valid/dry, 1 = exception/water |
+| 1 | `u8` | `smoke_state` | 0 = valid, 1 = exception |
+| 2 | `u8` | `fan_state` | 0 = stopped, 1 = running, 2 = exception |
+| 3 | `u8` | `exceptions_bitmap` | bit 0 = Communication |
+| 4 | `u8` len + N | `firmware_version` | ASCII |
+| 5+N | `u8` | `index` | cabinet index |
+
+Parser normalises to app enum codes: water/smoke 1=valid, 2=exception; fan 1=stop, 2=running, 3=exception; -1 = unknown. The device also pushes unsolicited `cabinet_state_changed` frames (wire byte 0x07, opcode 8199) with the same layout; only the request/response types are polled.
 
 ---
 
@@ -690,6 +729,25 @@ Hardcoded in APK, extracted via `emaldo/extract_keys.py`:
 - **State lag**: After a write command, wait ≥1–2s before reading back state via a subscribe command — the device takes time to apply changes.
 - **Multiple responses**: Subscribe commands (`0xA0` mode) may return multiple UDP packets. The first is often a relay echo/ACK; the actual data arrives in a subsequent packet.
 - **Battery probing**: Send one `0x06` request per *physical* slot index. Slots are addressed by their position in the cabinet (a module in the third slot answers at index 2; empty lower slots stay silent), so probing walks fixed index tiers (e.g. 0–2, 3–7, 8–12) to also cover a second cabinet whose modules start at a higher base index. Stop probing a tier after two consecutive short (<250B) or missing responses, but continue into the next tier rather than aborting the whole scan. A short per-probe timeout (≈1.5 s, vs. the full handshake timeout) keeps empty slots cheap.
+- **Accessory probing (fans + water sensor — 0x0E / 0x0D / 0x04):** probe order is deliberate — InverterInfo (0x04) first, then CabinetState (0x0D), then CabinetAllInfo (0x0E) last (result unused). The probe set and order exist to bound cost: every probe shares one `max_duration` budget (default **12.0 s**, `read_accessories_state`), checked once per loop before each probe. When the first datagram fails its `payload_validator` (often a subscription ACK) a follow-up `recvfrom` waits up to ~1.5 s and is silently swallowed on timeout — a stall costs up to ~2.1 s per probe. This budget/timing interplay caused the β32 regression: a late-added InverterInfo loop, a 6.0 s budget and 4×~2.1 s cabinet stalls meant the InverterInfo loop broke before its first iteration and fans stayed `unknown` (fixed by reordering 0x04 first + raising the budget to 12.0 s).
+- **Phantom cabinet guard (#63):** `0x0D` replies from absent cabinets carry an all-zero firmware version — discard a cabinet whose version is all NUL bytes. The `0x0E` first byte is NOT a reliable cabinet count (large/unstable on real firmware), so the per-cabinet loop binds to a constant (`ACCESSORY_MAX_CABINETS = 4`) and keeps whichever cabinets actually reply.
+
+---
+
+## 15. Adding a New Probe or Sensor (checklist)
+
+Follow this when adding a sensor that needs a new E2E read. Skips caused the β32 starvation regression (fans `unknown` all day because a new probe loop never ran).
+
+1. **Document the wire format in this file first** — add the request row to §6 and the payload layout to §7. Layout comes from the APK smali callback (name the file in the section, e.g. `sd/v0.smali`); confirm semantics live by changing the value in the app and reading it back.
+2. **e2e.py** — add the opcode constant (e.g. `_INVERTER_INFO_TYPE`) and a `parse_*` function. The `payload_validator` passed to `_probe` must match the first-byte set of a real response (e.g. InverterInfo: `len(p) >= 19 and p[0] in (0, 1, 2)`); any other datagram is treated as a subscription ACK and burns the follow-up recvfrom.
+3. **read_accessories_state** — add a probe loop:
+   - A probe that fails validation costs up to ~2.1 s (first datagram + 1.5 s follow-up timeout).
+   - `max_duration` (default 12.0 s) is checked once per loop, before each probe. Re-check worst-case runtime when adding a probe; prefer raising the budget over dropping probes or data.
+   - **Order by priority**: value-critical probes first. 0x04 goes before 0x0D/0x0E because fan state is the expensive-to-starve one.
+   - Never let a probe response drive the loop bound (`0x0E`'s first byte is unreliable; use constants).
+   - Never handshake inside a probe — a 21204 raises `_Expired` and aborts the scan; the stream reconnect machinery owns recovery.
+4. **sensor.py** — add an `EmaldoSensorEntityDescription` (`key`, `translation_key`, `options` for ENUM device class, `value_fn` reading from the scan dict, e.g. `_fan_pack_state(d, idx)`) and instantiate it in `async_setup_entry` (FAN_PACK_DESCRIPTIONS, WATER_SENSOR_DESCRIPTION). A state of `unknown` until the first scan completes is by design, not a bug.
+5. **Verify live**: `Accessories scan complete: cabinets=N inverters=M` in the log; the new sensor must leave `unknown` after the first scan (~1 min cadence).
 
 ---
 
