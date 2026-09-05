@@ -4825,7 +4825,18 @@ class PersistentE2ESession:
                     )
             self._stream_needs_creds_refresh = False
             self._stream_needs_reconnect = False
-            self._last_subscribe_monotonic = None  # force immediate re-subscribe
+            # 21204 storm fix: setting _last_subscribe_monotonic=None bypassed the
+            # min-gap guard and re-subscribed inside the relay's ~10s spacing wall,
+            # re-triggering 21204 in a self-inflicted loop. Keep the prior timestamp
+            # so the next subscribe respects spacing; if no recent subscribe existed,
+            # backdate to now so the next one lands after _stream_resubscribe_interval.
+            _now_mono = time.perf_counter()
+            if (
+                self._last_subscribe_monotonic is None
+                or (_now_mono - self._last_subscribe_monotonic)
+                > self._stream_resubscribe_interval
+            ):
+                self._last_subscribe_monotonic = _now_mono
             self._last_keepalive_monotonic = time.perf_counter()
             self._stream_started_monotonic = time.perf_counter()  # reset watchdog
             self._stream_reconnects += 1

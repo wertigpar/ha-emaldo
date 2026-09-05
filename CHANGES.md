@@ -1,5 +1,28 @@
 # Changes
 
+## v1.0.0-beta32
+
+### Fixed
+
+- **21204 storm: reconnect re-subscribe bypassed the relay's spacing wall
+  (341 failures in one install session, issue #47 family).** On every successful
+  reconnect rebuild, `_stream_reconnect_locked` set `_last_subscribe_monotonic
+  = None`, so the first subscribe after reconnect skipped the min-gap guard
+  and landed inside the relay's ~10 s subscribe-spacing wall — the relay
+  answered 21204, the reconnect path re-armed, and the loop self-inflicted a
+  21204 storm (~2 reconnects/s) instead of converging. The flood also told the
+  escalation machinery that creds were stale, so each cycle attempted a forced
+  credential refresh that rotated the home-level secret and killed the other
+  unit's session (dual-unit ping-pong). Fix in `e2e.py`: keep the prior
+  subscribe timestamp through the reconnect rebuild and backdate it to `now`
+  only when no recent subscribe existed — the next subscribe lands after
+  `_stream_resubscribe_interval` (12 s) and clears the wall. Verified after
+  deploy: 21204 rate dropped from 341 to a single occurrence; the residual
+  `long_stall` churn (relay-silent session) pre-exists the fix and now
+  self-heals via the wedge-reset → forced-fresh-credentials rebuild path.
+
+- Bump `manifest.json` → `1.0.0-beta32`.
+
 ## v1.0.0-beta31
 
 ### Fixed
