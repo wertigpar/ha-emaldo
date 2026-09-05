@@ -1403,6 +1403,22 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
                 ).items()
                 if v > 0
             }
+            # Last-event recency (beta32 instrumentation). None = never seen
+            # in the current session; numeric = seconds since the event type
+            # last fired. Frame age uses the newest per-device power-flow
+            # frame, matching the long-stall watchdog reference.
+            stream_attrs["stream_last_frame_age_s"] = stream_diag.get(
+                "stream_last_frame_age_s"
+            )
+            stream_attrs["stream_last_ack_age_s"] = stream_diag.get(
+                "stream_last_ack_age_s"
+            )
+            stream_attrs["stream_last_relay_status_age_s"] = stream_diag.get(
+                "stream_last_relay_status_age_s"
+            )
+            stream_attrs["stream_last_subscribe_age_s"] = stream_diag.get(
+                "stream_last_subscribe_age_s"
+            )
             session = getattr(c, "_session", None)
             if session is not None and getattr(session, "streaming", False):
                 stream_attrs["stream_frames_received_session"] = getattr(

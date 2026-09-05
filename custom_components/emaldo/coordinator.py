@@ -1970,6 +1970,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         try:
             data = await self.hass.async_add_executor_job(self._read_power_flow)
             _LOGGER.debug("[E2E diag] %s", self._e2e_diag)
+            # Stream mode returns from _read_power_flow before the poll-mode
+            # success path, so without this the stale clock (stats_last_success,
+            # 28s) freezes the moment stream mode is entered and the sensor
+            # reports stale even while frames flow at 0.4s (#47 lot-of-stale).
+            if self._stream_mode and data is not None:
+                self.stats_last_success = _time.time()
         except EmaldoAuthError as err:
             # Token expired — force REST re-login and E2E reconnect.
             # This is self-healing (next poll re-logins automatically), so log at INFO.

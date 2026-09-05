@@ -3805,6 +3805,8 @@ class PersistentE2ESession:
         # escalation so a never-yet-healthy session (cold start, inverter
         # offline) is not punished as a stale-secret failure.
         self._stream_last_decrypted_frame_ts: float = 0.0
+        self._stream_last_ack_monotonic: float = 0.0
+        self._stream_last_relay_status_monotonic: float = 0.0
         self._stream_ever_decrypted = False
         # Deadline by which a decrypted frame must arrive after a handshake-ok
         # reconnect, else the reconnect is treated as decrypt-failed. Armed in
@@ -4372,6 +4374,28 @@ class PersistentE2ESession:
     def stream_diagnostics(self) -> dict:
         """Snapshot of stream counters for the diagnostic sensor."""
         with self._lock:
+            _now_diag = time.perf_counter()
+            _pow_ref = (
+                max(self._latest_power_flow_monotonic.values())
+                if self._latest_power_flow_monotonic
+                else None
+            )
+            _frame_age = (_now_diag - _pow_ref) if _pow_ref is not None else None
+            _ack_age = (
+                (_now_diag - self._stream_last_ack_monotonic)
+                if self._stream_last_ack_monotonic
+                else None
+            )
+            _relay_age = (
+                (_now_diag - self._stream_last_relay_status_monotonic)
+                if self._stream_last_relay_status_monotonic
+                else None
+            )
+            _sub_age = (
+                (_now_diag - self._last_subscribe_monotonic)
+                if self._last_subscribe_monotonic is not None
+                else None
+            )
             return {
                 "frames": self._stream_frames_received,
                 "resubscribes": self._stream_resubscribes,
@@ -4386,6 +4410,10 @@ class PersistentE2ESession:
                 "last_reconnect_reason": self._stream_last_reconnect_reason,
                 "reconnect_reasons": dict(self._stream_reconnect_reasons),
                 "creds_refresh_queued": self._stream_needs_creds_refresh,
+                "stream_last_frame_age_s": _frame_age,
+                "stream_last_ack_age_s": _ack_age,
+                "stream_last_relay_status_age_s": _relay_age,
+                "stream_last_subscribe_age_s": _sub_age,
             }
 
     def _stream_watchdog_locked(self, now: float) -> None:
@@ -4547,9 +4575,34 @@ class PersistentE2ESession:
                     break
                 self._stream_drain_packets += 1
                 if self._is_session_expired(resp):
+                    _t_21204 = time.perf_counter()
+                    _sub_age_txt = (
+                        f"{_t_21204 - self._last_subscribe_monotonic:.1f}s"
+                        if self._last_subscribe_monotonic is not None
+                        else "n/a"
+                    )
+                    _pow_ref_t = (
+                        max(self._latest_power_flow_monotonic.values())
+                        if self._latest_power_flow_monotonic
+                        else None
+                    )
+                    _frame_age_txt = (
+                        f"{_t_21204 - _pow_ref_t:.1f}s"
+                        if _pow_ref_t is not None
+                        else "n/a"
+                    )
+                    _ack_age_txt = (
+                        f"{_t_21204 - self._stream_last_ack_monotonic:.1f}s"
+                        if self._stream_last_ack_monotonic
+                        else "n/a"
+                    )
                     if self._log:
-                        self._log("Stream saw 21204 — flagging reconnect")
-                    self._last_21204_monotonic = time.perf_counter()
+                        self._log(
+                            "Stream saw 21204 — flagging reconnect "
+                            f"(since_subscribe={_sub_age_txt}, "
+                            f"since_frame={_frame_age_txt}, since_ack={_ack_age_txt})"
+                        )
+                    self._last_21204_monotonic = _t_21204
                     self._last_21204_stage = "stream"
                     self._stream_flag_reconnect("session_expired_21204")
                     break
@@ -4669,8 +4722,10 @@ class PersistentE2ESession:
                 #   binary/undecryptable   -> genuinely-unparsed (+ categories)
                 if _cat == "keepalive_ack":
                     self._stream_keepalive_acks += 1
+                    self._stream_last_ack_monotonic = time.perf_counter()
                 elif _cat in self._stream_relay_status:
                     self._stream_relay_status[_cat] += 1
+                    self._stream_last_relay_status_monotonic = time.perf_counter()
                 else:
                     self._stream_drain_unparsed += 1
                     self._stream_drain_unparsed_categories[_cat] = (
