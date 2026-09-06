@@ -5075,6 +5075,11 @@ class PersistentE2ESession:
 
         try:
             # 1) Inverter info per index (0x04).
+            # Abort after 2 consecutive timeouts, exactly like read_battery_info:
+            # a silent probe costs the full socket timeout, and during a relay
+            # blackout an unbounded scan holds self._lock long enough to starve
+            # the 7s keepalive and let the relay expire the session (21204).
+            _consecutive_timeouts = 0
             for idx in range(max(1, inverters)):
                 if time.perf_counter() - started > max_duration:
                     break
@@ -5087,12 +5092,17 @@ class PersistentE2ESession:
                     lambda p: len(p) >= 19 and p[0] in (0, 1, 2),
                 )
                 if dec is None:
+                    _consecutive_timeouts += 1
+                    if _consecutive_timeouts >= 2:
+                        break
                     continue
+                _consecutive_timeouts = 0
                 info = parse_inverter_info(dec)
                 if info is not None:
                     inverters_dict[idx] = info
 
             # 2) Per-cabinet state (0x0D, bounded indices) + phantom guard #63.
+            _consecutive_timeouts = 0
             for cidx in range(ACCESSORY_MAX_CABINETS):
                 if time.perf_counter() - started > max_duration:
                     break
@@ -5106,7 +5116,11 @@ class PersistentE2ESession:
                     and p[2] in (0, 1, 2),
                 )
                 if dec is None:
+                    _consecutive_timeouts += 1
+                    if _consecutive_timeouts >= 2:
+                        break
                     continue
+                _consecutive_timeouts = 0
                 state = parse_cabinet_state(dec)
                 if state is not None and state.get("index") == cidx:
                     version = state.get("version") or ""
