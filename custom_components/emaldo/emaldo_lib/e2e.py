@@ -5024,6 +5024,18 @@ class PersistentE2ESession:
             with self._lock:
                 if self._sock is None or self._closed:
                     return None
+                # Never send accessory probes while the stream is reconnecting
+                # or inside its backoff window: this scan holds self._lock for
+                # its whole 8-packet duration and would starve the 7s keepalive,
+                # letting the relay expire the session (21204). Accessory state is
+                # best-effort and changes slowly — skip the probe, retry next scan.
+                if self._stream_needs_reconnect:
+                    return None
+                if (
+                    self._stream_reconnect_not_before is not None
+                    and time.perf_counter() < self._stream_reconnect_not_before
+                ):
+                    return None
                 prev_timeout = self._sock.gettimeout()
                 self._sock.settimeout(min(self._timeout, 1.5))
                 try:

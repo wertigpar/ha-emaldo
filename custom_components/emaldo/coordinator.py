@@ -1974,8 +1974,17 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # success path, so without this the stale clock (stats_last_success,
             # 28s) freezes the moment stream mode is entered and the sensor
             # reports stale even while frames flow at 0.4s (#47 lot-of-stale).
-            if self._stream_mode and data is not None:
-                self.stats_last_success = _time.time()
+            if self._stream_mode:
+                # Advance on ANY fresh frame across devices: the frame-age
+                # reference is the newest per-device frame, but
+                # _read_power_flow returns only THIS device's frame, so a
+                # secondary unit would otherwise see a live frame from the
+                # primary and still be marked stale (#47 false stale).
+                _frame_age = (self._stream_diag or {}).get(
+                    "stream_last_frame_age_s"
+                )
+                if _frame_age is not None and _frame_age < STREAM_STALE_AFTER:
+                    self.stats_last_success = _time.time()
         except EmaldoAuthError as err:
             # Token expired — force REST re-login and E2E reconnect.
             # This is self-healing (next poll re-logins automatically), so log at INFO.
