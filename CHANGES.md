@@ -1,5 +1,304 @@
 # Changes
 
+## v1.0.0-beta32
+
+### Fixed
+
+- **21204 storm: reconnect re-subscribe bypassed the relay's spacing wall
+  (341 failures in one install session, issue #47 family).** On every successful
+  reconnect rebuild, `_stream_reconnect_locked` set `_last_subscribe_monotonic
+  = None`, so the first subscribe after reconnect skipped the min-gap guard
+  and landed inside the relay's ~10 s subscribe-spacing wall — the relay
+  answered 21204, the reconnect path re-armed, and the loop self-inflicted a
+  21204 storm (~2 reconnects/s) instead of converging. The flood also told the
+  escalation machinery that creds were stale, so each cycle attempted a forced
+  credential refresh that rotated the home-level secret and killed the other
+  unit's session (dual-unit ping-pong). Fix in `e2e.py`: keep the prior
+  subscribe timestamp through the reconnect rebuild and backdate it to `now`
+  only when no recent subscribe existed — the next subscribe lands after
+  `_stream_resubscribe_interval` (12 s) and clears the wall. Verified after
+  deploy: 21204 rate dropped from 341 to a single occurrence; the residual
+  `long_stall` churn (relay-silent session) pre-exists the fix and now
+  self-heals via the wedge-reset → forced-fresh-credentials rebuild path.
+
+- Bump `manifest.json` → `1.0.0-beta32`.
+
+## v1.0.0-beta31
+
+### Fixed
+
+- **Phantom Water Sensors created on multi-cabinet installs (issue #63,
+  report + fix from Falconlord68).** The accessory scan (type 0x0D probe
+  loop in `read_accessories`) probes a fixed range of cabinet indices and
+  registers a Water Sensor per cabinet that replies. Two defense layers:
+  (1) **E2E layer** — the probe loop accepts a reply only when its reported
+  index matches the probed index AND its firmware version contains a
+  non-NUL byte, so all-zero-version phantom replies never count; (2)
+  **coordinator layer (the authoritative guard)** — the relay *reuses real
+  cabinet 0's data* (a valid firmware version, water/smoke/fan, index) when
+  echoing absent cabinet indices, so a pure payload check can still admit a
+  phantom. On a single-cabinet device this produced a bogus
+  `sensor.power_store_water_sensor_cabinet_2`. A cabinet that physically
+  holds a battery module reports its own 0-based `cabinet_index` (parsed in
+  `parse_battery_data`), which the relay cannot fake. The coordinator now
+  only creates a Water Sensor for an extra cabinet N (N>0) when a battery
+  module reports `cabinet_index == N` AND the accessory scan returned a
+  cabinet entry for N. A single-cabinet device (all modules report cabinet
+  1) therefore yields no extra Water Sensor regardless of relay echo; a
+  genuine two-cabinet device still gets its second sensor once a battery
+  module in cabinet 2 has been scanned.
+
+- **ENUM sensors (Fans Pack, Water Sensor) flash unknown briefly on cold
+  start.** The `_RealtimeRestoreSensor` mixin restored the previous reading
+  from the recorder into `_restored_native_value`, and `_cold_start_value()`
+  served it while `coordinator.data` was `None`. But once the first realtime
+  poll completed and `coordinator.data` became a dict, the cold-start path
+  was bypassed — `value_fn(data)` returned `None` (accessories not yet
+  scanned), and the ENUM hold-back at line 859 failed because
+  `_last_valid_native_value` was still `None` (never seeded from the restored
+  value). Fixed by seeding `_last_valid_native_value` from the cold-start
+  value so the hold-back preserves the restored reading across the gap until
+  the accessory scan populates live data.
+
+- Bump `manifest.json` → `1.0.0-beta31`.
+
+- **Fans Pack sensors stuck `unknown` on three-phase installs (accessory-scan
+  starvation, no version bump).** The persistent-socket accessory scan
+  (`read_accessories_state`) shares one `max_duration` budget across all its
+  probe loops, and every probe whose first datagram fails its payload
+  validator (typically a subscription ACK) burns a follow-up `recvfrom` wait
+  of up to ~1.5 s — a stall of ~2.1 s worst case per probe. With the 0x04
+  InverterInfo loop added late and 0x0D cabinet probes running first, a 6.0 s
+  budget was consumed by the 0x0E/0x0D probes and four ~2.1 s cabinet stalls
+  before the very first InverterInfo iteration, so the fan/smoke/water
+  descriptors stayed `unknown` all day. Fixed two ways: probe order reversed
+  to InverterInfo (0x04) first — value-critical probes run before cheap or
+  discovery probes — and `max_duration` raised from 6.0 s to 12.0 s, with
+  every loop re-checking the budget before each probe.
+
+- **Battery module sensors absent/unavailable after a cold restart during a
+  relay rejection storm (no version bump).** The standalone one-shot E2E
+  sessions for the battery-module scan and accessory scan are vulnerable to
+  backend/relay rejection (flapping 1–5 min, 990+ transitions on 2026-09-02).
+  A cold restart inside such a window leaves `_battery_module_slots = {}`, so
+  `_maybe_add_battery_modules` never created the module sensors and they
+  stayed absent (not merely unknown) until a later scan succeeded. Two-layer
+  fix, mirroring the `_RealtimeRestoreSensor` hold-back philosophy from the
+  previous entry:
+  - **Eager registration (sensor.py):** on setup, `async_setup_entry` now
+    derives slot indices the entity registry already knows
+    (`<base>_module_slot_<N>_<metric>` unique_ids) and registers module
+    sensors for `slots ∪ registry_known_slots`. A physical slot scanned in a
+    prior run survives a cold-start scan failure and can serve restored
+    readings instead of vanishing. Registry-derived slots are guarded by
+    `config_entry_id` + domain, and `slots.get(slot_index)` guards the loop so
+    a registry-derived slot not present in the live scan cannot KeyError.
+  - **Value hold-back (sensor.py):** `EmaldoBatteryModuleSensor.native_value`
+    now returns `_cold_start_value() or _restored_native_value` when the live
+    module is absent — bridging the "power flow up, module scan pending" gap
+    so the entity reports its last-known reading rather than going blank.
+  - **Scan retry / backoff (coordinator.py):** `_async_scan_battery_modules`
+    and `_async_scan_accessories` re-arm their poll counters (59 / 9) when the
+    scan returns empty, raises `EmaldoConnectionError`, or fails generically.
+    The next successful poll retries immediately instead of waiting the full
+    60-poll (~10 min) / 10-poll (~100 s) gate with stale or empty data. The
+    cadence on recovered polls stays gated, so the backend is not hammered.
+
+## v1.0.0-beta30
+
+### Added
+
+- **Scheduled mode support (PR #65, by jbjakobs).** New
+  `emaldo.set_scheduled_mode` service writing the battery's own hourly
+  schedule over E2E opcode `0x19`. A scheduled-mode hour carries a *target
+  percentage*, not an on/off flag, so each hour is one of `neither`,
+  `charge_to_emergency`, `charge_to_smart`, `charge_to_full`,
+  `discharge_to_smart`, `discharge_to_emergency`, or a raw int (positive
+  charges up to N%, negative discharges down to N%). The named actions
+  resolve against the battery range **being written in the same call**;
+  `smart_pct`/`emergency_pct` are optional and never defaulted — bytes 2–3
+  of every `0x19` write carry the range, so an omitted value is resolved by
+  reading `0x5B` and sent back unchanged. `sync` defaults to `true`.
+  Two new E2E reads back it: `0x18` (`get_schedule_reservemode`, the hourly
+  schedule and battery range) and `0x5B` (`read_reserve_mode_config`, the
+  range plus the current reserve mode — the only read that reports it),
+  exposed on `EmaldoClient` as `get_schedule_mode` and `set_reserve_mode`.
+  Protocol corrections: the schedule lives in `0x18` not `0x46` (which reads
+  back `0x80` for every hour and whose bytes 0–1 are a fixed header), hour
+  values are targets not flags, and `0x5B` is the reserve-mode config, not
+  peak shaving. The `0x18`/`0x5B` payload validators are load-bearing:
+  `decrypt_response` brute-forces the AES IV and every 16-aligned tail
+  offset and returns the first candidate a validator accepts, so the
+  validator *selects* the decryption — they constrain every documented
+  field and require an exact payload length. Docs updated in
+  `README.md` (service reference) and `docs/PROTOCOL.md` (§7.5 corrected,
+  new §7.5b, §8b, §8c).
+
+### Fixed
+
+- **Fans Pack + Water Sensor sensors show unknown for up to ~100 s after
+  restart.** The accessory scan was throttled to every 10th realtime poll
+  (~100 s), so a fresh restart left the Fans Pack 01-03 and Water Sensor
+  sensors as unknown until the first throttle window elapsed. The counter
+  now starts at 9 so the scan fires on the **first** poll after startup (no
+  wait), then repeats every 10 polls (~100 s) as a safety net — accessory
+  values are static between fan spin-up/down and leak events, but a scan can
+  abort on a transient E2E failure and the once-only model would then leave
+  the sensors unknown until a restart. Periodic re-scan keeps them
+  recoverable without adding meaningful API load. Multi-cabinet Water Sensor
+  discovery still happens on the first successful scan.
+
+- Bump `manifest.json` → `1.0.0-beta30`.
+
+## v1.0.0-beta29
+
+### Added
+
+- **`ai_raw` attribute on the schedule chart sensor (issue #64, upstreamed
+  local patch from leifkristianssonl).** `EmaldoScheduleChartSensor` now
+  exposes a second time series alongside `schedule`:
+  - `schedule` — the final plan with overrides applied (unchanged; an
+    overridden slot carries `source="override"`).
+  - `ai_raw` — the original AI/base schedule (`hope_charge_discharges`)
+    **before** overrides, as a list of `{t, mode}` dicts (`t` = Unix seconds
+    at each slot's `day_start + i*gap`). Lets users read the raw AI plan
+    independently of overrides. Same data, no new API calls, no behavior or
+    service changes.
+  Both series are excluded from the recorder (`_unrecorded_attributes`) to
+  avoid recorder bloat, mirroring the existing `schedule` guard.
+
+- Bump `manifest.json` → `1.0.0-beta29`.
+
+### Fixed
+
+- **Phantom Cabinet 2 Water Sensor on single-cabinet devices (#63).** With
+  `cabinet_count` driven by the number of cabinet-state replies, a relay echo
+  or a reply for a different index could pass the water/smoke/fan validator
+  on a single-cabinet device, making `len(cabinets)` = 2 and spawning a
+  `water_sensor_2` entity that mirrors cabinet 0. `read_accessories` now only
+  accepts a cabinet-state reply when the device's own index byte matches the
+  index that was actually probed, so `cabinet_count` cannot exceed the real
+  number of cabinets.
+
+- **Facility ID (GSRN) sensors show unknown for up to 5 min after restart.**
+  The balance-contract fetch was throttled to every 5th REST poll (~5 min),
+  so a fresh install showed the two Facility ID sensors as unknown until the
+  first throttle window elapsed. The GSRN values are static once registered,
+  so they are now fetched **once** (retrying on failure until the first
+  success) and never again — no more 5-min wait, and no cloud API call on
+  every poll.
+
+## v1.0.0-beta28
+
+### Added
+
+- **Multi-cabinet Water Sensor (issue #63).** Installations with more than
+  one battery cabinet now get a Water Sensor per cabinet. `read_accessories`
+  enumerates every cabinet reported by `get_cabinet_allinfo` (type 0x0E);
+  the first (`water_sensor`, cabinet 0) is created at setup as before, and
+  additional `water_sensor_2` … `water_sensor_4` are registered dynamically
+  the first time an accessory scan reports `cabinet_count > 1`. Fans Pack
+  sensors stay per-inverter and are unaffected. Capped at 4 cabinets.
+
+### Fixed
+
+- Bump `manifest.json` → `1.0.0-beta28`.
+
+## v1.0.0-beta27
+
+### Added
+
+- **Facility ID (GSRN) + PowerStation accessory sensors (Emaldo app 2.8.8
+  protocol).** Four new sensor groups following the official app's protocol,
+  wired into the integration:
+  - `facility_id_consumption` / `facility_id_production` — the GSRN metering
+    point IDs shown in the app's Grid Rewards → Facility ID screen. Source:
+    cloud REST `/bmt/get-family-balance-contract-info/` (existing
+    `EmaldoClient.get_contract`, previously unused) → `Result.data.consumption_meter`
+    / `production_meter`. Fetched best-effort, throttled to every 5th REST
+    poll (~5 min); exposed as diagnostic sensors from the slow coordinator.
+  - `water_sensor` — cabinet water-leak sensor. Source: E2E one-shot session
+    `get_cabinet_state` (wire type `0x0D`, payload `[index]`, response
+    `[water, smoke, fan, exc_bits, verLen, ver..., index]`; water raw 0 = dry,
+    1 = wet → app's `CabinetWaterState`). Polls cabinet 0.
+  - `fan_pack_01` … `fan_pack_03` — per-inverter cooling fan state, mirroring
+    the app's Accessories screen ("Fans Pack 01-03"; one pack per inverter
+    phase). Source: E2E `get_inverter_info` (wire type `0x04`, payload
+    `[index]`, response layout per the app's inverter-info handler: state,
+    7×u16 LE exception bitmaps, idInfo, version, fanState, index).
+    `stopped`/`running` from the
+    fan byte; `fault` when system-exceptions bitmap carries
+    `InverterSystemException.Fan` (13). Pack count = 3 on three-phase models
+    (`THREE_PHASE_MODELS` in const.py, matching the app's
+    `L8.isThreePhase()`), 1 otherwise.
+  - Cabinet discovery uses `get_cabinet_allinfo` (wire type `0x0E`).
+  - All accessory reads run on a dedicated throwaway UDP session
+   (`emaldo_lib.e2e.read_accessories`) as a background task every 10 realtime
+   polls (~100 s), keeping the persistent realtime session lock free (#37
+   pattern). Parsers verified against synthetic wire samples.
+
+### Fixed
+
+- **Third-party PV (and all verified switch writes) confirmation regressed in
+  beta26 (#61 follow-up, 2026-08-27).** beta26 replaced the write+read *retry
+  loop* in `_write_verified` with a single send followed by a fresh-frame poll
+  gate (`read_fn(newer_than=...)`). The 0x41 PV command is sometimes dropped
+  by the relay on first send, and the backend also takes ~5s to reflect a PV
+  toggle (unlike other params which update immediately). With no retry, a
+  dropped first send never re-delivered, the device never flipped, and the
+  gate polled the unchanged frame for the full 20s → "command was not
+  confirmed" warning (observed `last confirmed=True` for an OFF target). The
+  official app and beta25 both work because they re-send. **Fix:** restore the
+  beta25 retry model — `_write_verified` re-issues the write on every attempt
+  (up to `_WRITE_VERIFY_MAX_POLLS` × `_WRITE_VERIFY_POLL_S` ≈ 20s), reading the
+  live device state after each send with no `newer_than` gate. This covers
+  both the dropped-send and the 5s backend-delay cases. Trade-off: the beta26
+  fresh-frame gate (added to stop #61's pre-command stale-read false
+  negatives) is no longer used for confirmation; beta25's retry model was
+  already shipped and confirmed working, so this reverts to that baseline.
+- Bump `manifest.json` → `1.0.0-beta27`.
+
+## v1.0.0-beta26
+
+### Fixed
+
+- **PV / override confirmation now waits for a *post-command* device frame (#61
+  PV timing analysis, 2026-08-26).** Both `thirdparty_pv_on` (Battery
+  Optimizer) and `sell_back_to_grid_on` writes use `_write_verified`, which
+  confirmed by reading the next streamed power-flow frame. That read hit
+  `_read_power_flow` → `get_latest_power_flow(max_age=STREAM_STALE_AFTER)`,
+  which returns the *most recently received* frame — up to `STREAM_STALE_AFTER`
+  (28s) old. With the 1s `read_fn` delay, the confirmation read a pre-command
+  frame, so an actually-applied PV-ON still reported `read=False`, the caller
+  (Battery Optimizer) treated it as failed and re-fired the command in a loop.
+  Live log: two PV-ON attempts × 3 tries ~1s apart, all `read=False`, no
+  transport errors — a timing bug, not a device rejection. **Fix:** added a
+  `min_recv_monotonic` gate to `get_latest_power_flow` (e2e.py) and a
+  `newer_than` parameter threaded through `_read_power_flow` /
+  `_read_virtualpowerplant`. `_write_verified` now captures `perf_counter()`
+  *after* the write and only accepts a frame received afterwards, polling every
+  1s up to 20s. Stale pre-command frames can no longer mask a successful apply.
+  `_read_virtualpowerplant` ignores `newer_than` (direct authoritative query).
+- Bump `manifest.json` → `1.0.0-beta26`.
+
+## v1.0.0-beta25
+
+### Fixed
+
+- **`_ensure_session` race crash killed override commands (#61 log 2026-08-21).**
+  While a worker thread was inside `_ensure_session()` waiting for
+  `connect()`'s handshake (observed 5–10s during relay degradation), the main
+  thread's reconnect path could run `_invalidate_session_ref()`, setting
+  `self._session = None`. The worker then re-read `self._session` after the
+  handshake and crashed: `AttributeError: 'NoneType' object has no attribute
+  'last_handshake_response'` (coordinator.py:1033 via
+  `_send_override_via_stream`). The freshly connected session was orphaned and
+  the caller's bulk override failed all 3 attempts. **Fix:** hold a local
+  reference from session construction through registration/stream-start/return;
+  never re-read the shared `self._session` attribute inside the build block.
+  The now-dead mid-stream None guard was removed with it.
+- Bump `manifest.json` → `1.0.0-beta25`.
+
 ## v1.0.0-beta24
 
 ### Fixed
