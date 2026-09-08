@@ -1030,7 +1030,12 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         self._session.connect()
         _session = self._session  # local ref for thread safety
-        self.stats_last_handshake_response = _session.last_handshake_response
+        # Guard against a None session here: _invalidate_session_ref sets
+        # self._session = None during teardown, and if _ensure_session races
+        # with that, reading .last_handshake_response raises
+        # AttributeError: 'NoneType' object has no attribute ... (#61 beta24).
+        if _session is not None:
+            self.stats_last_handshake_response = _session.last_handshake_response
         self._set_device_session(_session)
         self._session_binding = binding
 
