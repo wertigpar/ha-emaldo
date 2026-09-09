@@ -1,28 +1,5 @@
 # Changes
 
-## v1.0.0-beta32
-
-### Fixed
-
-- **21204 storm: reconnect re-subscribe bypassed the relay's spacing wall
-  (341 failures in one install session, issue #47 family).** On every successful
-  reconnect rebuild, `_stream_reconnect_locked` set `_last_subscribe_monotonic
-  = None`, so the first subscribe after reconnect skipped the min-gap guard
-  and landed inside the relay's ~10 s subscribe-spacing wall — the relay
-  answered 21204, the reconnect path re-armed, and the loop self-inflicted a
-  21204 storm (~2 reconnects/s) instead of converging. The flood also told the
-  escalation machinery that creds were stale, so each cycle attempted a forced
-  credential refresh that rotated the home-level secret and killed the other
-  unit's session (dual-unit ping-pong). Fix in `e2e.py`: keep the prior
-  subscribe timestamp through the reconnect rebuild and backdate it to `now`
-  only when no recent subscribe existed — the next subscribe lands after
-  `_stream_resubscribe_interval` (12 s) and clears the wall. Verified after
-  deploy: 21204 rate dropped from 341 to a single occurrence; the residual
-  `long_stall` churn (relay-silent session) pre-exists the fix and now
-  self-heals via the wedge-reset → forced-fresh-credentials rebuild path.
-
-- Bump `manifest.json` → `1.0.0-beta32`.
-
 ## v1.0.0-beta31
 
 ### Fixed
@@ -61,20 +38,6 @@
   the accessory scan populates live data.
 
 - Bump `manifest.json` → `1.0.0-beta31`.
-
-- **Fans Pack sensors stuck `unknown` on three-phase installs (accessory-scan
-  starvation, no version bump).** The persistent-socket accessory scan
-  (`read_accessories_state`) shares one `max_duration` budget across all its
-  probe loops, and every probe whose first datagram fails its payload
-  validator (typically a subscription ACK) burns a follow-up `recvfrom` wait
-  of up to ~1.5 s — a stall of ~2.1 s worst case per probe. With the 0x04
-  InverterInfo loop added late and 0x0D cabinet probes running first, a 6.0 s
-  budget was consumed by the 0x0E/0x0D probes and four ~2.1 s cabinet stalls
-  before the very first InverterInfo iteration, so the fan/smoke/water
-  descriptors stayed `unknown` all day. Fixed two ways: probe order reversed
-  to InverterInfo (0x04) first — value-critical probes run before cheap or
-  discovery probes — and `max_duration` raised from 6.0 s to 12.0 s, with
-  every loop re-checking the budget before each probe.
 
 - **Battery module sensors absent/unavailable after a cold restart during a
   relay rejection storm (no version bump).** The standalone one-shot E2E
