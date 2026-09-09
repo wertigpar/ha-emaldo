@@ -3960,6 +3960,7 @@ class PersistentE2ESession:
 
     def get_latest_power_flow(
         self, max_age: float | None = None, device_id: str | None = None,
+        min_recv_monotonic: float | None = None,
     ) -> dict | None:
         """Return the freshest streamed power-flow frame, or *None*.
 
@@ -3970,6 +3971,12 @@ class PersistentE2ESession:
         If *max_age* is given and the cached frame is older than that many
         seconds, *None* is returned so the caller's stale/reconnect path can
         rebuild a stalled stream.
+
+        If *min_recv_monotonic* is given (a ``time.perf_counter()`` value),
+        only a frame received *after* that instant is returned. Used by write
+        verification to ignore pre-command frames: the relay/device applies
+        mode changes with internal latency, so a frame received before the
+        command cannot yet reflect it (#61 PV timing analysis).
         """
         with self._lock:
             if device_id is not None:
@@ -3979,6 +3986,8 @@ class PersistentE2ESession:
                     return None
                 if max_age is not None and ts is not None and (time.perf_counter() - ts) > max_age:
                     return None
+                if min_recv_monotonic is not None and ts is not None and ts < min_recv_monotonic:
+                    return None
                 return dict(data)
             # No device_id: return the most recent across all devices.
             best_data = None
@@ -3987,6 +3996,8 @@ class PersistentE2ESession:
             for dev_id, data in self._latest_power_flow.items():
                 ts = self._latest_power_flow_monotonic.get(dev_id, 0.0)
                 if max_age is not None and (now - ts) > max_age:
+                    continue
+                if min_recv_monotonic is not None and ts < min_recv_monotonic:
                     continue
                 if ts > best_ts:
                     best_ts = ts
