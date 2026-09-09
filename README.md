@@ -14,6 +14,7 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 - **Schedule visualization** — Exposes the Emaldo AI schedule and override data as chart-ready attributes
 - **Override services** — Set time-range overrides, push full 96-slot schedules, or reset to the internal AI plan
 - **Advanced services** — EV smart schedule writes, historical solar backfill for Energy Dashboard, and AI Battery Range write
+- **Scheduled mode** — Drive the battery's own hourly plan (the one set in the app under Battery Strategies) via `emaldo.set_scheduled_mode`, including the reserve mode and battery range it runs with
 - **E2E communication** — Reads and writes override slots via Emaldo's end-to-end encrypted channel
 - **EV charge control** — Select EV charging mode, set fixed charge amount, and write weekday/weekend EV schedule (Power Core models only)
 - **Third-party PV control** — Built-in switch for external PV routing; used by Battery Optimizer PV sell strategy
@@ -430,9 +431,6 @@ N%, negative discharges down to N%. Hours left out are `neither`.
 | `smart_pct` | int | no | Upper SoC threshold (0–100). Omit to keep the battery's current value |
 | `emergency_pct` | int | no | Lower SoC threshold (0–100). Omit to keep the battery's current value |
 | `device_id` | string | no | Target a specific device; defaults to the first |
-| `weekdays` | list[int] | no | *Deprecated.* Hours to charge, all to `charge_pct` |
-| `weekend` | list[int] | no | *Deprecated.* As `weekdays` |
-| `charge_pct` | int | no | *Deprecated.* Charge target for the hour lists (default 100) |
 
 The named actions resolve against the battery range **being written in the same call**, so
 changing `smart_pct` and using `charge_to_smart` together encodes against the new value.

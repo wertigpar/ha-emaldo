@@ -108,15 +108,11 @@ _SCHEMA_HOUR_ACTIONS = vol.Schema(
 
 SCHEMA_SET_SCHEDULED_MODE = vol.Schema(
     {
-        # Preferred: one action per hour, so discharge and per-hour targets are
-        # expressible. The device stores a target percentage per hour, not a flag.
+        # One action per hour, so discharge and per-hour targets are
+        # expressible. The device stores a target percentage per hour, not a
+        # flag. Hours left out are "neither".
         vol.Optional("weekday_hours"): _SCHEMA_HOUR_ACTIONS,
         vol.Optional("weekend_hours"): _SCHEMA_HOUR_ACTIONS,
-
-        # Deprecated shorthand: lists of hours to charge, all to the same target.
-        # Kept working, but it can only express charge - a third of the protocol.
-        **_SCHEMA_HOUR_LISTS,
-        vol.Optional("charge_pct", default=100): vol.All(int, vol.Range(min=1, max=100)),
 
         # Deliberately no defaults: omitted means "leave the battery range as it
         # is", which the handler resolves by reading the device. Defaulting here
@@ -1226,9 +1222,6 @@ async def async_handle_set_scheduled_mode(
     or an int - positive charges up to N%, negative discharges down to N%. Hours
     left out are "neither".
 
-    The older ``weekdays`` / ``weekend`` hour lists with ``charge_pct`` still work
-    but can only express charging.
-
     ``smart_pct``/``emergency_pct`` are optional: omit them to leave the battery
     range untouched. They cannot be skipped on the wire - opcode 0x19 carries them
     in bytes 2-3 on every write - so an omitted value is resolved by reading the
@@ -1243,22 +1236,8 @@ async def async_handle_set_scheduled_mode(
     sync = call.data.get("sync", True)
     device_id = call.data.get("device_id")
 
-    weekday_actions = call.data.get("weekday_hours")
-    weekend_actions = call.data.get("weekend_hours")
-
-    if weekday_actions is None and weekend_actions is None:
-        # Deprecated path: hour lists, one shared charge target.
-        charge_pct = call.data.get("charge_pct", 100)
-        weekday_actions = {h: charge_pct for h in call.data.get("weekdays", [])}
-        weekend_actions = {h: charge_pct for h in call.data.get("weekend", [])}
-        if weekday_actions or weekend_actions:
-            _LOGGER.debug(
-                "set_scheduled_mode: using the deprecated weekdays/weekend lists; "
-                "weekday_hours/weekend_hours can also express discharge"
-            )
-    else:
-        weekday_actions = weekday_actions or {}
-        weekend_actions = weekend_actions or {}
+    weekday_actions = call.data.get("weekday_hours") or {}
+    weekend_actions = call.data.get("weekend_hours") or {}
 
     # Filled in by _do_set: the range actually written, and the encoded hours, so
     # the log line below describes what went on the wire instead of re-deriving it.
