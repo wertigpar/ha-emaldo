@@ -373,14 +373,46 @@ All payloads are little-endian unless noted.
 | 0–1 | `u16` | `state` | 0=Idle,1=OnHold,2=FcrN,3=FcrDUp,4=FcrDDown,5=FcrDUpDown,6=MFRRUp,7=MFRRDown |
 | 2–3 | `u16` | `error_flag` | present in 4-byte variant; `≠1` means error |
 
-### 7.5 Peak Shaving Config (`0x5B`, 20 bytes)
+### 7.5 Reserve Mode Config (`0x5B`, 20 bytes)
 
-| Offset | Type | Field |
-|--------|------|-------|
-| 0 | `u8` | `enabled` |
-| 5 | `u8` | `peak_reserve_pct` |
-| 6 | `u8` | `ups_reserve_pct` |
-| 18 | `u8` | `redundancy` |
+Previously documented here as "Peak Shaving Config". The 20-byte response actually
+carries the reserve-mode configuration. Established by observation against a real
+battery rather than from the APK: the range was changed in the app and bytes 15
+and 17 followed it exactly, twice (63/25 → 55/30 → 25/10), in plain binary.
+
+| Offset | Type | Field | Notes |
+|--------|------|-------|-------|
+| 0–6 | — | — | Always zero so far |
+| 7–10 | `u32` | `full_charge_wh` | Full charge capacity, Wh, LE |
+| 11–14 | `u32` | — | Static, meaning unknown. Not current energy — stayed at 7128 while SoC was 54% of 15288 |
+| 15 | `u8` | `emergency_pct` | Lower (emergency) reserve % |
+| 16 | `u8` | — | Always 100 so far. Not `plenty_reserve`, which is 98 |
+| 17 | `u8` | `smart_pct` | Upper (smart) reserve % |
+| 18 | `u8` | `reserve_mode` | 1 = price tracking, 2 = scheduled, 3 = AI adapter |
+| 19 | `u8` | `enabled` | |
+
+**The only read that reports the current reserve mode.** For the battery range it
+agrees with `0x18`, so the two can be cross-checked.
+
+### 7.5b Scheduled Mode Schedule (`0x18`, 57 bytes)
+
+`get_schedule_reservemode` — the scheduled-mode hourly schedule *and* the battery
+range. Layout per the APK callback (`module_bmt/zd/q0.java`), confirmed live.
+
+| Offset | Type | Field | Notes |
+|--------|------|-------|-------|
+| 0 | `u8` | `smart_pct` | Genuinely the range here, unlike `0x46` |
+| 1 | `u8` | `emergency_pct` | |
+| 2 | `u8` | `lowpower_alert` | |
+| 3 | `u8` | `battery_protect` | |
+| 4–27 | `u8[24]` | `weekday_hours` | One per hour; see §8b |
+| 28–51 | `u8[24]` | `weekend_hours` | Read back as zeros when `sync` is set |
+| 52 | `u8` | `sync` | 1 = device stores weekday only |
+| 53–56 | `u32` | `full_charge_wh` | LE |
+
+Not to be confused with `get_custom_schedulemode` (`0x46`, 58 bytes), a separate
+block that reads back `0x80` for every hour regardless of the app's setting, and
+whose bytes 0–1 are a fixed header (`0x50 0x0F`) rather than the battery range.
 
 ### 7.6 Peak Schedule (`0x5C`, ≥16 bytes)
 
@@ -457,6 +489,56 @@ Constants in `const.py`:
 - `SLOT_IDLE = 0x00`
 - `SLOT_CHARGE_DEFAULT = 0x48` (charge when SoC < 72%)
 - `DEFAULT_MARKER_HIGH = 72`, `DEFAULT_MARKER_LOW = 20`
+
+---
+
+## 8b. Scheduled Mode Hour Values
+
+24 hours per day type (weekday / weekend), one byte each. An hour carries a
+**target percentage**, not an on/off flag.
+
+| Value | Meaning |
+|-------|---------|
+| `0x00` (0) | Neither charge nor discharge |
+| 1–100 | Charge up to N% |
+| `0x80` (128) | No setting |
+| 129–255 | Discharge down to (256 − N)% |
+| 101–127 | Not a valid value |
+
+Verified live: five hours were each set to a different option in the app and read
+back from `0x18` with smart=25, emergency=10, giving `100 25 10 231 246`. Writing
+the same five back reproduced those bytes and the app agreed.
+
+The six named actions in `e2e.py` (`SCHEDULE_ACTIONS`) resolve against the battery
+range **being written in the same `0x19` command**, not the range currently on the
+device — confirmed by writing 80/20 while the device held 25/10, which encoded
+`charge_to_smart` as 80.
+
+---
+
+## 8c. `0x19` set_reservemode (54 bytes)
+
+APK dispatch-table case 43 (`'+'`). Subscribe mode.
+
+| Offset | Type | Field | Notes |
+|--------|------|-------|-------|
+| 0 | `u8` | `mode - 1` | 0 = price tracking, 1 = scheduled, 2 = AI adapter |
+| 1 | `u8` | `clear_flag` | 1 wipes the schedule; set only when scheduled mode is sent with no slot data |
+| 2 | `u8` | `smart_pct` | Carried on **every** write — see below |
+| 3 | `u8` | `emergency_pct` | |
+| 4–27 | `u8[24]` | `weekday_hours` | §8b encoding |
+| 28–51 | `u8[24]` | `weekend_hours` | Discarded by the device when `sync` = 1 |
+| 52 | `u8` | `sync` | |
+| 53 | `u8` | `enable` | |
+
+Because bytes 2–3 ride along on every write, a caller that does not mean to change
+the battery range must read the current value (`0x5B` or `0x18`) and send it back.
+`set_reserve_mode` therefore takes `smart_pct`/`emergency_pct` as required
+arguments with no defaults.
+
+`sync` is authoritative over the weekend array: with it set, the device discards
+bytes 28–51 (`0x18` reads them back as zeros) and the app derives the weekend from
+the weekday.
 
 ---
 
