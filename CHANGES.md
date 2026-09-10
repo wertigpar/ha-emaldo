@@ -1,5 +1,29 @@
 # Changes
 
+## v1.0.0-beta32
+
+### Added
+
+- **Battery module scan rework (fast re-scan + persistence).** The per-poll
+  battery-module scan now runs full cabinet discovery (all 13 probe slots)
+  ONLY on the first successful scan after HA startup. All later scans re-probe
+  only modules that are already known (`slots=` fast path in
+  `e2e.read_battery_info`), cutting scan traffic ~47% on a 5-module cabinet and
+  dropping scan latency to sub-second while keeping all module metrics fresh
+  every ~5 min. When the startup full scan succeeds, the results are persisted
+  via Home Assistant `Store` (`.storage/emaldo_battery_modules_<entry_id>`,
+  versioned payload). If a later restart boots into a connection failure, the
+  persisted last-known-good results are loaded and served as fallback (the
+  failed full scan is retained for retry) instead of showing empty battery
+  modules. A new module added to the cabinet is only discovered on startup full
+  scan — after a successful scan, restart the integration to pick up hardware
+  changes. On first load with no store, behavior is unchanged (full discovery).
+- **Expose raw AI schedule as `ai_raw` attribute** on the schedule entity
+  (#64).
+- **Drop deprecated `weekdays`/`weekend`/`charge_pct`** from
+  `set_scheduled_mode` service params (#65).
+- Bump `manifest.json` → `1.0.0-beta32`.
+
 ## v1.0.0-beta26
 
 ### Fixed

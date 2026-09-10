@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .emaldo_lib import (
@@ -698,6 +699,15 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # a stable HA sensor even when modules respond in different orders or
         # some slots are temporarily silent (#23).
         self._battery_module_slots: dict[int, dict] = {}
+        # Full-cabinet discovery flag: after the first successful scan,
+        # subsequent scans re-probe only known slots (fast re-scan).
+        # Hardware add/remove requires integration restart — no periodic
+        # full rescan is performed.
+        self._battery_startup_full_done: bool = False
+        self._battery_store: Store = Store(
+            hass, 1, f"emaldo_battery_modules_{entry.entry_id}"
+        )
+        self._battery_cache_loaded: bool = False
         # -- Stats for diagnostic sensor --
         self.stats_total_polls: int = 0
         self.stats_successful_polls: int = 0
@@ -1725,7 +1735,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "Manual selling",
         )
 
-    def _read_battery_info_standalone(self) -> list[dict]:
+    def _read_battery_info_standalone(
+        self, *, slots: list[int] | None = None,
+    ) -> list[dict]:
         """Read per-module battery info on a throwaway one-shot E2E session.
 
         The 0x06 scan probes up to 13 cabinet slots, each with its own
@@ -1734,6 +1746,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         keepalive task (7 s) and letting the relay drop the realtime session
         (#37).  Opening a dedicated socket that is torn down immediately after
         the scan keeps the realtime session healthy.
+
+        Args:
+            slots: When given, probe exactly these cabinet slot indices (fast
+                re-scan of known slots). When ``None``, full cabinet discovery.
         """
         client = self._parent._ensure_client()  # noqa: SLF001 - intended
         home_id = self._parent.home_id
@@ -1758,6 +1774,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 return _standalone_read_battery_info(
                     creds,
+                    slots=slots,
                     known_serial_slots=known_serial_slots,
                     log=lambda msg: _LOGGER.debug("[E2E battery] %s", msg),
                 )
@@ -2469,14 +2486,25 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """
         try:
             cached_count = len(self._battery_modules)
+            # Full discovery on first successful scan; fast re-scan of known
+            # slots thereafter.  Hardware add/remove requires integration
+            # restart — no periodic full rescan is performed.
+            slots = (
+                None
+                if not self._battery_startup_full_done
+                else sorted(self._battery_module_slots.keys())
+            )
+            scan_label = "full" if slots is None else f"re-scan slots={slots}"
             _LOGGER.debug(
-                "Battery module info poll starting: device_id=%s model=%s cached_modules=%d",
+                "Battery module info poll starting (%s): device_id=%s "
+                "model=%s cached_modules=%d",
+                scan_label,
                 self.device_id,
                 self.device_model,
                 cached_count,
             )
             modules = await self.hass.async_add_executor_job(
-                self._read_battery_info_standalone
+                self._read_battery_info_standalone, slots=slots
             )
             returned_count = len(modules or [])
             returned_serials = [m.get("serial") for m in modules or []]
@@ -2487,6 +2515,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
             if modules:
                 self._battery_modules = modules
+                self._battery_startup_full_done = True
                 # Map each responding module to its physical scan slot so
                 # sensors stay tied to cabinet positions, not to serials or
                 # response order (#23).
@@ -2500,6 +2529,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if isinstance(self.data, dict):
                     self.data["battery_modules"] = self._battery_modules
                     self.data["battery_module_slots"] = self._battery_module_slots
+                # Persist for next startup (fire-and-forget).
+                self._save_battery_cache()
             else:
                 _LOGGER.debug(
                     "Battery module info poll returned no modules; retaining cached_modules=%d",
@@ -2525,6 +2556,84 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
             self._battery_modules_poll_counter = 59
+
+    def _save_battery_cache(self) -> None:
+        """Persist battery module data for next startup (fire-and-forget).
+
+        Payload is versioned so a schema change can be detected on load.
+        Called from the background scan task; a failed save must never
+        break the scan.
+        """
+        try:
+            self.hass.async_create_task(
+                self._battery_store.async_save(
+                    {
+                        "version": 1,
+                        "modules": self._battery_modules,
+                        "slots": self._battery_module_slots,
+                    }
+                ),
+                name=f"{DOMAIN}_battery_cache_save",
+            )
+        except Exception as err:  # noqa: BLE001 - storage must never break scan
+            _LOGGER.debug("Battery cache save failed: %s", err, exc_info=True)
+
+    async def _load_battery_cache(self) -> None:
+        """Load persisted battery module data at startup.
+
+        Populates ``_battery_modules`` / ``_battery_module_slots`` (and the
+        coordinator data dict when present) so per-slot battery sensors can be
+        created at startup instead of waiting for the first live 0x06 scan.  A
+        loaded cache also marks full-cabinet discovery as done — the first scan
+        after restart is a fast re-scan of known slots.  Empty/corrupt cache →
+        empty state, never crashes.
+        """
+        if self._battery_cache_loaded:
+            return
+        try:
+            stored = await self._battery_store.async_load()
+        except Exception as err:  # noqa: BLE001 - cached data is best-effort
+            _LOGGER.debug("Battery cache load failed: %s", err, exc_info=True)
+            return
+        if not isinstance(stored, dict):
+            return
+        modules = stored.get("modules")
+        slots_raw = stored.get("slots")
+        if not isinstance(modules, list) or not isinstance(slots_raw, dict):
+            return
+        modules = [m for m in modules if isinstance(m, dict)]
+        slots: dict[int, dict] = {}
+        for slot, module in slots_raw.items():
+            if isinstance(module, dict):
+                try:
+                    slots[int(slot)] = module
+                except (TypeError, ValueError):
+                    continue
+        self._battery_modules = modules
+        self._battery_module_slots = slots
+        self._battery_cache_loaded = True
+        if self._battery_modules or self._battery_module_slots:
+            if isinstance(self.data, dict):
+                self.data["battery_modules"] = self._battery_modules
+                self.data["battery_module_slots"] = self._battery_module_slots
+        # Persisted cache is fallback only — startup always does full
+        # discovery (_battery_startup_full_done stays False).
+        _LOGGER.debug(
+            "Battery cache loaded: %d modules, %d known slots",
+            len(self._battery_modules),
+            len(self._battery_module_slots),
+        )
+
+    async def async_config_entry_first_refresh(self) -> dict[str, Any] | None:
+        """Load the persisted battery cache before the first live refresh.
+
+        Both run inside the startup path (background first refresh from the
+        entry setup), so the cache is available before sensor platform setup
+        reads the coordinator's data — battery module entities appear at
+        startup and a cold-start scan failure falls back to the cached list.
+        """
+        await self._load_battery_cache()
+        return await super().async_config_entry_first_refresh()
 
     @property
     def regulate_frequency(self) -> dict | None:
