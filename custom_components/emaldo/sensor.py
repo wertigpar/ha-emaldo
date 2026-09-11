@@ -341,6 +341,18 @@ def _other_load_power(data: dict[str, Any]) -> float | None:
     return None
 
 
+def _facility_consumption(data: dict[str, Any]) -> str | None:
+    """Facility ID - Consumption (GSRN) from the balance-contract info."""
+    value = (data.get("contract") or {}).get("consumption_meter")
+    return value or None
+
+
+def _facility_production(data: dict[str, Any]) -> str | None:
+    """Facility ID - Production (GSRN) from the balance-contract info."""
+    value = (data.get("contract") or {}).get("production_meter")
+    return value or None
+
+
 # -- Sensor descriptions --
 
 
@@ -348,7 +360,7 @@ def _other_load_power(data: dict[str, Any]) -> float | None:
 class EmaldoSensorEntityDescription(SensorEntityDescription):
     """Describe an Emaldo sensor."""
 
-    value_fn: Callable[[dict[str, Any]], float | None]
+    value_fn: Callable[[dict[str, Any]], Any]
     attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
@@ -423,6 +435,20 @@ REST_SENSOR_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL,
         value_fn=_load_energy_today,
+    ),
+    EmaldoSensorEntityDescription(
+        key="facility_id_consumption",
+        translation_key="facility_id_consumption",
+        icon="mdi:transmission-tower-import",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_facility_consumption,
+    ),
+    EmaldoSensorEntityDescription(
+        key="facility_id_production",
+        translation_key="facility_id_production",
+        icon="mdi:solar-power",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_facility_production,
     ),
 )
 
@@ -712,7 +738,7 @@ class EmaldoSensor(_RealtimeRestoreSensor, CoordinatorEntity[EmaldoCoordinator])
         )
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> Any:
         """Return the sensor value."""
         if self.coordinator.data is None:
             val = self._cold_start_value()

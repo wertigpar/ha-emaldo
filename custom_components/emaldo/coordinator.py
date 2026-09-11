@@ -12,6 +12,7 @@ import asyncio
 from collections import deque
 from datetime import datetime, timedelta
 import errno
+import functools
 import logging
 import struct
 from typing import Any, Callable
@@ -112,6 +113,15 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._emergency_charge_start_t: object = None  # datetime.time | None
         self._emergency_charge_end_t: object = None    # datetime.time | None
         self._ev_poll_counter: int = 0
+        # Facility ID (GSRN) numbers from the balance-contract info — fetched
+        # exactly once at integration start (values are static once registered;
+        # no per-poll API load). On a failed fetch (e.g. internet outage at
+        # startup) fall back to the last-known values persisted via a Store.
+        self._contract: dict = {}
+        self._contract_fetch_started: bool = False
+        self._contract_store: Store = Store(
+            hass, 1, f"emaldo_facility_id_{entry.entry_id}"
+        )
         self._dual_power_fail_count: int = 0
         self._dual_power_fail_since: float | None = None
         self._dual_power_last_log: float = 0.0
@@ -308,6 +318,30 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("EV state fetch failed: %s", err)
 
         import time as _time
+        # Facility ID (GSRN) — one-shot fetch, only on the first update
+        # (integration start). CRITICAL deviation from upstream beta27: NO
+        # per-poll counter, no 5th-poll throttle; exactly one attempt per HA
+        # run. On failure serve the last-known value if available.
+        if not self._contract_fetch_started:
+            self._contract_fetch_started = True
+            await self._load_contract_cache()
+            try:
+                contract = await self.hass.async_add_executor_job(
+                    client.get_contract, self.home_id
+                )
+                contract_data: dict = (contract or {}).get("data") or {}
+                if contract_data:
+                    self._contract = {
+                        "consumption_meter": contract_data.get(
+                            "consumption_meter"
+                        ),
+                        "production_meter": contract_data.get(
+                            "production_meter"
+                        ),
+                    }
+                    await self._save_contract_cache()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Balance contract fetch failed: %s", err)
         dp_ok = (
             battery.get("dual_power") is not None
             or power.get("dual_power") is not None
@@ -350,7 +384,30 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "emergency_charge_active": self._emergency_charge_active,
             "emergency_charge_start_t": self._emergency_charge_start_t,
             "emergency_charge_end_t": self._emergency_charge_end_t,
+            "contract": self._contract,
         }
+
+    async def _load_contract_cache(self) -> None:
+        """Load the last-known Facility ID (GSRN) values from storage."""
+        try:
+            stored = await self._contract_store.async_load()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Facility-ID cache load failed: %s", err)
+            return
+        if isinstance(stored, dict) and stored:
+            self._contract = stored
+            _LOGGER.debug(
+                "Facility-ID cache loaded: consumption=%s production=%s",
+                stored.get("consumption_meter"),
+                stored.get("production_meter"),
+            )
+
+    async def _save_contract_cache(self) -> None:
+        """Persist the latest Facility ID (GSRN) values."""
+        try:
+            await self._contract_store.async_save(self._contract)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Facility-ID cache save failed: %s", err)
 
     def _read_ev_state(self) -> dict | None:
         """Read EV charging mode (wire 0x20) and schedule (wire 0x21).
@@ -1508,12 +1565,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         the device. This retries the write+read-back cycle and logs a warning
         instead of silently reporting success when it never converges.
 
-        Confirmation uses a *fresh-frame gate*: ``read_fn`` is passed the
-        ``time.perf_counter()`` instant of the write and only accepts a device
-        frame received afterwards, so a stale pre-command frame (normal for a
-        streamed power-flow read-back) never masks a successful apply. We poll
-        every ``_WRITE_VERIFY_POLL_S`` until the device reports ``expected`` or
-        ``_WRITE_VERIFY_MAX_WAIT_S`` elapse.
+        The write is retried across ``_WRITE_VERIFY_MAX_POLLS`` attempts: a
+        single command can be dropped or ignored by the device on the first
+        try (UDP / relay unreliability), so re-sending on every attempt is what
+        lets confirmation converge. After each write we wait
+        ``_WRITE_VERIFY_POLL_S`` and read back the live device state; if it
+        matches ``expected`` we return, otherwise we retry. This is the beta25
+        retry model, restored after beta26's read-only poll regressed
+        confirmation for every verified switch write (#61).
 
         Returns the last confirmed value (which may differ from ``expected``), or
         ``None`` if no read ever succeeded, so callers can reflect the real
@@ -1522,29 +1581,31 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         import time
 
         confirmed_value = None
-        write_fn()
-        # Capture AFTER the command has left the socket. Only frames received
-        # later can reflect the new mode. Must use perf_counter to match the
-        # session's frame-recv clock used by get_latest_power_flow.
-        wrote_at = time.perf_counter()
-        deadline = wrote_at + self._WRITE_VERIFY_MAX_WAIT_S
-        for poll in range(self._WRITE_VERIFY_MAX_POLLS):
+        # Retry the full write+read-back cycle. beta26 removed this retry and
+        # only polled reads behind a fresh-frame gate (calling
+        # read_fn(newer_than=...), which only _read_power_flow accepts — the
+        # other three verified switches would have raised). The first 0x41 send
+        # is sometimes dropped by the relay, so without the retry the device
+        # never re-received the command and confirmation never converged.
+        # Restore the working beta25 model.
+        for attempt in range(self._WRITE_VERIFY_MAX_POLLS):
+            write_fn()
             time.sleep(self._WRITE_VERIFY_POLL_S)
-            confirmed = read_fn(newer_than=wrote_at)
+            confirmed = read_fn()
             if confirmed is not None:
                 confirmed_value = confirmed.get(result_key)
                 if confirmed_value == expected:
                     return confirmed_value
-            if time.perf_counter() >= deadline:
-                break
-            _LOGGER.debug(
-                "%s not yet confirmed (poll %d, target=%s, read=%s)",
-                label, poll + 1, expected, confirmed_value,
-            )
+            if attempt < self._WRITE_VERIFY_MAX_POLLS - 1:
+                _LOGGER.debug(
+                    "%s not yet confirmed (attempt %d/%d, target=%s, read=%s)",
+                    label, attempt + 1, self._WRITE_VERIFY_MAX_POLLS,
+                    expected, confirmed_value,
+                )
         _LOGGER.warning(
-            "%s command was not confirmed by the device after %.0fs "
+            "%s command was not confirmed by the device after %d attempts "
             "(target=%s, last confirmed=%s)",
-            label, self._WRITE_VERIFY_MAX_WAIT_S, expected, confirmed_value,
+            label, self._WRITE_VERIFY_MAX_POLLS, expected, confirmed_value,
         )
         return confirmed_value
 
@@ -2504,7 +2565,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 cached_count,
             )
             modules = await self.hass.async_add_executor_job(
-                self._read_battery_info_standalone, slots=slots
+                functools.partial(self._read_battery_info_standalone, slots=slots)
             )
             returned_count = len(modules or [])
             returned_serials = [m.get("serial") for m in modules or []]

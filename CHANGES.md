@@ -22,7 +22,26 @@
   (#64).
 - **Drop deprecated `weekdays`/`weekend`/`charge_pct`** from
   `set_scheduled_mode` service params (#65).
+- **Facility ID (GSRN) sensors** (`facility_id_consumption` /
+  `facility_id_production`), metering-point IDs fetched once at integration
+  start from the balance-contract info via `get_contract()`
+  (previously unused). Fetched exactly once per HA run — no per-poll API
+  load — with the last-known values persisted through a `Store`
+  (`.storage/emaldo_facility_id_<entry_id>`) and served as fallback when a
+  restart boots into a connection failure. Ported from upstream beta27
+  (aed2900) but deliberately NOT the upstream 5th-poll throttle.
 - Bump `manifest.json` → `1.0.0-beta32`.
+
+### Fixed
+
+- **Confirmed-switch writes could fail after a dropped first send (#61).**
+  `_write_verified` (third-party PV, sell-back, manual selling, charge-pump
+  hold toggles) re-sends the command on every poll attempt now — a single
+  0x41 send can be dropped by the relay, and without re-sending the device
+  never flips and confirmation times out after 20s. The previous fresh-frame
+  gate also called `read_fn(newer_than=...)`, which only `_read_power_flow`
+  accepts — the other verified switches would have raised `TypeError`. Ported
+  from upstream beta27 (7454a56); restores the beta25 retry model.
 
 ## v1.0.0-beta26
 

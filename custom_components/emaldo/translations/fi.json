@@ -95,7 +95,9 @@
       "battery_module_nominal_capacity": { "name": "Akkumoduuli {module} Nimelliskapasiteetti" },
       "battery_module_voltage": { "name": "Akkumoduuli {module} Jännite" },
       "battery_module_serial": { "name": "Akkumoduuli {module} Sarjanumero" },
-      "battery_module_position": { "name": "Akkumoduuli {module} Sijainti" }
+      "battery_module_position": { "name": "Akkumoduuli {module} Sijainti" },
+      "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
+      "facility_id_production": { "name": "Facility ID - Production (GSRN)" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Kolmannen osapuolen aurinkopaneeli" },
