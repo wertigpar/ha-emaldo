@@ -4,7 +4,7 @@
 
 ### About this version
 
-This release line deliberately went back to the earlier beta codebase,
+This release line deliberately went back to the beta24 codebase,
 applied the connection-stability patch (21204 storm fix — keep the subscribe
 timestamp through reconnect rebuild), and cherry-picked selected upstream
 commits on top of that stabilized base:
@@ -14,9 +14,9 @@ commits on top of that stabilized base:
 - Battery module fast re-scan with store persistence
 - Scheduled mode support, `ai_raw` attribute, and deprecated param drop (#64/#65)
 
-All upstream beta27 features — including the accessory fan-pack and
-multi-cabinet water sensors (#63) originally staged for a later restore —
-are now restored in this release.
+All upstream features — the accessory fan-pack, multi-cabinet water
+sensors (#63), scheduled-mode/`ai_raw` support, stream-age diagnostics,
+and the #47 accessory-scan fixes — are now restored in this release.
 
 ### Added
 
