@@ -1,9 +1,51 @@
 # Changes
 
-## Unreleased
+## v1.0.0-beta32
+
+### About this version
+
+This release line deliberately went back to the earlier beta codebase,
+applied the connection-stability patch (21204 storm fix — keep the subscribe
+timestamp through reconnect rebuild), and cherry-picked selected upstream
+commits on top of that stabilized base:
+
+- Facility ID (GSRN) sensors (upstream aed2900, without the 5th-poll throttle)
+- Write-retry loop restore for confirmed-switch writes (upstream 7454a56)
+- Battery module fast re-scan with store persistence
+- Scheduled mode support, `ai_raw` attribute, and deprecated param drop (#64/#65)
+
+All upstream beta27 features — including the accessory fan-pack and
+multi-cabinet water sensors (#63) originally staged for a later restore —
+are now restored in this release.
 
 ### Added
 
+- **Battery module scan rework (fast re-scan + persistence).** The per-poll
+  battery-module scan now runs full cabinet discovery (all 13 probe slots)
+  ONLY on the first successful scan after HA startup. All later scans re-probe
+  only modules that are already known (`slots=` fast path in
+  `e2e.read_battery_info`), cutting scan traffic ~47% on a 5-module cabinet and
+  dropping scan latency to sub-second while keeping all module metrics fresh
+  every ~5 min. When the startup full scan succeeds, the results are persisted
+  via Home Assistant `Store` (`.storage/emaldo_battery_modules_<entry_id>`,
+  versioned payload). If a later restart boots into a connection failure, the
+  persisted last-known-good results are loaded and served as fallback (the
+  failed full scan is retained for retry) instead of showing empty battery
+  modules. A new module added to the cabinet is only discovered on startup full
+  scan — after a successful scan, restart the integration to pick up hardware
+  changes. On first load with no store, behavior is unchanged (full discovery).
+- **Expose raw AI schedule as `ai_raw` attribute** on the schedule entity
+  (#64).
+- **Drop deprecated `weekdays`/`weekend`/`charge_pct`** from
+  `set_scheduled_mode` service params (#65).
+- **Facility ID (GSRN) sensors** (`facility_id_consumption` /
+  `facility_id_production`), metering-point IDs fetched once at integration
+  start from the balance-contract info via `get_contract()`
+  (previously unused). Fetched exactly once per HA run — no per-poll API
+  load — with the last-known values persisted through a `Store`
+  (`.storage/emaldo_facility_id_<entry_id>`) and served as fallback when a
+  restart boots into a connection failure. Ported from upstream beta27
+  (aed2900) but deliberately NOT the upstream 5th-poll throttle.
 - **Inverter Fans Pack sensors 01–03** (`power_store_fan_pack_01` …
   `power_store_fan_pack_03`), ported from upstream beta27 (`508d8fa`). Every
   Emaldo device is three-phase, so three fan sensors are always registered.
@@ -38,9 +80,18 @@
   first refresh lands). The report is gated only on `shutdown_ts` presence,
   so it fires even when the first read stalls — separating "reboot fixed a
   wedged state" from "outage was external".
+- Bump `manifest.json` → `1.0.0-beta32`.
 
 ### Fixed
 
+- **Confirmed-switch writes could fail after a dropped first send (#61).**
+  `_write_verified` (third-party PV, sell-back, manual selling, charge-pump
+  hold toggles) re-sends the command on every poll attempt now — a single
+  0x41 send can be dropped by the relay, and without re-sending the device
+  never flips and confirmation times out after 20s. The previous fresh-frame
+  gate also called `read_fn(newer_than=...)`, which only `_read_power_flow`
+  accepts — the other verified switches would have raised `TypeError`. Ported
+  from upstream beta27 (7454a56); restores the beta25 retry model.
 - **Accessory probes could expire the realtime session from inside the
   scan.** The old standalone probe path (Alive/Wake/Heartbeat + separate UDP
   socket) supersedes the realtime session on the relay; the new
@@ -57,65 +108,6 @@
   (`#47`).
 - Restored the free-standing `read_accessories` fallback (legacy
   session-less scan path) for the coordinator's standalone mode.
-
-## v1.0.0-beta32
-
-### About this version
-
-This release line deliberately went back to the earlier beta codebase,
-applied the connection-stability patch (21204 storm fix — keep the subscribe
-timestamp through reconnect rebuild), and cherry-picked selected upstream
-commits on top of that stabilized base:
-
-- Facility ID (GSRN) sensors (upstream aed2900, without the 5th-poll throttle)
-- Write-retry loop restore for confirmed-switch writes (upstream 7454a56)
-- Battery module fast re-scan with store persistence
-- Scheduled mode support, `ai_raw` attribute, and deprecated param drop (#64/#65)
-
-Once this version has proven stable in production (~48 h), the remaining lost
-features are restored in dependency order — next up: inverter Fans Pack
-sensors and the multi-cabinet Water Sensor (upstream issue #63).
-
-### Added
-
-- **Battery module scan rework (fast re-scan + persistence).** The per-poll
-  battery-module scan now runs full cabinet discovery (all 13 probe slots)
-  ONLY on the first successful scan after HA startup. All later scans re-probe
-  only modules that are already known (`slots=` fast path in
-  `e2e.read_battery_info`), cutting scan traffic ~47% on a 5-module cabinet and
-  dropping scan latency to sub-second while keeping all module metrics fresh
-  every ~5 min. When the startup full scan succeeds, the results are persisted
-  via Home Assistant `Store` (`.storage/emaldo_battery_modules_<entry_id>`,
-  versioned payload). If a later restart boots into a connection failure, the
-  persisted last-known-good results are loaded and served as fallback (the
-  failed full scan is retained for retry) instead of showing empty battery
-  modules. A new module added to the cabinet is only discovered on startup full
-  scan — after a successful scan, restart the integration to pick up hardware
-  changes. On first load with no store, behavior is unchanged (full discovery).
-- **Expose raw AI schedule as `ai_raw` attribute** on the schedule entity
-  (#64).
-- **Drop deprecated `weekdays`/`weekend`/`charge_pct`** from
-  `set_scheduled_mode` service params (#65).
-- **Facility ID (GSRN) sensors** (`facility_id_consumption` /
-  `facility_id_production`), metering-point IDs fetched once at integration
-  start from the balance-contract info via `get_contract()`
-  (previously unused). Fetched exactly once per HA run — no per-poll API
-  load — with the last-known values persisted through a `Store`
-  (`.storage/emaldo_facility_id_<entry_id>`) and served as fallback when a
-  restart boots into a connection failure. Ported from upstream beta27
-  (aed2900) but deliberately NOT the upstream 5th-poll throttle.
-- Bump `manifest.json` → `1.0.0-beta32`.
-
-### Fixed
-
-- **Confirmed-switch writes could fail after a dropped first send (#61).**
-  `_write_verified` (third-party PV, sell-back, manual selling, charge-pump
-  hold toggles) re-sends the command on every poll attempt now — a single
-  0x41 send can be dropped by the relay, and without re-sending the device
-  never flips and confirmation times out after 20s. The previous fresh-frame
-  gate also called `read_fn(newer_than=...)`, which only `_read_power_flow`
-  accepts — the other verified switches would have raised `TypeError`. Ported
-  from upstream beta27 (7454a56); restores the beta25 retry model.
 
 ## v1.0.0-beta31
 
