@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Iterable
 
 from homeassistant.components.sensor import (
     RestoreSensor,
@@ -353,6 +353,46 @@ def _facility_production(data: dict[str, Any]) -> str | None:
     return value or None
 
 
+def _water_sensor_state(data: dict[str, Any], cabinet_index: int = 0) -> str | None:
+    """Cabinet water sensor state ('dry'/'wet', or None when unread).
+
+    Protocol: ``get_cabinet_state`` (E2E type 0x0D) byte 0 — mapped to the
+    app's ``Mcu.Cabinet.CabinetWaterState`` codes by
+    ``emaldo_lib.e2e.parse_cabinet_state`` (1 = valid/dry, 2 = exception/wet).
+    ``cabinet_index`` selects which cabinet (0 = first) for multi-cabinet
+    installs.
+    """
+    accessories = data.get("accessories") or {}
+    cabinets = accessories.get("cabinets") or {}
+    cabinet = cabinets.get(cabinet_index) or (
+        accessories.get("cabinet") if cabinet_index == 0 else None
+    ) or {}
+    water = cabinet.get("water")
+    if water is None:
+        return None
+    return {1: "dry", 2: "wet"}.get(water, "unknown")
+
+
+def _fan_pack_state(data: dict[str, Any], index: int) -> str | None:
+    """Fan Pack state ('stopped'/'running'/'fault', or None when unread).
+
+    Protocol: ``get_inverter_info`` (E2E type 0x04) — fan state byte mapped
+    to ``Mcu.Inverter.InverterFanState`` codes (1 = STOP, 2 = RUNNING) plus
+    the ``InverterSystemException`` Fan (13) bit from the system-exceptions
+    bitmap, exactly like the app's Accessories screen.
+    """
+    inverters = (data.get("accessories") or {}).get("inverters") or {}
+    info = inverters.get(index)
+    if not info:
+        return None
+    if 13 in (info.get("system_exceptions") or []):
+        return "fault"
+    fan = info.get("fan_state")
+    if fan is None:
+        return None
+    return {1: "stopped", 2: "running"}.get(fan, "unknown")
+
+
 # -- Sensor descriptions --
 
 
@@ -542,6 +582,70 @@ EV_REALTIME_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = (
     ),
 )
 
+# PowerStation accessory sensors (Fans Pack 01-03 + Water Sensor).
+#
+# State comes from the one-shot accessory E2E session (types 0x0E/0x0D/0x04,
+# see ``emaldo_lib.e2e.read_accessories``), matching the app's Accessories
+# screen: one Water Sensor per battery cabinet and one "Fans Pack" per inverter
+# phase. Multi-cabinet installs get a Water Sensor per cabinet — cabinet 0 is
+# created at setup, additional cabinets are added dynamically once the
+# accessory scan reports ``cabinet_count > 1`` (see
+# ``add_water_sensors_for_cabinets``).
+WATER_SENSOR_MAX_CABINETS = 4  # sane upper bound on battery cabinets per device
+
+
+def _water_sensor_description(cabinet_index: int) -> EmaldoSensorEntityDescription:
+    """Build a Water Sensor description for *cabinet_index* (0 = first)."""
+    key = "water_sensor" if cabinet_index <= 0 else f"water_sensor_{cabinet_index + 1}"
+    return EmaldoSensorEntityDescription(
+        key=key,
+        translation_key=key,
+        icon="mdi:water-alert",
+        device_class=SensorDeviceClass.ENUM,
+        options=["dry", "wet", "unknown"],
+        value_fn=(lambda d, cidx=cabinet_index: _water_sensor_state(d, cidx)),
+    )
+
+
+WATER_SENSOR_DESCRIPTION = _water_sensor_description(0)
+
+
+def add_water_sensors_for_cabinets(
+    realtime_coordinator: EmaldoRealtimeCoordinator,
+    cabinet_indices: Iterable[int],
+    async_add_entities: AddEntitiesCallback,
+    created: set[int],
+) -> None:
+    """Create + register Water Sensors for confirmed extra cabinets.
+
+    Called from the realtime coordinator once an accessory scan reveals
+    cabinets beyond the first *and* the cabinets are corroborated by
+    battery-module ground truth (a real extra cabinet must physically hold a
+    battery module). ``cabinet_indices`` is the set of 0-based cabinet indices
+    (excluding 0, which is created at setup) that are confirmed to exist.
+    ``created`` tracks which cabinet indices already have an entity so each is
+    added exactly once. Cabinet 0 is never created here.
+    """
+    for cidx in cabinet_indices:
+        if cidx <= 0 or cidx >= WATER_SENSOR_MAX_CABINETS:
+            continue
+        if cidx in created:
+            continue
+        async_add_entities([EmaldoSensor(realtime_coordinator, _water_sensor_description(cidx))])
+        created.add(cidx)
+
+FAN_PACK_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = tuple(
+    EmaldoSensorEntityDescription(
+        key=f"fan_pack_{n:02d}",
+        translation_key=f"fan_pack_{n:02d}",
+        icon="mdi:fan",
+        device_class=SensorDeviceClass.ENUM,
+        options=["stopped", "running", "fault", "unknown"],
+        value_fn=(lambda d, idx=n - 1: _fan_pack_state(d, idx)),
+    )
+    for n in range(1, 4)
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -585,6 +689,26 @@ async def async_setup_entry(
                 EmaldoSensor(realtime_coordinator, desc)
                 for desc in EV_REALTIME_DESCRIPTIONS
             )
+
+        # PowerStation accessories: Water Sensor (cabinet 0) + one Fans Pack
+        # per inverter phase (always 3 — every Emaldo device is three-phase).
+        # States stay "unknown" until the first accessory scan completes.
+        # Extra Water Sensors for cabinet 1+ are added dynamically by the
+        # realtime coordinator once the accessory scan reports cabinet_count > 1.
+        entities.append(
+            EmaldoSensor(realtime_coordinator, WATER_SENSOR_DESCRIPTION)
+        )
+        fan_count = 3
+        entities.extend(
+            EmaldoSensor(realtime_coordinator, desc)
+            for desc in FAN_PACK_DESCRIPTIONS[:fan_count]
+        )
+
+        # Stash the entity-adder + a per-device "which water cabinets exist"
+        # set so the realtime coordinator can register additional Water
+        # Sensors when a multi-cabinet install is discovered.
+        item["water_async_add"] = async_add_entities
+        item.setdefault("water_cabinets_created", {0})
 
         # Diagnostic: realtime connection status
         entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
@@ -749,8 +873,20 @@ class EmaldoSensor(_RealtimeRestoreSensor, CoordinatorEntity[EmaldoCoordinator])
         if value is not None:
             self._last_valid_native_value = value
             return value
+        # Hold the last valid reading when a refresh produced no value.
+        # Slow REST sensors: everything except daily totals. Realtime
+        # sensors: only ENUM descriptions (Fans Pack / Water Sensor) — a
+        # missed one-shot accessory probe must not flip the sensor to
+        # unknown, the state simply carries over until the next scan.
+        # Realtime power/energy readings intentionally do NOT hold stale
+        # values: a stale watt reading is misleading, unknown is correct.
+        coordinator_is_slow = isinstance(self.coordinator, EmaldoCoordinator)
+        coordinator_is_realtime_enum = (
+            isinstance(self.coordinator, EmaldoRealtimeCoordinator)
+            and self.entity_description.device_class == SensorDeviceClass.ENUM
+        )
         if (
-            isinstance(self.coordinator, EmaldoCoordinator)
+            (coordinator_is_slow or coordinator_is_realtime_enum)
             and self.entity_description.state_class != SensorStateClass.TOTAL
             and self.coordinator.last_update_success
             and self._last_valid_native_value is not None
@@ -1263,6 +1399,22 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
                 ).items()
                 if v > 0
             }
+            # Last-event recency (beta32 instrumentation). None = never seen
+            # in the current session; numeric = seconds since the event type
+            # last fired. Frame age uses the newest per-device power-flow
+            # frame, matching the long-stall watchdog reference.
+            stream_attrs["stream_last_frame_age_s"] = stream_diag.get(
+                "stream_last_frame_age_s"
+            )
+            stream_attrs["stream_last_ack_age_s"] = stream_diag.get(
+                "stream_last_ack_age_s"
+            )
+            stream_attrs["stream_last_relay_status_age_s"] = stream_diag.get(
+                "stream_last_relay_status_age_s"
+            )
+            stream_attrs["stream_last_subscribe_age_s"] = stream_diag.get(
+                "stream_last_subscribe_age_s"
+            )
             session = getattr(c, "_session", None)
             if session is not None and getattr(session, "streaming", False):
                 stream_attrs["stream_frames_received_session"] = getattr(

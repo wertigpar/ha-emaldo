@@ -821,6 +821,303 @@ def parse_battery_data(payload: bytes) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# Accessory state (Fans Pack 01-03 + Water Sensor)
+#
+# The device also pushes unsolicited ``cabinet_state_changed`` frames
+# (opcode 8199, wire byte 0x07) with the same state layout as
+# ``get_cabinet_state``; this module polls the request/response types only.
+_CABINET_ALLINFO_TYPE = 0x0E
+_CABINET_STATE_TYPE = 0x0D
+_INVERTER_INFO_TYPE = 0x04
+# Bounded set of cabinet indices probed for accessory state. The
+# ``get_cabinet_allinfo`` (0x0E) first byte is NOT a reliable cabinet count
+# (it decodes to a large/unstable value on real firmware), so we never use
+# it to bound the per-cabinet loop — we probe a fixed range and keep whichever
+# cabinets actually reply. 4 matches the Water Sensor design (issue #63).
+ACCESSORY_MAX_CABINETS = 4
+
+
+def parse_cabinet_state(payload: bytes | None) -> dict | None:
+    """Parse a ``get_cabinet_state`` (type 0x0D) response payload.
+
+    Layout (per ``Mcu.Cabinet`` enums + ``sd/f0.java`` in the app; values
+    on the wire are the enums' *stateValue*, not their code):
+
+        byte 0   water state  (0 = valid/dry, 1 = exception/water)
+        byte 1   smoke state  (0 = valid, 1 = exception)
+        byte 2   fan state    (0 = stopped, 1 = running, 2 = exception)
+        byte 3   exception bitmap (bit 0 = Communication)
+        byte 4   firmware version length N
+        bytes 5..5+N   firmware version (ASCII)
+        byte 5+N cabinet index
+
+    Returns a dict with ``water``, ``smoke``, ``fan``, ``exceptions`` and
+    ``index`` keys, or *None* if the payload is too short.
+    """
+    if not payload or len(payload) < 5:
+        return None
+    water = payload[0]
+    smoke = payload[1]
+    fan = payload[2]
+    exc_bits = payload[3]
+    exceptions: list[int] = []
+    if (exc_bits >> 0) & 1:
+        exceptions.append(4)  # Mcu.Cabinet.CabinetException.Communication
+    ver_len = payload[4]
+    offset = 5 + ver_len
+    if len(payload) < offset + 1:
+        return None
+    index = payload[offset]
+    return {
+        # Normalise to the app's enum codes: 1 = valid/stop, 2 = exception,
+        # 2 = running for fans, 3 = fan exception (CabinetFanState codes).
+        "water": 2 if water == 1 else 1 if water == 0 else -1,
+        "smoke": 2 if smoke == 1 else 1 if smoke == 0 else -1,
+        "fan": 3 if fan == 2 else 2 if fan == 1 else 1 if fan == 0 else -1,
+        "exceptions": exceptions,
+        "version": payload[5 : 5 + ver_len].decode("utf-8", "replace") if ver_len else "",
+        "index": index,
+    }
+
+
+def parse_inverter_info(payload: bytes | None) -> dict | None:
+    """Parse a ``get_inverter_info`` (type 0x04) response payload.
+
+    Layout (per ``sd/v0.smali`` in the app):
+
+        byte 0      inverter state (raw stateValue)
+        bytes 1-2   battery exceptions bitmap (u16 LE)
+        bytes 3-4   inverter exceptions bitmap (u16 LE)
+        bytes 5-6   grid exceptions bitmap (u16 LE)
+        bytes 7-8   system exceptions bitmap (u16 LE, bit 12 = Fan fault)
+        bytes 9-10  MPPT exceptions bitmap (u16 LE)
+        bytes 11-12 present exceptions bitmap (u16 LE)
+        bytes 13-14 DC exceptions bitmap (u16 LE)
+        byte 15     idInfo length N, then N bytes ASCII idInfo
+        byte (var)  version length M, then M bytes firmware version
+        byte (var)  fan state (0 = stopped, 1 = running)
+        byte (var)  inverter index
+
+    Returns a dict with ``state``, ``system_exceptions``, ``fan_state``
+    and ``index`` keys, or *None* if the payload is too short.
+    """
+    if not payload or len(payload) < 19:
+        return None
+    offset = 15
+    id_len = payload[offset]
+    offset += 1 + id_len
+    if len(payload) < offset + 1:
+        return None
+    ver_len = payload[offset]
+    offset += 1 + ver_len
+    if len(payload) < offset + 2:
+        return None
+    fan_raw = payload[offset]
+    index = payload[offset + 1]
+
+    def _bits(raw: int) -> list[int]:
+        return [bit + 1 for bit in range(16) if (raw >> bit) & 1]
+
+    system = _bits(int.from_bytes(payload[7:9], "little"))
+    return {
+        "state": payload[0],
+        "system_exceptions": system,
+        # InverterFanState codes: 1 = STOP, 2 = RUNNING; the enum cannot
+        # represent a fan *fault* (that arrives via InverterSystemException
+        # Fan = 13), so raw values outside 0/1 map to -1 (unknown).
+        "fan_state": 2 if fan_raw == 1 else 1 if fan_raw == 0 else -1,
+        "index": index,
+    }
+
+
+def read_accessories(
+    e2e_creds: dict,
+    *,
+    timeout: float = 4.0,
+    probe_timeout: float = 1.5,
+    inverters: int = 3,
+    log: Callable[..., None] | None = None,
+) -> dict | None:
+    """Read PowerStation accessory state (fans + water sensor) via E2E.
+
+    Performs the full session flow (alive → heartbeat) on a one-shot socket
+    then issues, in order:
+
+    * ``get_cabinet_allinfo`` (0x0E) → number of battery cabinets
+    * ``get_cabinet_state`` (0x0D, cabinets 0..count-1) → per-cabinet
+      water/smoke/fan state
+    * ``get_inverter_info`` (0x04, inverters 0..N-1) → per-inverter fan
+      state (Fans Pack 01..03 on three-phase hardware)
+
+    Args:
+        e2e_creds: E2E credentials (from ``EmaldoClient.get_e2e_credentials``).
+        timeout: Socket timeout (seconds) for the handshake packets.
+        probe_timeout: Socket timeout (seconds) for each state probe.
+        inverters: Number of inverter indices to probe (1 = single-phase,
+            3 = three-phase "Fans Pack 01-03").
+        log: Optional log callback.
+
+    Returns:
+        Dict with ``cabinet_count``, ``cabinets`` (dict keyed by cabinet
+        index, each a parsed cabinet state), ``cabinet`` (alias of
+        ``cabinets[0]``, kept for the single-cabinet Water Sensor) and
+        ``inverters`` (dict keyed by inverter index), or *None* if the
+        cabinet-allinfo probe failed entirely.
+    """
+    session_nonce = generate_nonce()
+    home_alive = build_alive_packet(
+        e2e_creds,
+        "home",
+        session_nonce,
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    dev_alive = build_alive_packet(
+        e2e_creds,
+        "device",
+        session_nonce,
+        end_secret=e2e_creds["sender_end_secret"],
+    )
+    heartbeat = build_heartbeat_packet(e2e_creds, session_nonce)
+    wake = build_wake_packet(e2e_creds, session_nonce)
+
+    host, port = _resolve_host(e2e_creds["host"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    addr = (host, port)
+
+    def _send(pkt: bytes, label: str) -> bytes | None:
+        sock.sendto(pkt, addr)
+        try:
+            resp, _ = sock.recvfrom(4096)
+            if log:
+                log(f"{label}: sent {len(pkt)}B → got {len(resp)}B")
+            return resp
+        except socket.timeout:
+            if log:
+                log(f"{label}: sent {len(pkt)}B → no response")
+            return None
+
+    def _probe(pkt_label: str, pkt: bytes, validate: Callable[[bytes], bool]):
+        """Send one request and return its decrypted payload (or None)."""
+        _drain(sock)
+        raw = _send(pkt, pkt_label)
+        if not raw:
+            return None
+        decrypted = decrypt_response(
+            raw, e2e_creds["chat_secret"],
+            payload_validator=validate,
+            silent=True,
+        )
+        if decrypted is None:
+            # First datagram may be a subscription ACK — try one follow-up.
+            try:
+                raw2, _ = sock.recvfrom(4096)
+                if log:
+                    log(f"{pkt_label} follow-up: {len(raw2)}B")
+                decrypted = decrypt_response(
+                    raw2, e2e_creds["chat_secret"],
+                    payload_validator=validate,
+                    silent=True,
+                )
+            except socket.timeout:
+                pass
+        return decrypted
+
+    result: dict = {"cabinet_count": 0, "cabinets": {}, "cabinet": None, "inverters": {}}
+    try:
+        _send(home_alive, "Alive(home)")
+        _send(dev_alive, "Alive(device)")
+        _send(wake, "Wake")
+        _send(heartbeat, "Heartbeat")
+        time.sleep(0.2)
+        sock.settimeout(probe_timeout)
+
+        # 1) Cabinet allinfo (0x0E, empty payload). Its first byte is NOT a
+        # usable cabinet count — it decodes to 2/3/4 on single-cabinet devices
+        # and to a runaway ~194 on others — so we NEVER use it to bound the
+        # loop or drive discovery. We only probe a bounded set of indices and
+        # keep whichever cabinets actually reply.
+        _probe(
+            "CabinetAllInfo", build_subscription_packet(
+                e2e_creds, _CABINET_ALLINFO_TYPE, session_nonce,
+                payload=b"", request_mode=True,
+            ),
+            lambda p: len(p) >= 1,
+        )
+
+        # 2) Per-cabinet state (0x0D, payload [index]) for a BOUNDED set of
+        # cabinet indices. Validators also constrain the raw state bytes
+        # (0/1 water+smoke, 0-2 fan) so the relay's decrypted JSON status
+        # frames (``{"__time"...``) cannot pass a bare length check.
+        cabinets: dict[int, dict] = {}
+        for cidx in range(ACCESSORY_MAX_CABINETS):
+            pkt = build_subscription_packet(
+                e2e_creds, _CABINET_STATE_TYPE, session_nonce,
+                payload=bytes([cidx]), request_mode=True,
+            )
+            dec = _probe(
+                f"CabinetState(idx={cidx})", pkt,
+                lambda p: len(p) >= 5 and p[0] in (0, 1) and p[1] in (0, 1)
+                and p[2] in (0, 1, 2),
+            )
+            if dec is not None:
+                state = parse_cabinet_state(dec)
+                # The validator above only constrains water/smoke/fan bytes, so a
+                # relay echo or a reply for a different cabinet index could pass.
+                # The device reports its own cabinet index in the payload — but it
+                # ECHOES the index we probed even for cabinets that do not exist,
+                # so an index-only guard cannot tell real from phantom (#63). Real
+                # cabinets reply with a non-empty firmware version (e.g. 0x12);
+                # phantom replies for absent cabinets carry an all-zero version
+                # (0x00). Require a real, non-empty, non-NUL version on top of the
+                # index match, so a phantom reply never inflates cabinet_count.
+                if state is not None and state.get("index") == cidx:
+                    version = state.get("version") or ""
+                    if any(ord(c) != 0 for c in version):
+                        cabinets[cidx] = state
+        result["cabinets"] = cabinets
+        # Number of cabinets that ACTUALLY replied (drives Water Sensor
+        # discovery). Single-cabinet devices report 1, two-cabinet devices 2,
+        # regardless of what the allinfo first byte claims.
+        result["cabinet_count"] = len(cabinets)
+        # Backward-compatible alias for the single-cabinet Water Sensor.
+        result["cabinet"] = cabinets.get(0)
+
+        # 3) Inverter info per index (0x04, payload [index]).
+        # Byte 0 = InverterState raw value (0-2); constrain it like the
+        # cabinet-state validator so JSON status frames cannot pass.
+        for idx in range(max(1, inverters)):
+            pkt = build_subscription_packet(
+                e2e_creds, _INVERTER_INFO_TYPE, session_nonce,
+                payload=bytes([idx]), request_mode=True,
+            )
+            dec = _probe(
+                f"InverterInfo(idx={idx})", pkt,
+                lambda p: len(p) >= 19 and p[0] in (0, 1, 2),
+            )
+            if dec is not None:
+                info = parse_inverter_info(dec)
+                if info is not None:
+                    result["inverters"][idx] = info
+
+        return result
+    finally:
+        sock.close()
+
+
+def _drain(sock: socket.socket) -> None:
+    """Discard stale UDP datagrams queued on *sock* (late replies)."""
+    cur_timeout = sock.gettimeout()
+    sock.settimeout(0)
+    while True:
+        try:
+            sock.recvfrom(4096)
+        except OSError:
+            break
+    sock.settimeout(cur_timeout)
+
+
 _POWER_FLOW_MAX_RAW_HECTOWATTS = 2000  # 200 kW per channel; filters bogus multi-MW spikes
 
 
@@ -3503,6 +3800,10 @@ class PersistentE2ESession:
         # offline) is not punished as a stale-secret failure.
         self._stream_last_decrypted_frame_ts: float = 0.0
         self._stream_ever_decrypted = False
+        # Monotonic timestamps of the last benign relay datagrams, for the
+        # stream_diagnostics age sensors (c182951).
+        self._stream_last_ack_monotonic: float = 0.0
+        self._stream_last_relay_status_monotonic: float = 0.0
         # Deadline by which a decrypted frame must arrive after a handshake-ok
         # reconnect, else the reconnect is treated as decrypt-failed. Armed in
         # _stream_reconnect_locked; None when no gate is pending.
@@ -4069,6 +4370,28 @@ class PersistentE2ESession:
     def stream_diagnostics(self) -> dict:
         """Snapshot of stream counters for the diagnostic sensor."""
         with self._lock:
+            _now_diag = time.perf_counter()
+            _pow_ref = (
+                max(self._latest_power_flow_monotonic.values())
+                if self._latest_power_flow_monotonic
+                else None
+            )
+            _frame_age = (_now_diag - _pow_ref) if _pow_ref is not None else None
+            _ack_age = (
+                (_now_diag - self._stream_last_ack_monotonic)
+                if self._stream_last_ack_monotonic
+                else None
+            )
+            _relay_age = (
+                (_now_diag - self._stream_last_relay_status_monotonic)
+                if self._stream_last_relay_status_monotonic
+                else None
+            )
+            _sub_age = (
+                (_now_diag - self._last_subscribe_monotonic)
+                if self._last_subscribe_monotonic is not None
+                else None
+            )
             return {
                 "frames": self._stream_frames_received,
                 "resubscribes": self._stream_resubscribes,
@@ -4083,6 +4406,10 @@ class PersistentE2ESession:
                 "last_reconnect_reason": self._stream_last_reconnect_reason,
                 "reconnect_reasons": dict(self._stream_reconnect_reasons),
                 "creds_refresh_queued": self._stream_needs_creds_refresh,
+                "stream_last_frame_age_s": _frame_age,
+                "stream_last_ack_age_s": _ack_age,
+                "stream_last_relay_status_age_s": _relay_age,
+                "stream_last_subscribe_age_s": _sub_age,
             }
 
     def _stream_watchdog_locked(self, now: float) -> None:
@@ -4244,9 +4571,34 @@ class PersistentE2ESession:
                     break
                 self._stream_drain_packets += 1
                 if self._is_session_expired(resp):
+                    _t_21204 = time.perf_counter()
+                    _sub_age_txt = (
+                        f"{_t_21204 - self._last_subscribe_monotonic:.1f}s"
+                        if self._last_subscribe_monotonic is not None
+                        else "n/a"
+                    )
+                    _pow_ref_t = (
+                        max(self._latest_power_flow_monotonic.values())
+                        if self._latest_power_flow_monotonic
+                        else None
+                    )
+                    _frame_age_txt = (
+                        f"{_t_21204 - _pow_ref_t:.1f}s"
+                        if _pow_ref_t is not None
+                        else "n/a"
+                    )
+                    _ack_age_txt = (
+                        f"{_t_21204 - self._stream_last_ack_monotonic:.1f}s"
+                        if self._stream_last_ack_monotonic
+                        else "n/a"
+                    )
                     if self._log:
-                        self._log("Stream saw 21204 — flagging reconnect")
-                    self._last_21204_monotonic = time.perf_counter()
+                        self._log(
+                            "Stream saw 21204 — flagging reconnect "
+                            f"(since_subscribe={_sub_age_txt}, "
+                            f"since_frame={_frame_age_txt}, since_ack={_ack_age_txt})"
+                        )
+                    self._last_21204_monotonic = _t_21204
                     self._last_21204_stage = "stream"
                     self._stream_flag_reconnect("session_expired_21204")
                     break
@@ -4366,8 +4718,10 @@ class PersistentE2ESession:
                 #   binary/undecryptable   -> genuinely-unparsed (+ categories)
                 if _cat == "keepalive_ack":
                     self._stream_keepalive_acks += 1
+                    self._stream_last_ack_monotonic = time.perf_counter()
                 elif _cat in self._stream_relay_status:
                     self._stream_relay_status[_cat] += 1
+                    self._stream_last_relay_status_monotonic = time.perf_counter()
                 else:
                     self._stream_drain_unparsed += 1
                     self._stream_drain_unparsed_categories[_cat] = (
@@ -4632,6 +4986,172 @@ class PersistentE2ESession:
         except Exception:  # noqa: BLE001 - best-effort parse
             return None
         return parse_regulate_frequency_state(decrypted)
+
+    def read_accessories_state(self, inverters: int = 3, *, max_duration: float = 12.0) -> dict | None:
+        """Read PowerStation accessory state (fans + water sensor) over the session.
+
+        Runs the 0x0E / 0x0D / 0x04 probes on the persistent realtime socket
+        (reusing the established nonce/creds, no Alive/Wake/Heartbeat) so a
+        probe never supersedes or expires the realtime session.  Each probe
+        takes the session lock only for its own send/receive, letting the
+        stream keepalive/receiver interleave.
+
+        Returns a dict with ``cabinet_count``, ``cabinets``, ``cabinet`` and
+        ``inverters`` — same shape as the free ``read_accessories`` — or *None*
+        if nothing was read / the session expired.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+
+        class _Expired(Exception):
+            pass
+
+        started = time.perf_counter()
+        cabinets: dict[int, dict] = {}
+        inverters_dict: dict[int, dict] = {}
+
+        def _probe(label: str, pkt: bytes, validate) -> bytes | None:
+            """Send one request under the lock; return decrypted payload or None.
+
+            Raises ``_Expired`` when the relay reports session expiry (21204);
+            the caller aborts the whole scan (stream reconnect machinery owns
+            recovery here — never handshake inside a probe).
+            """
+            with self._lock:
+                if self._sock is None or self._closed:
+                    return None
+                # Never send accessory probes while the stream is reconnecting
+                # or inside its backoff window: this scan holds self._lock for
+                # its whole 8-packet duration and would starve the 7s keepalive,
+                # letting the relay expire the session (21204). Accessory state is
+                # best-effort and changes slowly — skip the probe, retry next scan.
+                if self._stream_needs_reconnect:
+                    return None
+                if (
+                    self._stream_reconnect_not_before is not None
+                    and time.perf_counter() < self._stream_reconnect_not_before
+                ):
+                    return None
+                prev_timeout = self._sock.gettimeout()
+                self._sock.settimeout(min(self._timeout, 1.5))
+                try:
+                    resp = self._send_raw(pkt, label)
+                    if resp is None:
+                        return None
+                    if self._is_session_expired(resp):
+                        raise _Expired()
+                    try:
+                        decrypted = decrypt_response(
+                            resp, self._creds["chat_secret"],
+                            payload_validator=validate, silent=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        decrypted = None
+                    if decrypted is None:
+                        # First datagram may be a subscription ACK — follow-up.
+                        try:
+                            resp2, _ = self._sock.recvfrom(4096)
+                            if self._is_session_expired(resp2):
+                                raise _Expired()
+                            try:
+                                decrypted = decrypt_response(
+                                    resp2, self._creds["chat_secret"],
+                                    payload_validator=validate, silent=True,
+                                )
+                            except Exception:  # noqa: BLE001
+                                decrypted = None
+                        except socket.timeout:
+                            pass
+                    return decrypted
+                finally:
+                    self._sock.settimeout(prev_timeout)
+
+        if self._log:
+            self._log(f"Accessories scan start: inverters={inverters}")
+
+        try:
+            # 1) Inverter info per index (0x04).
+            # Abort after 2 consecutive timeouts, exactly like read_battery_info:
+            # a silent probe costs the full socket timeout, and during a relay
+            # blackout an unbounded scan holds self._lock long enough to starve
+            # the 7s keepalive and let the relay expire the session (21204).
+            _consecutive_timeouts = 0
+            for idx in range(max(1, inverters)):
+                if time.perf_counter() - started > max_duration:
+                    break
+                pkt = build_subscription_packet(
+                    self._creds, _INVERTER_INFO_TYPE, self._session_nonce,
+                    payload=bytes([idx]), request_mode=True,
+                )
+                dec = _probe(
+                    f"InverterInfo(idx={idx})", pkt,
+                    lambda p: len(p) >= 19 and p[0] in (0, 1, 2),
+                )
+                if dec is None:
+                    _consecutive_timeouts += 1
+                    if _consecutive_timeouts >= 2:
+                        break
+                    continue
+                _consecutive_timeouts = 0
+                info = parse_inverter_info(dec)
+                if info is not None:
+                    inverters_dict[idx] = info
+
+            # 2) Per-cabinet state (0x0D, bounded indices) + phantom guard #63.
+            _consecutive_timeouts = 0
+            for cidx in range(ACCESSORY_MAX_CABINETS):
+                if time.perf_counter() - started > max_duration:
+                    break
+                pkt = build_subscription_packet(
+                    self._creds, _CABINET_STATE_TYPE, self._session_nonce,
+                    payload=bytes([cidx]), request_mode=True,
+                )
+                dec = _probe(
+                    f"CabinetState(idx={cidx})", pkt,
+                    lambda p: len(p) >= 5 and p[0] in (0, 1) and p[1] in (0, 1)
+                    and p[2] in (0, 1, 2),
+                )
+                if dec is None:
+                    _consecutive_timeouts += 1
+                    if _consecutive_timeouts >= 2:
+                        break
+                    continue
+                _consecutive_timeouts = 0
+                state = parse_cabinet_state(dec)
+                if state is not None and state.get("index") == cidx:
+                    version = state.get("version") or ""
+                    if any(ord(c) != 0 for c in version):
+                        cabinets[cidx] = state
+
+            # 3) Cabinet allinfo (0x0E, empty payload). Result unused — only a
+            #    bounded probe set; NEVER drives discovery (see read_accessories).
+            if time.perf_counter() - started <= max_duration:
+                _probe(
+                    "CabinetAllInfo",
+                    build_subscription_packet(
+                        self._creds, _CABINET_ALLINFO_TYPE, self._session_nonce,
+                        payload=b"", request_mode=True,
+                    ),
+                    lambda p: len(p) >= 1,
+                )
+        except _Expired:
+            return None
+        except Exception:  # noqa: BLE001 - best-effort scan
+            pass
+
+        if not cabinets and not inverters_dict:
+            return None
+        if self._log:
+            self._log(
+                f"Accessories scan complete: cabinets={len(cabinets)} "
+                f"inverters={len(inverters_dict)}"
+            )
+        return {
+            "cabinet_count": len(cabinets),
+            "cabinets": cabinets,
+            "cabinet": cabinets.get(0),
+            "inverters": inverters_dict,
+        }
 
     def _try_parse_power_flow(self, resp: bytes, chat_secret: str | None = None) -> dict | None:
         """Decrypt+parse a response as a power flow payload. Returns None on mismatch.

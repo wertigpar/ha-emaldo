@@ -97,7 +97,14 @@
       "battery_module_serial": { "name": "Batterimodul {module} Serienummer" },
       "battery_module_position": { "name": "Batterimodul {module} Posisjon" },
       "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
-      "facility_id_production": { "name": "Facility ID - Production (GSRN)" }
+      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
+      "fan_pack_01": { "name": "Viftepakke 01" },
+      "fan_pack_02": { "name": "Viftepakke 02" },
+      "fan_pack_03": { "name": "Viftepakke 03" },
+      "water_sensor": { "name": "Vannsensor" },
+      "water_sensor_2": { "name": "Vannsensor 2" },
+      "water_sensor_3": { "name": "Vannsensor 3" },
+      "water_sensor_4": { "name": "Vannsensor 4" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Tredjeparts solpanel" },

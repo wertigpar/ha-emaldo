@@ -1,5 +1,63 @@
 # Changes
 
+## Unreleased
+
+### Added
+
+- **Inverter Fans Pack sensors 01–03** (`power_store_fan_pack_01` …
+  `power_store_fan_pack_03`), ported from upstream beta27 (`508d8fa`). Every
+  Emaldo device is three-phase, so three fan sensors are always registered.
+  Each is an ENUM sensor (`stopped` / `running` / `fault` — `fault` when the
+  parsed `system_exceptions` list carries exception 13). The value is read by
+  a new session-stable accessory probe (`0x04` inverter-info per index) — see
+  the access-accessory rewrite under Fixed.
+- **Water Sensor for cabinet 0 plus dynamic multi-cabinet sensors.** The
+  accessory scan now probes all four cabinet indices (0–3) and registers a
+  `power_store_water_sensor_cabinet_N` for every cabinet that proves real
+  (index match + non-NUL firmware version at the E2E layer, battery
+  `cabinet_index` corroboration at the coordinator layer — the
+  phantom-guard from beta31, now applied to the persistent-session scan too).
+  A `cabinet_count` reading is added to the water sensor attrs.
+- **Stream age diagnostics** (`stream_last_frame_age_s`,
+  `stream_last_ack_age_s`, `stream_last_relay_status_age_s`,
+  `stream_last_subscribe_age_s`) on the stream-health sensors, and the 21204
+  reconnect log now reports `since_subscribe` / `since_frame` / `since_ack`
+  (upstream c182951).
+- **Realtime session telemetry persisted across reboots.** The coordinator's
+  shutdown summary (`total_polls`, `successful_polls`, `stall_active`,
+  `legacy_fallback_active`, `last_success`, plus `shutdown_ts` /
+  `stale_at_shutdown_s`) is now written synchronously from
+  `coordinator.async_shutdown` to `.storage/emaldo_session_<device_id>.json`
+  (`EMALGO_DEBUG[prev_session_persist]`). HA core stop does NOT call
+  `async_unload_entry`, so the previous unload-only write silently missed
+  every restart — exactly the stale-episode case this diagnostic targets.
+  The unload path still re-writes the same summary (idempotent overwrite).
+- **Boot telemetry** (`EMALGO_DEBUG[boot_first_success]`, first valid E2E
+  read delta after restart) and a stall-proof prior-session report
+  (`EMALGO_DEBUG[prev_session_loaded]` at setup, `[prev_session]` once the
+  first refresh lands). The report is gated only on `shutdown_ts` presence,
+  so it fires even when the first read stalls — separating "reboot fixed a
+  wedged state" from "outage was external".
+
+### Fixed
+
+- **Accessory probes could expire the realtime session from inside the
+  scan.** The old standalone probe path (Alive/Wake/Heartbeat + separate UDP
+  socket) supersedes the realtime session on the relay; the new
+  `read_accessories_state` runs the 0x0E/0x0D/0x04 probes directly on the
+  persistent session socket, reusing the established nonce/creds, holding the
+  session lock only per send/receive (7s keepalive never starved), skipping
+  probes entirely while a reconnect or its backoff window is armed, and
+  bailing out after two consecutive timeouts so a relay blackout cannot
+  strand the stream (upstream 41d759b).
+- **`stats_last_success` now also refreshes from a healthy stream.** While
+  the stream delivers frames younger than `STREAM_STALE_AFTER`, the
+  `last_success` stats field no longer goes stale on devices whose battery
+  modules never respond — fixing a phantom 21204 timeout in legacy commands
+  (`#47`).
+- Restored the free-standing `read_accessories` fallback (legacy
+  session-less scan path) for the coordinator's standalone mode.
+
 ## v1.0.0-beta32
 
 ### About this version

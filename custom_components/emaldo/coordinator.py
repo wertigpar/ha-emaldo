@@ -729,6 +729,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # diagnosis since users report long after the stall started.
         self._stall_active: bool = False
         self._stall_snapshot: dict | None = None
+        self._stall_onset_monotonic: float = 0.0
         # Consecutive stream-mode full-reset escalations without a successful
         # read in between. Repeated resets indicate the device-push frames
         # aren't reaching Home Assistant — either a device→relay failure
@@ -756,6 +757,22 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # a stable HA sensor even when modules respond in different orders or
         # some slots are temporarily silent (#23).
         self._battery_module_slots: dict[int, dict] = {}
+        # Accessory state (Fans Pack 01-03 + Water Sensor) read via the
+        # 0x0E/0x0D/0x04 one-shot accessory session (see
+        # ``emaldo_lib.e2e.read_accessories``). Refreshed as a background task
+        # on the same pattern as the battery-module scan so the scans never
+        # hold the realtime session lock.
+        self._accessories: dict = {}
+        # Accessory state (Fans Pack + Water Sensor) is polled every 10
+        # successful realtime reads (~100 s). The counter starts at 9 so the
+        # scan fires on the FIRST poll after startup (no 100 s wait for the
+        # values to appear), then repeats as a safety net: accessory values
+        # are static between fan spin-up/down and leak events, but a scan can
+        # abort (transient E2E failure) and the once-only model would then
+        # leave the sensors unknown until a restart. Periodic re-scan keeps
+        # them recoverable without adding meaningful API load.
+        self._accessories_poll_counter: int = 9  # trigger on first successful poll
+        self._accessories_scan_task: asyncio.Task | None = None
         # Full-cabinet discovery flag: after the first successful scan,
         # subsequent scans re-probe only known slots (fast re-scan).
         # Hardware add/remove requires integration restart — no periodic
@@ -907,6 +924,55 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     async def async_shutdown(self) -> None:
         """Cancel keepalive, battery scan and close the UDP session."""
+        _LOGGER.info(
+            "Emaldo realtime coordinator shutdown: total_polls=%s "
+            "successful=%s stall_active=%s legacy_fallback_active=%s "
+            "last_success=%s",
+            self.stats_total_polls,
+            self.stats_successful_polls,
+            self._stall_active,
+            self._legacy_fallback_active,
+            getattr(self, "stats_last_success", None),
+        )
+        # Session telemetry persisted for the next boot (reboot-resolution
+        # correlation: did shutdown state get fixed by a restart, or was the
+        # outage external?). Written here — NOT in __init__.py unload — because
+        # HA core stop does not call async_unload_entry, so unload-only writes
+        # silently miss every restart. <__init__.py> unload additionally
+        # re-writes the same summary (idempotent overwrite).
+        self._prev_session_summary = {
+            "total_polls": self.stats_total_polls,
+            "successful_polls": self.stats_successful_polls,
+            "stall_active": self._stall_active,
+            "legacy_fallback_active": self._legacy_fallback_active,
+            "last_success": getattr(self, "stats_last_success", None),
+        }
+        try:
+            _dev = (
+                getattr(getattr(self, "_parent", None), "device_id", None)
+                or "unknown"
+            )
+            _p = self.hass.config.path(f".storage/emaldo_session_{_dev}.json")
+            import json as _json
+            import time as _tm
+
+            _dup = dict(self._prev_session_summary)
+            _dup["shutdown_ts"] = (
+                datetime.now().astimezone().isoformat(timespec="seconds")
+            )
+            _ls = _dup.get("last_success")
+            _dup["stale_at_shutdown_s"] = (
+                round(_tm.time() - _ls, 1) if _ls else None
+            )
+            with open(_p, "w", encoding="utf-8") as _fh:
+                _json.dump(_dup, _fh, indent=2)
+            _LOGGER.info(
+                "EMALDO_DEBUG[prev_session_persist] written %s (stale=%s)",
+                _p,
+                _dup.get("stale_at_shutdown_s"),
+            )
+        except (OSError, ValueError) as _exc:  # never break shutdown
+            _LOGGER.warning("Emaldo session telemetry persist failed: %s", _exc)
         if self._keepalive_task is not None:
             self._keepalive_task.cancel()
             try:
@@ -921,6 +987,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             except (asyncio.CancelledError, Exception):
                 pass
             self._battery_scan_task = None
+        if self._accessories_scan_task is not None:
+            self._accessories_scan_task.cancel()
+            try:
+                await self._accessories_scan_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._accessories_scan_task = None
         if self._session is not None:
             _LOGGER.debug(
                 "Shutdown: closing E2E session for device %s",
@@ -1501,12 +1574,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         preserves the state that actually matters for diagnosis. The snapshot is
         re-armed once a successful poll re-warms the rolling window.
         """
+        import time as _time
         window = self._recent_poll_outcomes
         min_samples = min(REALTIME_SUCCESS_WINDOW, 12)
         recent_cold = len(window) >= min_samples and not any(window)
         if recent_cold and not self._stall_active:
             self._stall_active = True
             self._stall_snapshot = self._build_stall_snapshot()
+            self._stall_onset_monotonic = _time.monotonic()
             _LOGGER.warning(
                 "E2E realtime stall detected (no successful poll in the last %d "
                 "polls) — snapshot captured for diagnostics: %s",
@@ -1515,6 +1590,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
         elif any(window):
             self._stall_active = False
+            if self._stall_snapshot is not None:
+                _LOGGER.info(
+                    "E2E realtime stall resolved after %.0fs (snapshot was "
+                    "captured at onset for diagnostics)",
+                    _time.monotonic() - self._stall_onset_monotonic,
+                )
+                self._stall_snapshot = None
 
     def _build_stall_snapshot(self) -> dict[str, Any]:
         """Assemble the diagnostic snapshot recorded at stall onset."""
@@ -2030,6 +2112,17 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
         self._recent_window_prev_success = self.stats_successful_polls
         self.stats_total_polls += 1
+        _now_poll = _time.monotonic()
+        if getattr(self, "_poll_cycle_prev_ts", None) is not None:
+            _cycle_s = _now_poll - self._poll_cycle_prev_ts
+            if _cycle_s > 30.0:
+                _LOGGER.warning(
+                    "E2E realtime poll cycle took %.1fs (expected <= ~%.0fs) — "
+                    "checking for executor hang / blocked socket",
+                    _cycle_s,
+                    self.update_interval.total_seconds(),
+                )
+        self._poll_cycle_prev_ts = _now_poll
         self._maybe_update_stall_snapshot()
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug(
@@ -2044,6 +2137,21 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         try:
             data = await self.hass.async_add_executor_job(self._read_power_flow)
             _LOGGER.debug("[E2E diag] %s", self._e2e_diag)
+            # Stream mode returns from _read_power_flow before the poll-mode
+            # success path, so without this the stale clock (stats_last_success,
+            # 28s) freezes the moment stream mode is entered and the sensor
+            # reports stale even while frames flow at 0.4s (#47 lot-of-stale).
+            if self._stream_mode:
+                # Advance on ANY fresh frame across devices: the frame-age
+                # reference is the newest per-device frame, but
+                # _read_power_flow returns only THIS device's frame, so a
+                # secondary unit would otherwise see a live frame from the
+                # primary and still be marked stale (#47 false stale).
+                _frame_age = (self._stream_diag or {}).get(
+                    "stream_last_frame_age_s"
+                )
+                if _frame_age is not None and _frame_age < STREAM_STALE_AFTER:
+                    self.stats_last_success = _time.time()
         except EmaldoAuthError as err:
             # Token expired — force REST re-login and E2E reconnect.
             # This is self-healing (next poll re-logins automatically), so log at INFO.
@@ -2387,6 +2495,17 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._read_errors_last_log = None
         self._empty_reconnect_deferral_streak = 0
         self._undecryptable_streak = 0
+        if (
+            self._consecutive_stream_stall_resets > 0
+            or self._stall_resets_without_success > 0
+        ):
+            _LOGGER.warning(
+                "E2E realtime recovered after %d stream stall resets / %d full "
+                "resets without a successful read (legacy_fallback_active=%s)",
+                self._consecutive_stream_stall_resets,
+                self._stall_resets_without_success,
+                self._legacy_fallback_active,
+            )
         self._consecutive_stream_stall_resets = 0
         # A successful read means the current transport is working, so clear the
         # legacy-fallback escalation counter (Fix E). Note: once
@@ -2402,6 +2521,25 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "EMALDO_DEBUG[first_successful_refresh] realtime coordinator got its "
                 "first valid E2E read — entities will now start writing state"
             )
+            _boot_ts = getattr(self, "_boot_ts", None)
+            if _boot_ts is not None:
+                _LOGGER.info(
+                    "EMALDO_DEBUG[boot_first_success] boot -> first valid E2E "
+                    "read in %.1fs",
+                    _time.time() - _boot_ts,
+                )
+            _prev = getattr(self, "_prev_session", None)
+            if isinstance(_prev, dict) and _prev.get("shutdown_ts"):
+                _LOGGER.info(
+                    "EMALDO_DEBUG[prev_session] prior session: shutdown at %s, "
+                    "stale_at_shutdown=%ss, total_polls=%s, stall_active=%s, "
+                    "legacy_fallback=%s",
+                    _prev.get("shutdown_ts"),
+                    _prev.get("stale_at_shutdown_s"),
+                    _prev.get("total_polls"),
+                    _prev.get("stall_active"),
+                    _prev.get("legacy_fallback_active"),
+                )
 
         # Poll balancing state periodically using the same session. This avoids
         # opening a competing UDP socket from the slow coordinator. The cadence
@@ -2533,8 +2671,23 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     name=f"{DOMAIN}_battery_scan",
                 )
 
+        # Poll accessory state (Fans Pack + Water Sensor) every 10 successful
+        # reads (~100 s). Accessory values change slowly (fan spin-up/down,
+        # water leak events), so a modest cadence keeps the extra one-shot
+        # E2E session (~5 request/response rounds) negligible.
+        self._accessories_poll_counter += 1
+        if self._accessories_poll_counter >= 10:
+            self._accessories_poll_counter = 0
+            if self._accessories_scan_task is None or self._accessories_scan_task.done():
+                self._accessories_scan_task = self._entry.async_create_background_task(
+                    self.hass,
+                    self._async_scan_accessories(),
+                    name=f"{DOMAIN}_accessories_scan",
+                )
+
         data["battery_modules"] = self._battery_modules
         data["battery_module_slots"] = self._battery_module_slots
+        data["accessories"] = self._accessories
 
         return data
 
@@ -2617,6 +2770,115 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Battery module info read failed: %s", err, exc_info=True)
             self._battery_modules_poll_counter = 59
+
+    def _read_accessories_standalone(self) -> dict | None:
+        """Read accessory state (fans + water sensor) over the persistent session.
+
+        Option A (2026): runs on the realtime session socket under per-probe
+        lock instead of a throwaway one-shot UDP session — the one-shot Alive
+        superseded the realtime session and caused 21204 expiry storms on the
+        stream.
+        """
+        session = self._session
+        if session is None or session.closed:
+            return None
+        # Every Emaldo device is three-phase — always 3 inverters (fans).
+        inverters = 3
+        return session.read_accessories_state(inverters=inverters)
+
+    async def _async_scan_accessories(self) -> None:
+        """Run the 0x0E/0x0D/0x04 accessory scan off the realtime poll path.
+
+        Updates ``_accessories`` and notifies listeners so the Fan Pack and
+        Water Sensor sensors pick up new data without blocking a realtime
+        power-flow refresh.
+        """
+        try:
+            accessories = await self.hass.async_add_executor_job(
+                self._read_accessories_standalone
+            )
+            if accessories:
+                self._accessories = accessories
+                if isinstance(self.data, dict):
+                    self.data["accessories"] = self._accessories
+                _LOGGER.debug(
+                    "Accessory state poll: cabinet_count=%s cabinet=%s inverters=%s",
+                    accessories.get("cabinet_count"),
+                    accessories.get("cabinet"),
+                    sorted(accessories.get("inverters", {})),
+                )
+                # Register Water Sensors for any ADDITIONAL cabinets beyond the
+                # first (multi-cabinet installs, issue #63). Cabinet 0 is
+                # created at sensor setup; this adds cabinet 1+ on discovery.
+                # ``water_async_add``/``water_cabinets_created`` live on the
+                # per-device item (set in sensor.async_setup_entry), so find the
+                # item whose realtime coordinator *is* this one — looking up the
+                # entry-level dict by entry_id returns None, which silently
+                # skipped registration (fixed here).
+                #
+                # PHANTOM-GUARD (issue #63): a cabinet that physically holds a
+                # battery module reports its 0-based ``cabinet_index`` (parsed
+                # in ``parse_battery_data``). The relay reuses real cabinet 0's
+                # data (version, water/smoke/fan, index) when echoing phantom
+                # cabinet indices, so the accessory ``cabinet_count`` alone
+                # cannot distinguish a real second cabinet from a phantom one.
+                # A battery module CAN: only cabinets that actually hold a
+                # battery module may receive a Water Sensor. This is the single
+                # un-spoofable ground truth in the protocol. If no battery
+                # modules have been scanned yet (cold start), the set is empty
+                # and no extra cabinets are created until a battery scan lands;
+                # that is the safe default (never create a phantom).
+                battery_cabinets = {
+                    m.get("cabinet_index")
+                    for m in self._battery_module_slots.values()
+                    if isinstance(m.get("cabinet_index"), int)
+                }
+                relay_cabinets = set(accessories.get("cabinets", {}).keys())
+                confirmed_cabinets = battery_cabinets & relay_cabinets
+                # Cabinet 0 is created at setup and needs no confirmation; only
+                # N>0 (a genuine second+ cabinet) requires battery proof.
+                confirmed_cabinets.discard(0)
+                confirmed_cabinets.discard(None)
+                if confirmed_cabinets:
+                    entry_data = self.hass.data.get(DOMAIN, {}).get(
+                        self._entry.entry_id
+                    )
+                    item = next(
+                        (
+                            i
+                            for i in (entry_data or {}).get("devices", [])
+                            if i.get("realtime") is self
+                        ),
+                        None,
+                    )
+                    add_cb = item.get("water_async_add") if item else None
+                    created = item.get("water_cabinets_created") if item else None
+                    if add_cb is not None and created is not None:
+                        from .sensor import add_water_sensors_for_cabinets
+
+                        add_water_sensors_for_cabinets(
+                            self, confirmed_cabinets, add_cb, created
+                        )
+            else:
+                _LOGGER.debug(
+                    "Accessory state poll returned no data; retaining previous state"
+                )
+                # Re-arm so the next successful poll retries the scan.
+                self._accessories_poll_counter = 9
+            self.async_update_listeners()
+        except EmaldoConnectionError as err:
+            _LOGGER.debug(
+                "Accessory state poll skipped due to transient connection error; "
+                "retaining previous state: %s",
+                err,
+            )
+            # Re-arm so the next successful poll retries the scan.  Same
+            # safety note as battery modules: the 10-poll (~100 s) cadence
+            # on recovered polls prevents backend hammering.
+            self._accessories_poll_counter = 9
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Accessory state read failed: %s", err, exc_info=True)
+            self._accessories_poll_counter = 9
 
     def _save_battery_cache(self) -> None:
         """Persist battery module data for next startup (fire-and-forget).

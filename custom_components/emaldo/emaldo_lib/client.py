@@ -796,6 +796,14 @@ class EmaldoClient:
                         not force_refresh
                         and age <= self._home_e2e_ttl
                     ):
+                        _LOGGER.info(
+                            "home e2e cache reused: age=%.0fs ttl=%.0fs "
+                            "force_refresh=%s home_id=%s",
+                            age,
+                            self._home_e2e_ttl,
+                            force_refresh,
+                            home_id,
+                        )
                         return dict(cached[0])
 
             home_result = self.api_request(

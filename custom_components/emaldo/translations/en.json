@@ -100,7 +100,14 @@
       "battery_module_serial": { "name": "Battery Module {module} Serial" },
       "battery_module_position": { "name": "Battery Module {module} Position" },
       "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
-      "facility_id_production": { "name": "Facility ID - Production (GSRN)" }
+      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
+      "fan_pack_01": { "name": "Fan pack 01" },
+      "fan_pack_02": { "name": "Fan pack 02" },
+      "fan_pack_03": { "name": "Fan pack 03" },
+      "water_sensor": { "name": "Water sensor" },
+      "water_sensor_2": { "name": "Water sensor 2" },
+      "water_sensor_3": { "name": "Water sensor 3" },
+      "water_sensor_4": { "name": "Water sensor 4" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Third-party PV" },

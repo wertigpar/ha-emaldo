@@ -97,7 +97,14 @@
       "battery_module_serial": { "name": "Akkumoduuli {module} Sarjanumero" },
       "battery_module_position": { "name": "Akkumoduuli {module} Sijainti" },
       "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
-      "facility_id_production": { "name": "Facility ID - Production (GSRN)" }
+      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
+      "fan_pack_01": { "name": "Puhallinpaketti 01" },
+      "fan_pack_02": { "name": "Puhallinpaketti 02" },
+      "fan_pack_03": { "name": "Puhallinpaketti 03" },
+      "water_sensor": { "name": "Vesianturi" },
+      "water_sensor_2": { "name": "Vesianturi 2" },
+      "water_sensor_3": { "name": "Vesianturi 3" },
+      "water_sensor_4": { "name": "Vesianturi 4" }
     },
     "switch": {
       "thirdparty_pv": { "name": "Kolmannen osapuolen aurinkopaneeli" },

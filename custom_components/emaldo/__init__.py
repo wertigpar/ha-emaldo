@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import time as _time
+from datetime import datetime
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -139,6 +142,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             is_primary = _ptracker[home_id] == device["id"]
             realtime = EmaldoRealtimeCoordinator(hass, entry, power, is_primary=is_primary)
             setattr(realtime, "_legacy_uid_mode", getattr(power, "_legacy_uid_mode", False))
+            setattr(realtime, "_boot_ts", _time.time())
+            _prev_path = hass.config.path(
+                f".storage/emaldo_session_{device.get('id') or 'unknown'}.json"
+            )
+
+            def _read_session(path: str) -> dict | None:
+                import json as _json
+
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        return _json.load(fh)
+                except (OSError, ValueError):
+                    return None
+
+            setattr(
+                realtime,
+                "_prev_session",
+                await hass.async_add_executor_job(_read_session, _prev_path),
+            )
+            _prev_sess = getattr(realtime, "_prev_session", None)
+            if isinstance(_prev_sess, dict) and _prev_sess.get("shutdown_ts"):
+                _LOGGER.info(
+                    "EMALDO_DEBUG[prev_session_loaded] boot %s: prior shutdown "
+                    "at %s stale_at_shutdown=%ss total_polls=%s stall_active=%s "
+                    "legacy_fallback=%s",
+                    device["id"],
+                    _prev_sess.get("shutdown_ts"),
+                    _prev_sess.get("stale_at_shutdown_s"),
+                    _prev_sess.get("total_polls"),
+                    _prev_sess.get("stall_active"),
+                    _prev_sess.get("legacy_fallback_active"),
+                )
             _LOGGER.info(
                 "[Setup] device %s (%d/%d): realtime coordinator is_primary=%s",
                 device["id"], i + 1, len(devices_to_setup), is_primary,
@@ -283,7 +318,49 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for item in devices:
             item["schedule"].async_shutdown()
             await item["realtime"].async_shutdown()
+            _summary = getattr(item["realtime"], "_prev_session_summary", None)
+            if isinstance(_summary, dict):
+                _device_id = item.get("id") or "unknown"
+                _path = hass.config.path(f".storage/emaldo_session_{_device_id}.json")
+                _summary["shutdown_ts"] = (
+                    datetime.now().astimezone().isoformat(timespec="seconds")
+                )
+                _summary["stale_at_shutdown_s"] = (
+                    round(_time.time() - (_summary.get("last_success") or _time.time()), 1)
+                    if _summary.get("last_success")
+                    else None
+                )
+
+                def _write_session(path: str, summary: dict) -> None:
+                    import json as _json
+
+                    with open(path, "w", encoding="utf-8") as fh:
+                        _json.dump(summary, fh, indent=2)
+
+                await hass.async_add_executor_job(
+                    _write_session, _path, dict(_summary)
+                )
+                _LOGGER.info(
+                    "EMALDO_DEBUG[prev_session_persist] written %s (stale=%s)",
+                    _path,
+                    _summary.get("stale_at_shutdown_s"),
+                )
         async_release_shared_client(hass, entry)
         if not hass.data[DOMAIN]:
             async_unregister_services(hass)
     return unload_ok
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Return whether this device entry may be removed from the registry.
+
+    Emaldo registers devices purely through entity ``DeviceInfo`` blocks and
+    keeps no per-device state keyed on the device identifier. HA core already
+    blocks removal while a device still owns live entities, so returning True
+    here is safe: stale entries with zero entities can be cleaned up.
+    """
+    return True

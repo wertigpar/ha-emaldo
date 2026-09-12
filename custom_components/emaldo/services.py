@@ -450,6 +450,7 @@ async def async_handle_apply_bulk_schedule(
         resolved = False
         last_err = None
         last_reason = None
+        coord = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -506,14 +507,14 @@ async def async_handle_apply_bulk_schedule(
                     "Session expired applying bulk override (attempt %d/3), "
                     "re-authenticating", attempt + 1
                 )
-                coord._reset_client()
+                if coord is not None: coord._reset_client()
             except (EmaldoE2EError, EmaldoConnectionError) as err:
                 last_err = err
                 _LOGGER.debug(
                     "Transient E2E error applying bulk override "
                     "(attempt %d/3): %s", attempt + 1, err
                 )
-                coord._reset_client()
+                if coord is not None: coord._reset_client()
             if attempt < 2:
                 time.sleep(1)
         # Legacy one-shot fallback (#47 Option C)
