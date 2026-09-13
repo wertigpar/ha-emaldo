@@ -1,5 +1,18 @@
 # Changes
 
+## v1.0.0-beta33
+
+### Fixed
+
+- **Multi-device unique-ID collision on current HA core (#68).** In setups
+  with two PowerStores or a main cabinet plus an extension battery cabinet,
+  every cabinet's battery module-slot sensors used the same home_id-based
+  unique ID scheme. On the current HA core the secondary cabinet's sensors
+  were then dropped with "already exists - ignoring" and never appeared.
+  Legacy home_id-based unique IDs are now applied only to the per-home
+  primary device; every other device in the same home gets device-scoped
+  unique IDs, so each cabinet keeps its full sensor set on any HA version.
+
 ## v1.0.0-beta32
 
 ### About this version
