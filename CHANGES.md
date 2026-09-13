@@ -2,12 +2,21 @@
 
 ## v1.0.0-beta33
 
+> **Target core:** released to support Home Assistant Core 2026.9.2, where
+> the collision below was observed. The 2026.8 release restricted each
+> device to a single config entry, and 2026.9 tightened device-registry
+> handling (device-registry WebSocket API changes and validation
+> deprecations, plus 2026.9.1 fixes that purge unreachable deleted devices
+> on registry load — core #181207/#181244), which surfaced the integration's
+> colliding unique IDs. This release is the integration-side fix; it is
+> safe on all supported HA versions.
+
 ### Fixed
 
-- **Multi-device unique-ID collision on current HA core (#68).** In setups
+- **Multi-device unique-ID collision on HA Core 2026.9.2 (#68).** In setups
   with two PowerStores or a main cabinet plus an extension battery cabinet,
   every cabinet's battery module-slot sensors used the same home_id-based
-  unique ID scheme. On the current HA core the secondary cabinet's sensors
+  unique ID scheme. On HA Core 2026.9.2 the secondary cabinet's sensors
   were then dropped with "already exists - ignoring" and never appeared.
   Legacy home_id-based unique IDs are now applied only to the per-home
   primary device; every other device in the same home gets device-scoped
