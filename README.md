@@ -203,7 +203,7 @@ The sensor uses `device_class: enum`. It is best-effort — if the E2E connectio
 | **Sell Back to Grid** | Switch | Enables/disables selling surplus energy back to the grid (`set_virtualpowerplant` 0x05) |
 | **Sell Limit** | Switch | Activates the daily grid-export limit protection (`set_sellingprotection` 0x5E) |
 | **Sell Limit threshold** | Number | Daily export limit in kWh/day (1–300). Only effective when Sell Limit is ON |
-| **Manual selling** | Switch | Starts direct grid-export via E2E; ON = start, OFF = stop (`set_manual_selling` 0x80) |
+| **Manual selling** | Switch | Starts direct grid-export via E2E; ON = start, OFF = stop (E2E opcode 0x80) |
 | **Manual selling target** | Number | Total kWh to sell before auto-stopping (1–100 kWh). Configure before enabling |
 | **Emergency charge** | Switch | Starts a force-charge session for the configured time window; turn off to cancel |
 | **Emergency charge start** | Time | Window start time. If unset when the switch is turned on, defaults to now |

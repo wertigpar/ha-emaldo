@@ -3628,6 +3628,12 @@ class PersistentE2ESession:
     #: briefly before rebuilding the session.
     RECONNECT_BACKOFF_SECONDS = 2.0
 
+    #: Max in-place long_stall reconnects per stall episode before quiescing.
+    #: Each handshake re-invokes the device's slow stream startup; past this
+    #: quota the coordinator's full-reset escalation is the only recovery that
+    #: works, so stop hammering the relay (storm fix, same episode as A).
+    STREAM_STALL_EPISODE_MAX_RECONNECTS = 3
+
     #: Extra packet drain budget after a power-flow request when the first
     #: response is not the power payload itself (for example subscription ACKs
     #: or unrelated pushes arriving first on a healthy session).
@@ -3735,6 +3741,8 @@ class PersistentE2ESession:
         self._last_subscribe_monotonic: float | None = None
         self._stream_needs_reconnect = False
         self._stream_needs_creds_refresh = False
+        self._stream_last_rebuild_monotonic: float | None = None
+        self._stream_stall_episode_reconnects = 0
         self._stream_resubscribe_interval = 12.0
         self._stream_keepalive_interval = 7.0
         self._stream_drain_timeout = 0.4
@@ -4450,6 +4458,18 @@ class PersistentE2ESession:
             self._stream_needs_creds_refresh = True
             self._stream_flag_reconnect("decrypt_gate_no_frame")
             return
+        # Post-rebuild grace (storm fix): a freshly rebuilt session must get
+        # its full stall window before the watchdog can re-arm long_stall.
+        # Without this, the stale pre-rebuild frame timestamp re-triggers the
+        # stall check immediately after a successful handshake and the stream
+        # reconnects every backoff second (handshake-ok resets the streak),
+        # hammering the relay until the coordinator's full reset (#47 storm).
+        if (
+            self._stream_last_rebuild_monotonic is not None
+            and (now - self._stream_last_rebuild_monotonic)
+            < self._stream_long_stall
+        ):
+            return
         # Latest frame across all devices (per-device cache, beta15f)
         latest_ts = max(self._latest_power_flow_monotonic.values()) if self._latest_power_flow_monotonic else None
         reference = latest_ts if latest_ts is not None else self._stream_started_monotonic
@@ -4466,6 +4486,14 @@ class PersistentE2ESession:
                     f"Stream long-stall ({kind}, "
                     f"{now - reference:.0f}s) — forcing in-place reconnect"
                 )
+            if (
+                self._stream_stall_episode_reconnects
+                >= STREAM_STALL_EPISODE_MAX_RECONNECTS
+            ):
+                # Quota exhausted: stop in-place long_stall reconnects. The
+                # coordinator's 120s wedge escalation does the full REST
+                # rebuild — that is the recovery that actually works here.
+                return
             self._stream_flag_reconnect("long_stall")
 
     def _stream_maybe_subscribe_locked(self, now: float) -> None:
@@ -4637,6 +4665,9 @@ class PersistentE2ESession:
                     self._latest_power_flow[dev_id] = pf
                     self._latest_power_flow_monotonic[dev_id] = _now_pf
                     self._stream_frames_received += 1
+                    # Storm fix: a fresh frame closes the stall episode, so the
+                    # next long_stall gets a fresh reconnect quota.
+                    self._stream_stall_episode_reconnects = 0
                     # Decrypt-gate bookkeeping (#53 Q1/Q3): a frame decrypted
                     # cleanly, so the current chat_secret is valid. Record the
                     # time, mark the session as having ever decrypted, and clear
@@ -4890,6 +4921,9 @@ class PersistentE2ESession:
                 self._last_subscribe_monotonic = _now_mono
             self._last_keepalive_monotonic = time.perf_counter()
             self._stream_started_monotonic = time.perf_counter()  # reset watchdog
+            # Storm fix: record the rebuild so the watchdog grants the full
+            # stall window before re-arming long_stall.
+            self._stream_last_rebuild_monotonic = time.perf_counter()
             self._stream_reconnects += 1
             # Count the reason on the actual rebuild so it stays in lockstep with
             # the reconnect counter (one entry per rebuild, not per flag-set).
@@ -4897,6 +4931,10 @@ class PersistentE2ESession:
             self._stream_reconnect_reasons[_r] = (
                 self._stream_reconnect_reasons.get(_r, 0) + 1
             )
+            # Storm fix: count in-place long_stall rebuilds toward the episode
+            # quota used by the watchdog quiesce check.
+            if "long_stall" in (self._stream_last_reconnect_reason or ""):
+                self._stream_stall_episode_reconnects += 1
             # A successful handshake clears the escalation: the next 21204 starts
             # fresh at the base backoff instead of inheriting a tall streak.
             self._stream_reconnect_streak = 0

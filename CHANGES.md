@@ -1,5 +1,28 @@
 # Changes
 
+## v1.0.0-beta34
+
+### Fixed
+
+- **Long-stall reconnect storm (#47).** When the relay accepted the stream
+  handshake but stopped pushing power-flow frames, the watchdog's long-stall
+  re-connect loop never backed off: the stale pre-rebuild frame timestamp
+  survived the rebuild, so the stall check re-armed immediately after each
+  successful handshake, and each successful handshake reset the backoff
+  streak — the session reconnected every ~2 s (20-30 futile handshakes per
+  wedge) until the coordinator's 120 s full-reset escalation. Two-part fix in
+  the stream client:
+
+  - **Post-rebuild grace.** A freshly rebuilt session now gets its full
+    stall window before the watchdog can re-arm long-stall, so a successful
+    handshake is never immediately punished for the frame gap that caused
+    the rebuild.
+  - **Stall-episode reconnect quota.** At most 3 in-place long-stall
+    reconnects per episode (a genuine decrypted frame resets the quota);
+    once exhausted the stream quiesces and leaves recovery to the
+    coordinator's full-reset escalation, which is the path that actually
+    restores the session.
+
 ## v1.0.0-beta33
 
 > **Target core:** released to support Home Assistant Core 2026.9.2, where
