@@ -23,6 +23,14 @@
     coordinator's full-reset escalation, which is the path that actually
     restores the session.
 
+- **NameError on stall-quota check.** The quota constant was referenced as a
+  bare class-body name inside the watchdog method, raising `NameError` at
+  runtime when a real long-stall episode occurred (compiled fine — only the
+  stalled branch ever hits it). Each episode then mis-flagged as a
+  `loop_exception` instead of `long_stall`. Fix: reference
+  `STREAM_STALL_EPISODE_MAX_RECONNECTS` via `self.`. Verified live: no
+  `loop_exception` flags since the fix, each episode a single clean reconnect.
+
 ## v1.0.0-beta33
 
 > **Target core:** released to support Home Assistant Core 2026.9.2, where

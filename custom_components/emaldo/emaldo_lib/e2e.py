@@ -4488,7 +4488,7 @@ class PersistentE2ESession:
                 )
             if (
                 self._stream_stall_episode_reconnects
-                >= STREAM_STALL_EPISODE_MAX_RECONNECTS
+                >= self.STREAM_STALL_EPISODE_MAX_RECONNECTS
             ):
                 # Quota exhausted: stop in-place long_stall reconnects. The
                 # coordinator's 120s wedge escalation does the full REST
