@@ -6,6 +6,8 @@
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wertigpar&repository=ha-emaldo&category=integration)
 
+> **Companion integration:** [Battery Optimizer](https://github.com/wertigpar/ha-battery-optimizer) — an optimizer/control layer that builds better schedules than the internal AI and pushes them to Emaldo via this component (manual-sell arbitrage, PV sell strategy, forced-sell control). Install both for enhanced battery control.
+
 A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery systems. Provides real-time power monitoring, battery state tracking, schedule visualization, and full override control via services.
 
 ## Features
