@@ -39,19 +39,30 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-def _select_device(devices: list[dict], preferred_id: str | None) -> dict[str, Any] | None:
-    """Select configured device or fall back to the first discovered device."""
+def _select_device(
+    devices: list[dict],
+    preferred_id: str | None,
+    configured_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Select the configured device or fall back to the first unclaimed one.
+
+    Already-configured device ids are skipped so a second entry for the same
+    account picks the remaining cabinet instead of re-selecting the first.
+    """
     if not devices:
         return None
 
+    configured = configured_ids or set()
     wanted = (preferred_id or "").strip()
-    if not wanted:
-        return devices[0]
 
     for device in devices:
         if str(device.get("id", "")) == wanted:
             return device
-    return None
+
+    available = [d for d in devices if str(d.get("id", "")) not in configured]
+    if available:
+        return available[0]
+    return devices[0]
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -107,19 +118,29 @@ class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
                 if not devices:
                     errors["base"] = "no_devices"
                 else:
+                    configured_ids = {
+                        e.data.get(CONF_DEVICE_ID)
+                        for e in self._async_current_entries()
+                        if e.data.get(CONF_EMAIL) == user_input[CONF_EMAIL]
+                    }
                     selected = _select_device(
-                        devices, user_input.get(CONF_DEVICE_ID)
+                        devices,
+                        user_input.get(CONF_DEVICE_ID),
+                        configured_ids,
                     )
                     if selected is None:
-                        errors["base"] = "invalid_device"
+                        errors["base"] = "all_devices_configured"
                         return self.async_show_form(
                             step_id="user",
                             data_schema=STEP_USER_DATA_SCHEMA,
                             errors=errors,
                         )
 
-                    # Use email as unique id
-                    await self.async_set_unique_id(user_input[CONF_EMAIL])
+                    # Unique id scoped to email + device so each cabinet gets
+                    # its own config entry (#70: one entry per cabinet, Design B).
+                    await self.async_set_unique_id(
+                        f"{user_input[CONF_EMAIL]}:{selected['id']}"
+                    )
                     self._abort_if_unique_id_configured()
 
                     return self.async_create_entry(
@@ -175,7 +196,9 @@ class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
                     client.list_devices, home_id
                 )
                 selected = _select_device(
-                    devices, user_input.get(CONF_DEVICE_ID)
+                    devices,
+                    user_input.get(CONF_DEVICE_ID),
+                    {entry.data.get(CONF_DEVICE_ID)} if entry.data.get(CONF_DEVICE_ID) else None,
                 )
                 if selected is None:
                     raise ValueError("invalid_device")

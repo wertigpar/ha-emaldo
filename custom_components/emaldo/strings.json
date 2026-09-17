@@ -46,6 +46,7 @@
     },
     "abort": {
       "already_configured": "This account is already configured.",
+      "all_devices_configured": "All battery devices in this home are already configured. Add another cabinet from a different Emaldo account.",
       "reconfigure_successful": "Credentials updated and integration reloaded."
     }
   },

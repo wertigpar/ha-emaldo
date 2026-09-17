@@ -1,5 +1,11 @@
 # Changes
 
+## v1.0.0-beta36
+
+### Changed
+
+- **One config entry per cabinet.** The config flow used to scope its unique ID to the email, so a second entry for the same account aborted with "already_configured", and `_select_device` always returned the first device with no picker — a fresh dual-cabinet install only ever set up one cabinet. Unique ID is now scoped to `email:device_id`, and already-configured device ids are skipped during selection, so adding the integration again picks the remaining cabinet automatically. Reconfigure stays pinned to the entry's own cabinet. The `__init__.py` fan-out logic (first-entry-wins primary, device-scoped UIDs for non-primary) already supported this; the flow was the only blocker.
+
 ## v1.0.0-beta35
 
 ### Fixed

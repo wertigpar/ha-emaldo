@@ -52,7 +52,7 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 
 | Field | Description |
 |---|---|
-| **Email** | Your Emaldo account email (Use your main account with official app and create secondary account for Home Assistant integration use) |
+| **Email** | Your Emaldo account email |
 | **Password** | Your Emaldo account password |
 | **App ID** | *(optional, only for testing)* Leave empty for default |
 | **App Secret** | *(optional, only for testing)* Leave empty for default |
@@ -67,6 +67,14 @@ To update your email, password, app version, or encryption keys without removing
 **Settings → Devices & Services → Emaldo → ⋮ (three-dot menu) → Reconfigure**
 
 All current values are pre-filled. After saving, the integration reloads automatically with the new credentials.
+
+### Multiple cabinets
+
+Each Emaldo cabinet gets its own config entry. Add the integration once per cabinet — the flow discovers every battery device in the home and skips cabinets that are already configured, so the second entry picks the remaining cabinet automatically. The first cabinet added for a home is the primary; the rest are non-primary and use device-scoped unique IDs so their sensors never collide.
+
+**Settings → Devices & Services → Add Integration → Emaldo Battery** (repeat for each cabinet)
+
+If every cabinet in the home is already configured, the flow aborts with "All battery devices in this home are already configured."
 
 ### Options
 
