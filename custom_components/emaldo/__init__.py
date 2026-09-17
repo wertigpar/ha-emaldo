@@ -247,6 +247,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
 
+    # #70: Non-primary cabinets (dual-cabinet installs) kept home_id-based
+    # unique IDs from legacy setups after #68 switched fan-out devices to
+    # device-scoped UIDs. Registry entries from before the update survive
+    # unchanged while the new scheme registers duplicates. Rename the
+    # legacy entries to the device-scoped scheme before platforms run so
+    # existing entity_ids, history and dashboards are preserved. The
+    # duplicate entry holding the new UID (created by #68 with no history)
+    # is removed first to avoid a UID collision.
+    if has_legacy_uids:
+        _home_primaries = hass.data.setdefault(DOMAIN, {}).setdefault(
+            "_home_primaries", {}
+        )
+        primary_device_id = _home_primaries.get(home_id)
+        for _dev in coordinator_sets:
+            _power = _dev["power"]
+            _did = _power.device_id
+            if not _did or _did == primary_device_id:
+                continue
+            _prefix = f"{home_id}_"
+            for _reg in list(
+                er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+            ):
+                _uid = _reg.unique_id
+                if not _uid or not _uid.startswith(_prefix):
+                    continue
+                if _uid.startswith(f"{_did}_"):
+                    continue  # already migrated
+                _suffix = _uid[len(_prefix):]
+                _new_uid = f"{_did}_{_suffix}"
+                _dup = next(
+                    (
+                        r
+                        for r in ent_reg.entities.values()
+                        if r.unique_id == _new_uid
+                        and r.config_entry_id == entry.entry_id
+                    ),
+                    None,
+                )
+                if _dup is not None and _dup.entity_id != _reg.entity_id:
+                    ent_reg.async_remove_entity(_dup.entity_id)
+                    _LOGGER.info(
+                        "Emaldo #70: removed duplicate entity %s (UID %s)",
+                        _dup.entity_id,
+                        _new_uid,
+                    )
+                _LOGGER.info(
+                    "Emaldo #70: migrating unique_id %s -> %s (entity %s)",
+                    _uid,
+                    _new_uid,
+                    _reg.entity_id,
+                )
+                ent_reg.async_update_entity(_reg.entity_id, new_unique_id=_new_uid)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     async_register_services(hass)
     return True

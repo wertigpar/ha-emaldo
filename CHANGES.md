@@ -1,5 +1,32 @@
 # Changes
 
+## v1.0.0-beta35
+
+### Fixed
+
+- **Dual-cabinet sensor rename on update (#70).** Non-primary cabinets
+  created pre-beta33 used `home_id`-based unique IDs. Beta33 (#68) switched
+  fan-out devices to `device-scoped` UIDs so collisions on multi-cabinet
+  homes no longer silently merge data — but the UID change was not migrated.
+  On update, HA registers a fresh duplicate (new UID, no history) while the
+  old legacy entry survives unchanged, producing two copies of every sensor.
+  Fix: on every setup, before platforms run, legacy `home_id_*` registry
+  entries for non-primary devices are renamed to the `device_id_*` scheme and
+  the history-less duplicate entry is removed. Existing entity IDs, state
+  history and dashboard references are preserved.
+
+- **Home-secret rotation storm guard.** During a backend-wide 21204
+  window the relay rejects every credential generation, rotated or not.
+  The escalation path (`generation >= 3` forced refreshes in < 60 s) kept
+  rotating the shared home secret server-side on every cycle, churning
+  rotations that orphan the credentials the next rebuild uses — a
+  self-sustaining rotation loop that persisted until the backend window
+  closed. Fix: home-level rotation is now latched per home_id — after one
+  successful escalation, further escalations are held until the home-TTL
+  window (30 min) elapses. Mid-storm only device-level refreshes run; the
+  home TTL's natural rotation re-keys once the backend recovers. A warning
+  logs when rotation is held (once per TTL window).
+
 ## v1.0.0-beta34
 
 ### Fixed
