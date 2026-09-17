@@ -178,6 +178,14 @@ class EmaldoClient:
         # credentials (home_end_id/group_id/end_secret) when the shared home
         # secret is rotated, instead of having the relay force-logout them.
         self._home_secret_callbacks: dict[str, list[Callable[[dict], None]]] = {}
+        # 21204 storm guard: monotonic timestamp of the last home-level secret
+        # rotation (force_home_refresh escalation). Home rotation is only
+        # attempted once per _home_e2e_ttl window, so a backend-wide 21204
+        # window (where the relay rejects every secret, rotated or not) cannot
+        # keep churning server-side rotations every <60s. The home TTL's
+        # natural rotation then handles re-keying once the backend recovers.
+        self._home_refresh_last_attempt: dict[str, float] = {}
+        self._home_refresh_suppress_logged: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Session management
@@ -1038,13 +1046,28 @@ class EmaldoClient:
                 # allow_home_refresh=False (secondary device, #47 Phase 4):
                 # the secondary must never rotate the shared home secret
                 # independently — it always uses the primary's published value.
+                _home_quiet_until = self._home_refresh_last_attempt.get(
+                    home_id, 0.0
+                ) + self._home_e2e_ttl
+                _home_refresh_quiet = now < _home_quiet_until
                 _do_home_refresh = (
                     force_refresh
                     and entry is not None
                     and entry.generation >= 3
                     and (now - entry.created_at) < 60
                     and allow_home_refresh
+                    and not _home_refresh_quiet
                 )
+                if _home_refresh_quiet and (
+                    now - self._home_refresh_suppress_logged.get(home_id, 0.0)
+                    > self._home_e2e_ttl
+                ):
+                    _LOGGER.warning(
+                        "Home secret rotation held %d s after last rotation "
+                        "(21204 storm guard) — device-level retry only",
+                        int(_home_quiet_until - now),
+                    )
+                    self._home_refresh_suppress_logged[home_id] = now
                 creds = self.e2e_login(
                     home_id, device_id, model,
                     force_home_refresh=_do_home_refresh,
@@ -1054,6 +1077,9 @@ class EmaldoClient:
                 # on the next forced refresh (permanent 21204 storm).
                 if _do_home_refresh:
                     generation = 1
+                    # 21204 storm guard: latch the rotation time so the next
+                    # escalation cannot fire within the home-TTL window.
+                    self._home_refresh_last_attempt[home_id] = now
                 else:
                     generation = entry.generation + 1 if entry else 1
                 entry = E2ECredentialCacheEntry(
