@@ -4885,13 +4885,24 @@ class PersistentE2ESession:
         # Deadline reached: perform the actual rebuild.
         self._stream_reconnect_not_before = None
         try:
-            # If a forced credential refresh is already pending (a 21204 flagged
-            # it, or the decrypt-gate escalated because handshake-ok frames never
-            # decrypted — #53 Q1/Q3), refresh creds BEFORE the first reconnect.
-            # Otherwise the re-handshake reuses the stale chat_secret, succeeds
-            # at the transport level, and the decrypt gate would loop forever
-            # because the force flag is only consumed by _refresh_creds_locked.
-            if self._stream_needs_creds_refresh:
+            # A forced credential refresh pending because of a rekey-style
+            # escalation (decrypt-gate timeout — handshake ok but frames never
+            # decrypted, #53 Q1/Q3; or force_logout / long_stall binding drop)
+            # still pre-rotates: the chat_secret genuinely cannot decrypt the
+            # push stream anymore.
+            #
+            # A plain 21204 does NOT qualify (beta38): it only proves the relay
+            # expired the *session*, not that the current credential generation
+            # is stale. Pre-rotating device creds on every flagged rebuild
+            # orphans the generation the session is bound to, so each rotation
+            # re-arms the next 21204 — a self-sustaining treadmill that survives
+            # the original backend window and persists until a HA restart
+            # re-initializes state. Instead, first re-handshake with the current
+            # creds; a handshake "ok" proves they are still the server's live
+            # generation and the session survives. On handshake failure the
+            # branch below refreshes and reconnects exactly as before.
+            is_plain_21204 = "21204" in (self._stream_last_reconnect_reason or "")
+            if self._stream_needs_creds_refresh and not is_plain_21204:
                 self._refresh_creds_locked()
             # Try re-handshake with current creds first (#47 beta16b).
             # If handshake succeeds, creds are still valid — skip the

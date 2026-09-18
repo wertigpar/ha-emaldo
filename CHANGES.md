@@ -17,6 +17,20 @@
   ceiling, cutting the rebuild cadence ~15× and stopping the credential-refresh
   churn that fed the storm. Recovery is unaffected: the first real frame after
   the backend window closes resets the backoff to base.
+- **Stop the 21204 credential-rotation treadmill.** A `session_expired_21204`
+  only proves the relay expired the *session*, not that the current credential
+  generation is stale. `_stream_reconnect_locked` pre-rotated device creds on
+  every flagged rebuild, which orphans the generation the (still-healthy)
+  session is bound to — so each rotation re-armed the next 21204: a
+  self-sustaining storm that outlived the original short backend window and
+  persisted until a HA restart re-initialized state. A 21204-flagged rebuild
+  now first re-handshakes with the current creds — a handshake "ok" proves
+  they are still the server's live generation and the session survives — and
+  rotates only when the handshake actually fails (the existing refresh-and-
+  retry branch then escalates to the home-secret rotation if the second
+  attempt fails too). Rekey-style escalations (decrypt-gate timeout,
+  `force_logout`, long-stall binding drops) still pre-rotate exactly as
+  before, since there the chat_secret genuinely cannot decrypt the stream.
 
 ## v1.0.0-beta36
 
