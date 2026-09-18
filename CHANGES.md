@@ -31,6 +31,21 @@
   attempt fails too). Rekey-style escalations (decrypt-gate timeout,
   `force_logout`, long-stall binding drops) still pre-rotate exactly as
   before, since there the chat_secret genuinely cannot decrypt the stream.
+- **Storm-state holder gating for client-side credential rotation.** Adds a
+  shared `HomeStormState` holder (`storm_state.py`) fed by the coordinator's
+  stream/poll diagnostics and consumed by the client. The client now (a) holds
+  any forced E2E refresh for 90 s after the last device rotation (suppressing
+  the rotation ping-pong during backend `session_expired_21204` / frameless
+  windows — the cached credential generation is reused unchanged, no login,
+  no churn), (b) escalates to a `force_home_refresh=True` rotation only when
+  fresh forced refreshes in the last 60 s reach 3 while the stream is
+  genuinely stalled, and (c) suppresses that escalation entirely during the
+  30-min home-TTL quiet window (second concurrent storm episode cannot force a
+  home-secret rotation). Coordinator-side gates additionally reset the stream
+  via the holder instead of the client teardown path, and a `_stall_reset`
+  ladder mapping derives the poll-stall reset interval (1/5th of the holder
+  interval, clamped) so both stream and periodic poll paths share one
+  escalation budget.
 
 ## v1.0.0-beta36
 

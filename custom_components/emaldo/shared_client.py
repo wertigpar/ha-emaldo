@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import threading
+from collections.abc import Callable
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
@@ -35,6 +37,10 @@ class SharedEmaldoClient:
     app_version: str
     ref_count: int = 0
     client: EmaldoClient | None = None
+    # 21204 storm guard (Phase 2.3): per-home storm-state holder resolver
+    # injected by the coordinator; forwarded to every EmaldoClient created
+    # by this shared instance.
+    storm_state_provider: Callable[[str], Any] | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def ensure_client(self) -> EmaldoClient:
@@ -48,11 +54,18 @@ class SharedEmaldoClient:
                     app_id=self.app_id,
                     app_secret=self.app_secret,
                     app_version=self.app_version,
+                    storm_state_provider=self.storm_state_provider,
                 )
                 self.client.login(self.email, self.password)
             return self.client
 
-    def reset(self) -> None:
+    def reset_auth(self) -> None:
+        """Drop only the REST session/token; keep E2E caches and storm guards."""
+        with self._lock:
+            if self.client is not None:
+                self.client.invalidate_auth()   # new, see 1.2
+
+    def reset(self) -> None:   # unchanged hard reset, now used only for auth errors
         """Drop the shared client so the next operation re-authenticates."""
         with self._lock:
             self.client = None

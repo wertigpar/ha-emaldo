@@ -13,7 +13,7 @@ import string
 import struct
 import threading
 import time
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
@@ -27,6 +27,9 @@ from .const import (
     get_app_id,
 )
 from .exceptions import EmaldoE2EError, EmaldoE2ESessionExpired
+
+if TYPE_CHECKING:
+    from ..storm_state import HomeStormState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -4207,6 +4210,7 @@ class PersistentE2ESession:
         min_resubscribe_gap: float = 5.0,
         stale_after: float = 20.0,
         long_stall: float = 45.0,
+        storm_state: "HomeStormState | None" = None,
     ) -> None:
         """Start the background power-flow stream receiver.
 
@@ -4242,6 +4246,8 @@ class PersistentE2ESession:
             self._stream_stale_after = stale_after
             self._stream_long_stall = long_stall
             self._stream_stop.clear()
+            self._storm_state = storm_state
+            self._seed_storm_state()
             self._last_subscribe_monotonic = None  # subscribe immediately
             self._last_keepalive_monotonic = time.perf_counter()
             self._stream_started_monotonic = time.perf_counter()
@@ -4253,6 +4259,17 @@ class PersistentE2ESession:
                 daemon=True,
             )
             self._stream_thread.start()
+    def _seed_storm_state(self) -> None:
+        """Copy holder counters into session fields (plan 1.3, called from start_stream)."""
+        st: HomeStormState | None = getattr(self, "_storm_state", None)
+        if st is None:
+            return
+        self._stream_reconnect_streak = st.reconnect_streak
+        self._stream_ever_decrypted = st.ever_decrypted
+        # Anchor to live frames of THIS session so the streak-reset branch
+        # (frames_received != anchor) is judged against this session.
+        self._stream_reconnect_backoff_anchor_frames = self._stream_frames_received
+
     def stop_stream(self) -> None:
         """Signal the stream receiver to stop and join it (best effort)."""
         self._stream_stop.set()
@@ -4674,6 +4691,9 @@ class PersistentE2ESession:
                     # any pending reconnect decrypt-gate deadline.
                     self._stream_last_decrypted_frame_ts = _now_pf
                     self._stream_ever_decrypted = True
+                    st = getattr(self, "_storm_state", None)
+                    if st is not None:
+                        st.ever_decrypted = True
                     self._stream_decrypt_gate_deadline = None
                     continue
 
@@ -4864,12 +4884,18 @@ class PersistentE2ESession:
                 self._stream_reconnect_backoff_anchor_frames = (
                     self._stream_frames_received
                 )
+                st = getattr(self, "_storm_state", None)
+                if st is not None:
+                    st.note_frame()
             backoff = min(
                 self.RECONNECT_BACKOFF_SECONDS * (2 ** self._stream_reconnect_streak),
                 self._stream_reconnect_backoff_max,
             )
             self._stream_reconnect_streak += 1
             self._stream_reconnect_not_before = now + backoff
+            st = getattr(self, "_storm_state", None)
+            if st is not None:
+                st.reconnect_streak = self._stream_reconnect_streak
             if self._log:
                 self._log(
                     f"Stream reconnect scheduled in {backoff:.1f}s "
@@ -5710,6 +5736,10 @@ class PersistentE2ESession:
                 except Exception:  # noqa: BLE001
                     pass
                 self._sock = None
+            st = getattr(self, "_storm_state", None)
+            if st is not None:
+                st.reconnect_streak = self._stream_reconnect_streak
+                st.ever_decrypted = self._stream_ever_decrypted
 
     def _send_raw(self, pkt: bytes, label: str) -> bytes | None:
         """Send a packet and read one response (no reconnect logic)."""

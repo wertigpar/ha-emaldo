@@ -29,6 +29,7 @@ from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
 from .shared_client import async_acquire_shared_client, async_release_shared_client
 from .services import async_register_services, async_unregister_services
+from .storm_state import HomeStormState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +40,18 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.TIME,
 ]
+
+
+def async_get_storm_state(hass: HomeAssistant, home_id: str) -> HomeStormState:
+    """Return (creating if needed) the per-home storm-state holder.
+
+    Lifetime = hass.data[DOMAIN]; cleared only by an HA restart or entry
+    unload when the last entry serving that home goes away. Shared across
+    config entries on the same home_id (21204 storm fix, Phase 0).
+    """
+    return hass.data.setdefault(DOMAIN, {}).setdefault(
+        "_storm_state", {}
+    ).setdefault(home_id, HomeStormState(home_id))
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -399,6 +412,28 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _summary.get("stale_at_shutdown_s"),
                 )
         async_release_shared_client(hass, entry)
+        # Per-home storm-state holders (21204 storm fix, Phase 0) are shared
+        # across config entries on the same home_id. Pop them only when no
+        # other loaded entry still serves that home.
+        _storm_state = hass.data.get(DOMAIN, {}).get("_storm_state")
+        if _storm_state:
+            for item in devices:
+                _realtime = item.get("realtime")
+                if _realtime is None:
+                    continue
+                _home_id = getattr(_realtime, "home_id", None)
+                if _home_id is None or _home_id not in _storm_state:
+                    continue
+                if not any(
+                    _other_data.get("devices")
+                    and any(
+                        getattr(_dev.get("realtime"), "home_id", None) == _home_id
+                        for _dev in _other_data["devices"]
+                    )
+                    for _key, _other_data in hass.data.get(DOMAIN, {}).items()
+                    if isinstance(_other_data, dict) and _key != entry.entry_id
+                ):
+                    _storm_state.pop(_home_id, None)
         if not hass.data[DOMAIN]:
             async_unregister_services(hass)
     return unload_ok

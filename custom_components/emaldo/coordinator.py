@@ -76,6 +76,7 @@ from .realtime_sanity import (
     get_invalid_realtime_power_channels,
 )
 from .shared_client import SharedEmaldoClient
+from .storm_state import stall_reset_needs_fresh_creds
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,8 +154,23 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Invalidate the shared REST client so the next request re-authenticates."""
         self._shared_client.reset()
 
+    def _reset_client_auth(self) -> None:
+        """Drop only the REST session/token; keep E2E caches and storm guards."""
+        self._shared_client.reset_auth()
+
     def _ensure_client(self) -> EmaldoClient:
         """Create and authenticate the client if needed."""
+        # 21204 storm guard (Phase 2.3): inject the per-home storm-state
+        # resolver into the shared client so EmaldoClient's rotation guards
+        # (_may_rotate_device/_forced_refresh_count) see the SAME holder that
+        # the E2E session and stall-reset logic use. Lazy import sidesteps the
+        # __init__ -> coordinator import cycle (same pattern as _ensure_session).
+        if getattr(self._shared_client, "storm_state_provider", None) is None:
+            from . import async_get_storm_state  # noqa: PLC0415
+
+            self._shared_client.storm_state_provider = (
+                lambda hid: async_get_storm_state(self.hass, hid)
+            )
         client = self._shared_client.ensure_client()
 
         if self._device_id is None:
@@ -587,7 +603,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if attempt == 1:
                     raise
             except EmaldoAuthError:
-                self._reset_client()
+                self._reset_client_auth()
                 client = self._ensure_client()
                 if attempt == 1:
                     raise
@@ -629,7 +645,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if attempt == 1:
                     raise
             except EmaldoAuthError:
-                self._reset_client()
+                self._reset_client_auth()
                 client = self._ensure_client()
                 if attempt == 1:
                     raise
@@ -706,6 +722,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             entry.options.get(CONF_REALTIME_STREAM_MODE, REALTIME_STREAM_MODE)
         )
         self._session: PersistentE2ESession | None = None
+        # 21204 storm guard (Phase 2.4/2.5): per-home storm-state holder,
+        # seeded lazily in _ensure_session once per stream-mode run. The
+        # fall-back paths (_stall_reset_polls/_live_stream_diag) treat None
+        # as "no holder seeded" and use the static defaults.
+        self._storm_state: Any | None = None
         self._session_binding: tuple[str, str, str] | None = None
         self._unregister_home_secret: Callable[[], None] | None = None
         self._keepalive_task: asyncio.Task | None = None
@@ -1189,6 +1210,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
 
         if self._stream_mode:
+            # Lazy import: sidesteps the __init__ -> coordinator import cycle.
+            from . import async_get_storm_state  # noqa: PLC0415
+
+            _storm_state = async_get_storm_state(self.hass, self._parent.home_id)
+            self._storm_state = _storm_state
             self._session.start_stream(
                 resubscribe_interval=RESUBSCRIBE_INTERVAL,
                 keepalive_interval=KEEPALIVE_INTERVAL,
@@ -1196,6 +1222,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 min_resubscribe_gap=STREAM_MIN_RESUBSCRIBE_GAP,
                 stale_after=STREAM_STALE_AFTER,
                 long_stall=STREAM_LONG_STALL_RECONNECT,
+                storm_state=_storm_state,
             )
             import time as _time
             _first_frame_deadline = _time.perf_counter() + STREAM_FIRST_FRAME_WAIT
@@ -1408,7 +1435,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 f"unparsed={self._stream_diag.get('drain_unparsed')} "
                 f"last_reason={self._stream_diag.get('last_reconnect_reason')} "
                 f"creds_refresh={self._stream_diag.get('creds_refresh_queued')} "
-                f"result={'data' if data else 'None'}"
+                f"result={'data' if data else 'None'} "
+                f"stall_ivl={self._stall_reset_interval_s()}s "
+                f"storm_active={self._storm_state_active()}"
             )
             if data is None and session.closed:
                 self._invalidate_session_ref()
@@ -1598,6 +1627,43 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 self._stall_snapshot = None
 
+    def _storm_state_active(self) -> bool:
+        """True when the per-home storm-state holder is seeded (stream mode)."""
+        return getattr(self, "_storm_state", None) is not None
+
+    def _stall_reset_interval_s(self) -> int:
+        """Stall-reset interval driving the empty-read threshold (Phase 2.5).
+
+        Laddered by the storm-state holder: repeated frameless stalls raise
+        the interval (120 -> 300 -> 900 s). Falls back to the static const
+        when no holder is seeded.
+        """
+        ss = getattr(self, "_storm_state", None)
+        return ss.reset_interval() if ss is not None else STREAM_STALL_FULL_RESET_SECONDS
+
+    def _stall_reset_polls(self) -> int:
+        """Consecutive empty-read threshold before a full stall reset (2.5)."""
+        return max(1, round(self._stall_reset_interval_s() / REALTIME_SCAN_INTERVAL))
+
+    async def _live_stream_diag(self) -> dict:
+        """Fresh receiver diagnostics; falls back to the cached snapshot.
+
+        Session methods are executor-bound (receiver thread), so the live
+        read must hop threads. Any failure degrades to the cached dict —
+        the stall gate must never raise.
+        """
+        session = getattr(self, "_session", None)
+        if session is not None and not session.closed:
+            try:
+                live = await self.hass.async_add_executor_job(
+                    session.stream_diagnostics
+                )
+                if live:
+                    self._stream_diag = dict(live)
+            except Exception:  # noqa: BLE001 — gate must never break recovery
+                pass
+        return dict(self._stream_diag or {})
+
     def _build_stall_snapshot(self) -> dict[str, Any]:
         """Assemble the diagnostic snapshot recorded at stall onset."""
         return {
@@ -1615,6 +1681,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "last_handshake_response": self.stats_last_handshake_response,
             "powerflow_last_diag": dict(self.stats_powerflow_last_diag),
             "stream_diag": dict(self._stream_diag) if self._stream_mode else None,
+            "stall_reset_interval_s": self._stall_reset_interval_s(),
+            "storm_active": self._storm_state_active(),
             "e2e_rtt_last_ms": self.stats_e2e_rtt_last_ms,
         }
 
@@ -1929,7 +1997,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 raise
             except EmaldoConnectionError:
                 # Short cloud/API disconnect — rebuild client once and retry.
-                self._parent._reset_client()  # noqa: SLF001
+                self._parent._reset_client_auth()  # noqa: SLF001
                 if attempt == 0:
                     _time.sleep(1)
                     continue
@@ -2239,18 +2307,30 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # restart). After a prolonged stall, do the full recovery the
                 # stream path otherwise never reaches: reset the REST client
                 # (clean re-login) and rebuild the session from scratch.
-                if self._empty_reads >= self._STREAM_STALL_RESET_POLLS:
+                if self._empty_reads >= self._stall_reset_polls():
+                    # 21204 storm gate (2.5): read the receiver's LIVE drain
+                    # diagnostics before rebuilding. A frameless stall with a
+                    # decrypt-failure signature / relay logout means the chat
+                    # secret is being rejected — force fresh credentials on the
+                    # next handshake instead of resetting into the same dead
+                    # binding. Plain empty-stall resets keep the cached creds
+                    # (the 2.2 client cooldown still throttles any rotation).
+                    _live_diag = await self._live_stream_diag()
+                    if stall_reset_needs_fresh_creds(_live_diag):
+                        self._needs_fresh_creds = True
+                    if self._storm_state is not None:
+                        self._storm_state.note_frameless_reset()
                     _LOGGER.warning(
                         "E2E stream wedged: no fresh frame for %d consecutive "
                         "polls (~%ds) — in-place reconnect not recovering; "
                         "resetting REST client and rebuilding session "
-                        "(stream_diag=%s)",
+                        "(stream_diag=%s, fresh_creds=%s)",
                         self._empty_reads,
                         self._empty_reads * REALTIME_SCAN_INTERVAL,
-                        self._stream_diag,
+                        _live_diag,
+                        self._needs_fresh_creds,
                     )
-                    self._parent._reset_client()  # noqa: SLF001 - clean re-login
-                    self._needs_fresh_creds = True
+                    self._parent._reset_client_auth()  # noqa: SLF001 - clean re-login
                     await self._close_session()  # full rebuild on next poll
                     self._empty_reads = 0
                     self._consecutive_reconnects += 1
@@ -2399,6 +2479,19 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         >= self._UNDECRYPTABLE_RESET_STREAK
                     )
                     if full_reset:
+                        # 21204 storm gate (2.5), poll-mode counterpart: rotate
+                        # credentials only on real decrypt evidence — an
+                        # undecryptable response streak (existing threshold) or
+                        # the stream drain signature. Reconnect-only stalls keep
+                        # cached creds; the session rebuild alone recovers them.
+                        _live_diag = await self._live_stream_diag()
+                        if stall_reset_needs_fresh_creds(_live_diag) or (
+                            self._undecryptable_streak
+                            >= self._UNDECRYPTABLE_RESET_STREAK
+                        ):
+                            self._needs_fresh_creds = True
+                        if self._storm_state is not None:
+                            self._storm_state.note_frameless_reset()
                         _LOGGER.warning(
                             "E2E poll stall: %d reconnect cycles without recovery "
                             "(undecryptable_streak=%d) — resetting REST client and "
@@ -2408,8 +2501,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                             self._undecryptable_streak,
                             self.stats_powerflow_last_diag,
                         )
-                        self._parent._reset_client()  # noqa: SLF001 - clean re-login
-                        self._needs_fresh_creds = True
+                        self._parent._reset_client_auth()  # noqa: SLF001 - clean re-login
                         self._undecryptable_streak = 0
                         self._record_reconnect("poll_stall_reset", _time.time())
                         self._register_stall_reset_and_maybe_fallback()

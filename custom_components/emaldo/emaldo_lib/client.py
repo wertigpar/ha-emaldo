@@ -84,6 +84,14 @@ class E2ECredentialCacheEntry:
     generation: int = 0
 
 
+# 21204 storm guard (Phase 2.2): minimum spacing between forced device-level
+# E2E rotations for the same home, enforced per process AND via the shared
+# per-home storm-state holder (when one is injected). Dual-unit ping-pong
+# happens when two coordinators re-key out from under each other on every
+# forced refresh; the 90 s cooldown breaks that loop.
+MIN_DEVICE_ROTATION_INTERVAL = 90.0
+
+
 class EmaldoClient:
     """Client for the Emaldo battery system API.
 
@@ -96,6 +104,10 @@ class EmaldoClient:
         app_version: App version string to report. Defaults to the
             latest known version. The server may reject requests
             from outdated versions.
+        storm_state_provider: Optional callable ``(home_id) -> holder``
+            resolving the per-home storm-state holder (21204 storm guard,
+            Phase 2). Pure callable — the emaldo_lib package itself stays
+            free of Home Assistant imports.
     """
 
     def __init__(
@@ -105,6 +117,7 @@ class EmaldoClient:
         app_id: str = None,
         app_secret: str | bytes | None = None,
         app_version: str = None,
+        storm_state_provider: Callable[[str], Any] | None = None,
     ):
         self._session: dict = session or {}
         self._app_id = app_id if app_id is not None else get_app_id()
@@ -116,6 +129,8 @@ class EmaldoClient:
         )
         self._app_version = app_version if app_version is not None else get_default_app_version()
         self._http = requests.Session()
+        self._storm_state_provider = storm_state_provider
+        self._device_rotation_last_attempt: dict[str, float] = {}
         # Retry only on transient HTTP errors (502/503/504), not on
         # read timeouts or connection failures — those block the executor
         # thread for up to total*timeout seconds if retried.
@@ -198,6 +213,19 @@ class EmaldoClient:
     def import_session(self, session: dict) -> None:
         """Restore a previously exported session."""
         self._session = dict(session)
+
+    def invalidate_auth(self) -> None:
+        """Drop the session (token + home/user identity) without clearing the
+        E2E credential caches.
+
+        21204 storm fix (plan 1.2): a mid-stream 21204 must force a fresh
+        login, but the cached E2E credentials (``_e2e_creds_cache`` /
+        ``_home_e2e_cache``) stay warm so the next login can reuse the
+        still-valid secret. The backend rotation throttle
+        (``_home_refresh_last_attempt`` / ``_home_refresh_suppress_logged``)
+        is also kept so a backend-wide storm cannot churn home rotations.
+        """
+        self._session = {}
 
     @property
     def is_authenticated(self) -> bool:
@@ -1004,6 +1032,67 @@ class EmaldoClient:
             force_refresh=force_refresh, allow_home_refresh=allow_home_refresh,
         )
 
+    def _storm_holder(self, home_id: str) -> Any | None:
+        """Resolve the per-home storm-state holder (None when standalone).
+
+        The provider is a plain callable injected by the HA coordinator;
+        client.py must never crash when it is absent or fails.
+        """
+        if self._storm_state_provider is None:
+            return None
+        try:
+            return self._storm_state_provider(home_id)
+        except Exception:  # noqa: BLE001 — guard must never break auth
+            return None
+
+    def _may_rotate_device(self, home_id: str, now: float) -> bool:
+        """21204 storm guard: hold forced rotation during the cooldown window.
+
+        Both latches must agree — the per-process rotation map and the shared
+        per-home holder (injected). A holder that was never seeded (no storm
+        state yet) does not block.
+        """
+        holder = self._storm_holder(home_id)
+        if (
+            holder is not None
+            and not holder.may_rotate(MIN_DEVICE_ROTATION_INTERVAL, now)
+        ):
+            _LOGGER.debug(
+                "Forced E2E rotation held by storm-state holder for %s "
+                "(%.0f s interval)",
+                home_id,
+                MIN_DEVICE_ROTATION_INTERVAL,
+            )
+            return False
+        last = self._device_rotation_last_attempt.get(home_id, 0.0)
+        if now - last < MIN_DEVICE_ROTATION_INTERVAL:
+            _LOGGER.debug(
+                "Forced E2E rotation held for %s (%.0f s since last attempt)",
+                home_id,
+                now - last,
+            )
+            return False
+        return True
+
+    def _note_device_rotation(self, home_id: str, now: float) -> None:
+        """Latch a device-level rotation in the client and the holder."""
+        self._device_rotation_last_attempt[home_id] = now
+        holder = self._storm_holder(home_id)
+        if holder is not None:
+            holder.note_rotation(now)
+            holder.note_forced_refresh(now)
+
+    def _forced_refresh_count(self, home_id: str, now: float, entry) -> int:
+        """Forced refreshes in the 60 s storm window (holder-backed).
+
+        Falls back to the cached entry's generation when no holder is
+        injected (standalone/CLI use, legacy behavior preserved).
+        """
+        holder = self._storm_holder(home_id)
+        if holder is not None:
+            return holder.forced_refresh_count(now)
+        return entry.generation if entry is not None else 0
+
     def _get_e2e_credentials(
         self,
         home_id: str,
@@ -1046,6 +1135,27 @@ class EmaldoClient:
                 # allow_home_refresh=False (secondary device, #47 Phase 4):
                 # the secondary must never rotate the shared home secret
                 # independently — it always uses the primary's published value.
+
+                # 21204 storm guard (Phase 2.2): hold forced rotations while a
+                # fresh device rotation is still cooling down (90 s). A logout
+                # storm re-enters this branch repeatedly; each held rotation
+                # would re-key the device session without fixing the wedge.
+                # TTL-driven refreshes (expired) are never held.
+                if (
+                    force_refresh
+                    and not expired
+                    and entry is not None
+                    and not self._may_rotate_device(home_id, now)
+                ):
+                    _LOGGER.warning(
+                        "Forced E2E refresh held for %s (%.0f s rotation "
+                        "interval) — reusing cached credentials",
+                        home_id,
+                        MIN_DEVICE_ROTATION_INTERVAL,
+                    )
+                    entry.last_used_at = now
+                    return dict(entry.creds)
+
                 _home_quiet_until = self._home_refresh_last_attempt.get(
                     home_id, 0.0
                 ) + self._home_e2e_ttl
@@ -1053,7 +1163,7 @@ class EmaldoClient:
                 _do_home_refresh = (
                     force_refresh
                     and entry is not None
-                    and entry.generation >= 3
+                    and self._forced_refresh_count(home_id, now, entry) >= 3
                     and (now - entry.created_at) < 60
                     and allow_home_refresh
                     and not _home_refresh_quiet
@@ -1068,6 +1178,12 @@ class EmaldoClient:
                         int(_home_quiet_until - now),
                     )
                     self._home_refresh_suppress_logged[home_id] = now
+                # 2.2/3.2: latch the rotation in both the client and the
+                # shared storm-state holder BEFORE attempting e2e_login.
+                # The latch fires on every forced refresh that passes the
+                # 2.2 cooldown gate; TTL-driven refreshes are excluded.
+                if force_refresh:
+                    self._note_device_rotation(home_id, now)
                 creds = self.e2e_login(
                     home_id, device_id, model,
                     force_home_refresh=_do_home_refresh,
