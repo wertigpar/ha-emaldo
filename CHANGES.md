@@ -1,5 +1,23 @@
 # Changes
 
+## v1.0.0-beta37
+
+### Fixed
+
+- **21204 reconnect-storm backoff escalation.** During a backend-wide
+  `session_expired_21204` window the relay keeps *accepting* stream
+  handshakes (returning "ok") while never delivering a decrypted frame.
+  `_stream_reconnect_locked` treated a successful handshake as recovery and
+  zeroed the reconnect streak on every rebuild, so the escalating backoff was
+  permanently pinned at its 2 s base — the client rebuilt the session every
+  ~2 s for the whole episode (~2000 rebuilds in 2 h), each cycle re-forcing a
+  credential refresh. The streak is now reset only when a genuinely fresh
+  frame has arrived since the previous rebuild; a handshake-ok with no new
+  frames lets the backoff climb 2 → 4 → 8 → 16 → 30 s and stay at the 30 s
+  ceiling, cutting the rebuild cadence ~15× and stopping the credential-refresh
+  churn that fed the storm. Recovery is unaffected: the first real frame after
+  the backend window closes resets the backoff to base.
+
 ## v1.0.0-beta36
 
 ### Changed

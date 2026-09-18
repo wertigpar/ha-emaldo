@@ -4839,10 +4839,15 @@ class PersistentE2ESession:
         so reads stay responsive while the backoff elapses. When the deadline
         passes a later call performs the actual rebuild.
 
-        Escalation only grows across consecutive FAILED handshakes (a genuinely
-        penalized relay). A successful handshake — or any received frame —
-        resets the streak so a single competing read cannot ratchet the backoff
-        up to the ceiling (beta13e).
+        Escalation grows across consecutive *frameless* rebuilds. The streak is
+        reset ONLY when a fresh frame arrived since the previous rebuild (proof
+        the relay is genuinely delivering again) — NOT merely because a
+        handshake returned "ok". During a backend 21204 episode the relay keeps
+        accepting handshakes but withholds frames, so treating handshake-ok as
+        recovery pinned the backoff at its 2 s base and hammered the relay
+        (~2000 rebuilds in 2 h) instead of backing off to the ceiling (beta37).
+        A single competing read cannot ratchet it up either, since it likewise
+        delivers no frames.
         """
         if self._closed:
             return
@@ -4935,9 +4940,16 @@ class PersistentE2ESession:
             # quota used by the watchdog quiesce check.
             if "long_stall" in (self._stream_last_reconnect_reason or ""):
                 self._stream_stall_episode_reconnects += 1
-            # A successful handshake clears the escalation: the next 21204 starts
-            # fresh at the base backoff instead of inheriting a tall streak.
-            self._stream_reconnect_streak = 0
+            # beta37: a successful *handshake* is NOT proof the stream recovered
+            # (see the decrypt-gate note below — the relay can reply "ok" while
+            # never delivering a frame). Do NOT clear the escalation streak here;
+            # it is reset only in the scheduling branch above when a genuinely
+            # fresh frame has arrived since the last rebuild. Clearing it on
+            # handshake-ok pinned the backoff at the 2 s base during a 21204
+            # episode, producing ~2000 rebuilds in 2 h (and re-forcing a
+            # credential rotation every cycle). Still re-anchor to the current
+            # frame count so the next scheduling pass compares against post-
+            # rebuild frames.
             self._stream_reconnect_backoff_anchor_frames = self._stream_frames_received
             # Decrypt-gated reconnect success (#53 Q1/Q3): a handshake-ok does
             # NOT prove the chat_secret can still decrypt frames. If this session
