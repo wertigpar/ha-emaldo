@@ -6,3 +6,5 @@ __pycache__/
 TODO.md
 tests/
 *Zone.Identifier
+docs/issues/
+docs/plans/
