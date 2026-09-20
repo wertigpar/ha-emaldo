@@ -2912,9 +2912,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     for _k in _PS_KEYS:
                         if _k in self.data:
                             data[_k] = self.data[_k]
-        elif self.data and "sell_back_to_grid_on" in self.data:
-            data["sell_back_to_grid_on"] = self.data["sell_back_to_grid_on"]
-            for _k in ("sell_limit_on", "sell_limit_threshold"):
+        elif self.data:
+            # Preserve previously-polled state-machine keys on cycles where the
+            # balancing/PS/sell-limit/manual-selling poll does not run. `data` is
+            # a fresh power-flow dict every cycle, so without this forward-copy
+            # the keys would vanish and their sensors would flicker to unknown
+            # between polls (peak-shaving sensor #47-style).
+            for _k in ("sell_back_to_grid_on", "sell_limit_on", "sell_limit_threshold"):
                 if _k in self.data:
                     data[_k] = self.data[_k]
             for _k in (
@@ -2922,6 +2926,21 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "manual_selling_target_kwh",
                 "manual_selling_sold_kwh",
                 "manual_selling_intended_target",
+            ):
+                if _k in self.data:
+                    data[_k] = self.data[_k]
+            for _k in (
+                "peak_shaving_on",
+                "peak_shaving_peak_reserve_pct",
+                "peak_shaving_ups_reserve_pct",
+                "peak_shaving_redundancy",
+                "peak_shaving_schedule_id",
+                "peak_shaving_all_day",
+                "peak_shaving_start_time",
+                "peak_shaving_end_time",
+                "peak_shaving_repeat_days",
+                "peak_shaving_min_peak_power_w",
+                "peak_shaving_created_ts",
             ):
                 if _k in self.data:
                     data[_k] = self.data[_k]
