@@ -15,6 +15,7 @@ import errno
 import functools
 import logging
 import struct
+import threading
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -722,6 +723,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             entry.options.get(CONF_REALTIME_STREAM_MODE, REALTIME_STREAM_MODE)
         )
         self._session: PersistentE2ESession | None = None
+        # Serializes peak-shaving 0x58 pair-writes (two number entities share
+        # one payload; RLock so _set_peak_shaving_reserve can re-enter the
+        # nested pair-write without deadlocking).
+        self._peak_shaving_lock = threading.RLock()
         # 21204 storm guard (Phase 2.4/2.5): per-home storm-state holder,
         # seeded lazily in _ensure_session once per stream-mode run. The
         # fall-back paths (_stall_reset_polls/_live_stream_diag) treat None
@@ -1946,6 +1951,141 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "Manual selling",
         )
 
+    def _read_peak_shaving(self) -> dict | None:
+        """Read peak-shaving config + schedule via the persistent session."""
+        session = self._ensure_session()
+        return session.read_peak_shaving()
+
+    def _write_peak_shaving_toggle(self, enabled: bool) -> None:
+        """Toggle peak shaving on or off (0x57)."""
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                cl = self._parent._ensure_client()
+                own_creds = cl.get_e2e_credentials(
+                    self._parent.home_id, self._parent._device_id,
+                    self._parent._model,
+                )
+                session.send_command_for_creds(
+                    0x57, bytes([0x01 if enabled else 0x00]), own_creds,
+                )
+                return
+            except EmaldoAuthError:
+                self._parent._reset_client()  # noqa: SLF001
+                self._invalidate_session_ref()
+                if attempt == 1:
+                    raise
+            except EmaldoE2EError:
+                self._invalidate_session_ref()
+                if attempt == 1:
+                    raise
+
+    def _write_peak_shaving_toggle_verified(self, enabled: bool) -> Any:
+        """Toggle peak shaving and confirm the device applied it."""
+        return self._write_verified(
+            lambda: self._write_peak_shaving_toggle(enabled),
+            lambda: (self._read_peak_shaving() or {}).get("config"),
+            "enabled",
+            enabled,
+            "Peak shaving toggle",
+        )
+
+    def _write_peak_shaving_points(
+        self, peak_reserve_pct: int, ups_reserve_pct: int,
+    ) -> None:
+        """Set peak shaving reserve percentages (0x58, both fields in one payload)."""
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                cl = self._parent._ensure_client()
+                own_creds = cl.get_e2e_credentials(
+                    self._parent.home_id, self._parent._device_id,
+                    self._parent._model,
+                )
+                session.send_command_for_creds(
+                    0x58, bytes([peak_reserve_pct, ups_reserve_pct]), own_creds,
+                )
+                return
+            except EmaldoAuthError:
+                self._parent._reset_client()  # noqa: SLF001
+                self._invalidate_session_ref()
+                if attempt == 1:
+                    raise
+            except EmaldoE2EError:
+                self._invalidate_session_ref()
+                if attempt == 1:
+                    raise
+
+    def _write_peak_shaving_points_verified(
+        self, peak_reserve_pct: int, ups_reserve_pct: int,
+    ) -> Any:
+        """Write both peak-shaving reserve percentages and confirm the device applied BOTH (pair-write)."""
+        import time
+
+        with self._peak_shaving_lock:
+            cfg = None
+            for attempt in range(self._WRITE_VERIFY_MAX_POLLS):
+                self._write_peak_shaving_points(peak_reserve_pct, ups_reserve_pct)
+                time.sleep(self._WRITE_VERIFY_POLL_S)
+                confirmed = self._read_peak_shaving()
+                if confirmed is not None:
+                    cfg = confirmed.get("config")
+                    if cfg is not None and (
+                        cfg.get("peak_reserve_pct") == peak_reserve_pct
+                        and cfg.get("ups_reserve_pct") == ups_reserve_pct
+                    ):
+                        return cfg
+                if attempt < self._WRITE_VERIFY_MAX_POLLS - 1:
+                    _LOGGER.debug(
+                        "Peak shaving points not yet confirmed (attempt %d/%d, "
+                        "target_peak=%s target_ups=%s read=%s)",
+                        attempt + 1, self._WRITE_VERIFY_MAX_POLLS,
+                        peak_reserve_pct, ups_reserve_pct, cfg,
+                    )
+            _LOGGER.warning(
+                "Peak shaving points were not confirmed by the device after %d "
+                "attempts (target_peak=%s target_ups=%s, last=%s)",
+                self._WRITE_VERIFY_MAX_POLLS, peak_reserve_pct, ups_reserve_pct,
+                cfg,
+            )
+            return cfg
+
+    def _set_peak_shaving_reserve(
+        self, *, peak_reserve_pct: int | None = None,
+        ups_reserve_pct: int | None = None,
+    ) -> dict | None:
+        """Read-modify-write one peak-shaving reserve field under the pair-write lock.
+
+        Both fields share a single 0x58 payload, so a number-entity write of one
+        field must merge with the device's CURRENT other field before sending —
+        otherwise a concurrent or stale write would clobber it. The fresh read
+        happens inside ``_peak_shaving_lock`` (RLock), then the nested
+        ``_write_peak_shaving_points_verified`` re-enters the same lock. Returns
+        the confirmed config dict, or None if no read succeeded.
+        """
+        with self._peak_shaving_lock:
+            current = self._read_peak_shaving()
+            current_cfg = None
+            if current is not None:
+                current_cfg = current.get("config")
+            if peak_reserve_pct is None:
+                peak_reserve_pct = (
+                    current_cfg.get("peak_reserve_pct") if current_cfg else None
+                )
+            if ups_reserve_pct is None:
+                ups_reserve_pct = (
+                    current_cfg.get("ups_reserve_pct") if current_cfg else None
+                )
+            if peak_reserve_pct is None or ups_reserve_pct is None:
+                _LOGGER.warning(
+                    "Peak shaving reserve write skipped: no fresh config read "
+                    "(peak=%s ups=%s)", peak_reserve_pct, ups_reserve_pct,
+                )
+                return current_cfg
+            return self._write_peak_shaving_points_verified(
+                peak_reserve_pct, ups_reserve_pct,
+            )
+
     def _read_battery_info_standalone(
         self, *, slots: list[int] | None = None,
     ) -> list[dict]:
@@ -2722,6 +2862,54 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 _LOGGER.debug("Manual selling state read failed: %s", err)
                 if self.data:
                     for _k in _MS_KEYS:
+                        if _k in self.data:
+                            data[_k] = self.data[_k]
+
+            # Poll peak-shaving state alongside balancing (~60s): config (0x5B)
+            # + schedule (0x5C) via the persistent session.
+            _PS_KEYS = (
+                "peak_shaving_on",
+                "peak_shaving_peak_reserve_pct",
+                "peak_shaving_ups_reserve_pct",
+                "peak_shaving_redundancy",
+                "peak_shaving_schedule_id",
+                "peak_shaving_all_day",
+                "peak_shaving_start_time",
+                "peak_shaving_end_time",
+                "peak_shaving_repeat_days",
+                "peak_shaving_min_peak_power_w",
+                "peak_shaving_created_ts",
+            )
+            try:
+                ps = await self.hass.async_add_executor_job(self._read_peak_shaving)
+                if ps is not None:
+                    cfg = ps.get("config")
+                    if cfg is not None:
+                        data["peak_shaving_on"] = cfg.get("enabled")
+                        data["peak_shaving_peak_reserve_pct"] = cfg.get("peak_reserve_pct")
+                        data["peak_shaving_ups_reserve_pct"] = cfg.get("ups_reserve_pct")
+                        data["peak_shaving_redundancy"] = cfg.get("redundancy")
+                    sched = ps.get("schedule")
+                    if sched is not None:
+                        for src_key, dst_key in (
+                            ("schedule_id", "peak_shaving_schedule_id"),
+                            ("all_day", "peak_shaving_all_day"),
+                            ("start_time", "peak_shaving_start_time"),
+                            ("end_time", "peak_shaving_end_time"),
+                            ("repeat_days", "peak_shaving_repeat_days"),
+                            ("min_peak_power_w", "peak_shaving_min_peak_power_w"),
+                            ("created_ts", "peak_shaving_created_ts"),
+                        ):
+                            if src_key in sched:
+                                data[dst_key] = sched[src_key]
+                elif self.data:
+                    for _k in _PS_KEYS:
+                        if _k in self.data:
+                            data[_k] = self.data[_k]
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Peak shaving state read failed: %s", err)
+                if self.data:
+                    for _k in _PS_KEYS:
                         if _k in self.data:
                             data[_k] = self.data[_k]
         elif self.data and "sell_back_to_grid_on" in self.data:

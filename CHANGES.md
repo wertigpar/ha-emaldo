@@ -1,5 +1,19 @@
 # Changes
 
+## v1.0.0-beta38
+
+### Added
+
+- **Peak shaving switch + reserve number entities.** New switch (Peak shaving),
+  peak-reserve and UPS-reserve number entities (0-100 %, step 1) for the Fixed
+  Peak Reserve feature (#71). The switch toggles the battery's peak-shaving
+  mode (0x57, with a read-back confirmation of the applied state); the number
+  entities set the peak and UPS reserve percentages (0x58, paired
+  read-modify-write so changing one value never clobbers the other, confirmed
+  by a read-back loop). A diagnostic peak-shaving status sensor exposes the
+  full 0x5B/0x5C config + schedule state. Polled alongside balancing via the
+  persistent E2E session.
+
 ## v1.0.0-beta37
 
 ### Fixed

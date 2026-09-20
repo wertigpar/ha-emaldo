@@ -87,6 +87,7 @@
       "schedule_chart": { "name": "Schedule chart" },
       "balancing_state": { "name": "Balancing state" },
       "realtime_connection": { "name": "Realtime connection" },
+      "peak_shaving_status": { "name": "Peak shaving status", "state": { "on": "On", "off": "Off" } },
       "total_energy": { "name": "Total energy" },
       "battery_module_model": { "name": "Battery Module {module} Model" },
       "battery_module_soc": { "name": "Battery Module {module} SoC" },
@@ -115,6 +116,7 @@
       "sell_back_to_grid": { "name": "Sell Back to Grid" },
       "sell_limit": { "name": "Sell Limit" },
       "manual_selling": { "name": "Manual Selling" },
+      "peak_shaving": { "name": "Peak shaving" },
       "ai_battery_range_override": { "name": "AI Battery Range override" },
       "emergency_charge": { "name": "Emergency charge" }
     },
@@ -123,7 +125,9 @@
       "ai_battery_range_smart": { "name": "AI Smart reserve" },
       "ai_battery_range_emergency": { "name": "AI Emergency reserve" },
       "sell_limit_threshold": { "name": "Sell Limit threshold" },
-      "manual_selling_target": { "name": "Manual Selling target" }
+      "manual_selling_target": { "name": "Manual Selling target" },
+      "peak_reserve": { "name": "Peak reserve" },
+      "ups_reserve": { "name": "UPS reserve" }
     },
     "select": {
       "ev_charge_mode": { "name": "EV charge mode" }

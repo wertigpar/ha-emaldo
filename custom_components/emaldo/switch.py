@@ -48,6 +48,7 @@ async def async_setup_entry(
                 EmaldoSellBackToGridSwitch(realtime_coordinator),
                 EmaldoSellLimitSwitch(realtime_coordinator),
                 EmaldoManualSellingSwitch(realtime_coordinator),
+                EmaldoPeakShavingSwitch(realtime_coordinator),
                 EmaldoEmergencyChargeSwitch(power_coordinator),
                 EmaldoBatteryRangeOverrideSwitch(schedule_coordinator),
             ]
@@ -469,4 +470,62 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
             updated["emergency_charge_active"] = False
+            self.coordinator.async_set_updated_data(updated)
+
+
+class EmaldoPeakShavingSwitch(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], SwitchEntity
+):
+    """Switch entity for Fixed Peak Reserve shaving (0x57).
+
+    ON  = peak shaving enabled (uses the reserve % from the peak_reserve
+          and ups_reserve number entities)
+    OFF = peak shaving disabled
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "peak_shaving"
+    _attr_icon = "mdi:power-plug-outline"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialise the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{_uid_base(coordinator)}_peak_shaving"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True when peak shaving is enabled."""
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("peak_shaving_on")
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable peak shaving, verifying the device confirms it."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_peak_shaving_toggle_verified, True  # noqa: SLF001
+        )
+        if confirmed is not None and self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["peak_shaving_on"] = confirmed
+            self.coordinator.async_set_updated_data(updated)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable peak shaving, verifying the device confirms it."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._write_peak_shaving_toggle_verified, False  # noqa: SLF001
+        )
+        if confirmed is not None and self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            updated["peak_shaving_on"] = confirmed
             self.coordinator.async_set_updated_data(updated)

@@ -81,6 +81,7 @@
       "schedule_chart": { "name": "Tidsplandiagram" },
       "balancing_state": { "name": "Frekvensregulering" },
       "realtime_connection": { "name": "Sanntidsforbindelse" },
+      "peak_shaving_status": { "name": "Effekttoppstatus", "state": { "on": "På", "off": "Av" } },
       "total_energy": { "name": "Total energi" },
       "battery_module_model": { "name": "Batterimodul {module} Modell" },
       "battery_module_soc": { "name": "Batterimodul {module} SoC" },
@@ -111,6 +112,7 @@
       "sell_back_to_grid": { "name": "Selge tilbake til nettet" },
       "sell_limit": { "name": "Salgsbegrensning" },
       "manual_selling": { "name": "Manuelt salg" },
+      "peak_shaving": { "name": "Effekttoppbegrensning" },
       "ai_battery_range_override": { "name": "Manuell batterinivå" },
       "emergency_charge": { "name": "Nødlading" }
     },
@@ -119,7 +121,9 @@
       "ai_battery_range_smart": { "name": "AI smart reserve" },
       "ai_battery_range_emergency": { "name": "AI nødreserve" },
       "sell_limit_threshold": { "name": "Salgsbegrensningsterskel" },
-      "manual_selling_target": { "name": "Mål for manuelt salg" }
+      "manual_selling_target": { "name": "Mål for manuelt salg" },
+      "peak_reserve": { "name": "Toppreserve" },
+      "ups_reserve": { "name": "UPS-reserve" }
     },
     "select": {
       "ev_charge_mode": { "name": "Lademodus (bil)" }

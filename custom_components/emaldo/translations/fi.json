@@ -81,6 +81,7 @@
       "schedule_chart": { "name": "Aikataulukaavio" },
       "balancing_state": { "name": "Taajuussäätötila" },
       "realtime_connection": { "name": "Reaaliaikayhteys" },
+      "peak_shaving_status": { "name": "Huippurajoituksen tila", "state": { "on": "Päällä", "off": "Pois" } },
       "total_energy": { "name": "Kokonaisenergia" },
       "battery_module_model": { "name": "Akkumoduuli {module} Malli" },
       "battery_module_soc": { "name": "Akkumoduuli {module} SoC" },
@@ -111,6 +112,7 @@
       "sell_back_to_grid": { "name": "Takaisinmyynti verkkoon" },
       "sell_limit": { "name": "Myyntisuoja" },
       "manual_selling": { "name": "Manuaalinen myynti" },
+      "peak_shaving": { "name": "Huippukuormituksen rajoitus" },
       "ai_battery_range_override": { "name": "Akkualueen manuaalinen ohjaus" },
       "emergency_charge": { "name": "Hätälataus" }
     },
@@ -119,7 +121,9 @@
       "ai_battery_range_smart": { "name": "Tekoälyn älyreservi" },
       "ai_battery_range_emergency": { "name": "Tekoälyn hätäreservi" },
       "sell_limit_threshold": { "name": "Myyntisuojakynnys" },
-      "manual_selling_target": { "name": "Manuaalinen myyntimäärä" }
+      "manual_selling_target": { "name": "Manuaalinen myyntimäärä" },
+      "peak_reserve": { "name": "Huippureservi" },
+      "ups_reserve": { "name": "UPS-reservi" }
     },
     "select": {
       "ev_charge_mode": { "name": "Auton latausmoodi" }

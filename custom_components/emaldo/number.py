@@ -62,6 +62,10 @@ async def async_setup_entry(
         # Manual selling target energy amount (1-100 kWh).
         entities.append(EmaldoManualSellingTarget(realtime_coordinator))
 
+        # Peak-shaving reserve percentages (0-100 %, shared 0x58 pair-write).
+        entities.append(EmaldoPeakReserveNumber(realtime_coordinator))
+        entities.append(EmaldoUpsReserveNumber(realtime_coordinator))
+
     async_add_entities(entities)
 
 
@@ -344,4 +348,132 @@ class EmaldoManualSellingTarget(
             updated = dict(self.coordinator.data)
             updated["manual_selling_target_kwh"] = float(target)
             updated["manual_selling_intended_target"] = float(target)
+            self.coordinator.async_set_updated_data(updated)
+
+
+class EmaldoPeakReserveNumber(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], NumberEntity
+):
+    """Peak reserve percentage for peak shaving (0x58 first byte).
+
+    Writes via the coordinator's read-modify-write pair-write so the
+    ups_reserve field is never clobbered. Range 0-100 %, step 1.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "peak_reserve"
+    _attr_icon = "mdi:gauge"
+    _attr_mode = NumberMode.BOX
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "%"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialize the peak reserve number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{_uid_base(coordinator)}_peak_shaving_peak_reserve"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking to the main Emaldo device."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current peak reserve percentage."""
+        if self.coordinator.data is None:
+            return None
+        val = self.coordinator.data.get("peak_shaving_peak_reserve_pct")
+        if val is None:
+            return None
+        return float(max(0, min(100, val)))
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set peak reserve, merging with the device's current ups_reserve."""
+        await self._write_pair(reserve_pct=int(round(value)), ups_pct=None)
+
+    async def _write_pair(self, *, reserve_pct: int | None, ups_pct: int | None) -> None:
+        """Send one changed field through the coordinator pair-write; reflect
+        the confirmed config back into coordinator data."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._set_peak_shaving_reserve,  # noqa: SLF001
+            reserve_pct, ups_pct,
+        )
+        if confirmed is not None and self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            if "peak_reserve_pct" in confirmed:
+                updated["peak_shaving_peak_reserve_pct"] = confirmed["peak_reserve_pct"]
+            if "ups_reserve_pct" in confirmed:
+                updated["peak_shaving_ups_reserve_pct"] = confirmed["ups_reserve_pct"]
+            self.coordinator.async_set_updated_data(updated)
+
+
+class EmaldoUpsReserveNumber(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], NumberEntity
+):
+    """UPS reserve percentage for peak shaving (0x58 second byte).
+
+    Writes via the coordinator's read-modify-write pair-write so the
+    peak_reserve field is never clobbered. Range 0-100 %, step 1.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "ups_reserve"
+    _attr_icon = "mdi:shield-outline"
+    _attr_mode = NumberMode.BOX
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "%"
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialize the UPS reserve number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{_uid_base(coordinator)}_peak_shaving_ups_reserve"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking to the main Emaldo device."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current UPS reserve percentage."""
+        if self.coordinator.data is None:
+            return None
+        val = self.coordinator.data.get("peak_shaving_ups_reserve_pct")
+        if val is None:
+            return None
+        return float(max(0, min(100, val)))
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set UPS reserve, merging with the device's current peak_reserve."""
+        await self._write_pair(reserve_pct=None, ups_pct=int(round(value)))
+
+    async def _write_pair(self, *, reserve_pct: int | None, ups_pct: int | None) -> None:
+        """Send one changed field through the coordinator pair-write; reflect
+        the confirmed config back into coordinator data."""
+        confirmed = await self.hass.async_add_executor_job(
+            self.coordinator._set_peak_shaving_reserve,  # noqa: SLF001
+            reserve_pct, ups_pct,
+        )
+        if confirmed is not None and self.coordinator.data is not None:
+            updated = dict(self.coordinator.data)
+            if "peak_reserve_pct" in confirmed:
+                updated["peak_shaving_peak_reserve_pct"] = confirmed["peak_reserve_pct"]
+            if "ups_reserve_pct" in confirmed:
+                updated["peak_shaving_ups_reserve_pct"] = confirmed["ups_reserve_pct"]
             self.coordinator.async_set_updated_data(updated)

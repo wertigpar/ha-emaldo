@@ -5522,6 +5522,93 @@ class PersistentE2ESession:
 
             return None
 
+    def read_peak_shaving(self) -> dict | None:
+        """Read peak-shaving config (0x5B) + schedule (0x5C) over the existing
+        session.
+
+        Returns a dict with ``config`` (from ``parse_peak_shaving_config``:
+        ``enabled``, ``peak_reserve_pct``, ``ups_reserve_pct``, ``redundancy``)
+        and ``schedule`` (from ``parse_peak_shaving_schedule``:
+        ``schedule_id``, ``all_day``, ``start_time``, ``end_time``,
+        ``repeat_days``, ``min_peak_power_w``, ``created_ts``); either value is
+        *None* on timeout / parse failure.
+        """
+        with self._lock:
+            if self._sock is None or self._closed:
+                raise EmaldoE2EError("Session is not connected")
+
+            config = None
+            req_pkt = build_subscription_packet(
+                self._creds, 0x5B, self._session_nonce,
+            )
+            resp = self._send_raw(req_pkt, "GetPeakShavingConfig(0x5B)")
+            if resp is not None and not self._is_session_expired(resp):
+                try:
+                    decrypted = decrypt_response(
+                        resp, self._creds["chat_secret"],
+                        payload_validator=lambda b: len(b) >= 20,
+                        silent=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    decrypted = None
+                config = parse_peak_shaving_config(decrypted)
+                if config is None:
+                    for _ in range(5):
+                        try:
+                            more_resp, _ = self._sock.recvfrom(4096)
+                        except socket.timeout:
+                            break
+                        if self._is_session_expired(more_resp):
+                            break
+                        try:
+                            decrypted = decrypt_response(
+                                more_resp, self._creds["chat_secret"],
+                                payload_validator=lambda b: len(b) >= 20,
+                                silent=True,
+                            )
+                        except Exception:  # noqa: BLE001
+                            continue
+                        config = parse_peak_shaving_config(decrypted)
+                        if config is not None:
+                            break
+
+            schedule = None
+            req_pkt = build_subscription_packet(
+                self._creds, 0x5C, self._session_nonce,
+            )
+            resp = self._send_raw(req_pkt, "GetPeakShavingSchedule(0x5C)")
+            if resp is not None and not self._is_session_expired(resp):
+                try:
+                    decrypted = decrypt_response(
+                        resp, self._creds["chat_secret"],
+                        payload_validator=lambda b: len(b) >= 28,
+                        silent=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    decrypted = None
+                schedule = parse_peak_shaving_schedule(decrypted)
+                if schedule is None:
+                    for _ in range(5):
+                        try:
+                            more_resp, _ = self._sock.recvfrom(4096)
+                        except socket.timeout:
+                            break
+                        if self._is_session_expired(more_resp):
+                            break
+                        try:
+                            decrypted = decrypt_response(
+                                more_resp, self._creds["chat_secret"],
+                                payload_validator=lambda b: len(b) >= 28,
+                                silent=True,
+                            )
+                        except Exception:  # noqa: BLE001
+                            continue
+                        schedule = parse_peak_shaving_schedule(decrypted)
+                        if schedule is not None:
+                            break
+
+            return {"config": config, "schedule": schedule}
+
     def read_battery_info(self) -> list[dict]:
         """Read per-module battery info (type 0x06) over the existing session.
 

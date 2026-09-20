@@ -712,6 +712,7 @@ async def async_setup_entry(
 
         # Diagnostic: realtime connection status
         entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
+        entities.append(EmaldoPeakShavingSensor(realtime_coordinator))
         entities.append(EmaldoBalancingStateSensor(realtime_coordinator))
         entities.append(EmaldoBatteryTotalEnergySensor(realtime_coordinator))
 
@@ -1584,6 +1585,70 @@ _BATTERY_MODULE_METRIC_CONFIG: dict[str, dict[str, Any]] = {
 
 # Metrics whose decoded value is a string rather than a number.
 _BATTERY_MODULE_STRING_METRICS = {"model", "serial", "position"}
+
+
+class EmaldoPeakShavingSensor(
+    CoordinatorEntity[EmaldoRealtimeCoordinator], SensorEntity
+):
+    """Diagnostic sensor exposing peak-shaving configuration state (0x5B/0x5C).
+
+    The battery's Fixed Peak Reserve config and schedule, polled alongside
+    balancing. Values are attributes; the native state is the enabled flag.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "peak_shaving_status"
+    _attr_icon = "mdi:chart-bell-curve-cumulative"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+
+    def __init__(self, coordinator: EmaldoRealtimeCoordinator) -> None:
+        """Initialise the peak-shaving diagnostic sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{_uid_base(coordinator)}_peak_shaving_status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking to the main Emaldo device."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return 'on'/'off' when known, else None (unavailable)."""
+        if self.coordinator.data is None:
+            return None
+        on = self.coordinator.data.get("peak_shaving_on")
+        if on is None:
+            return None
+        return "on" if on else "off"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the full polled 0x5B/0x5C state."""
+        data = self.coordinator.data or {}
+        attrs: dict[str, Any] = {}
+        for key in (
+            "peak_shaving_peak_reserve_pct",
+            "peak_shaving_ups_reserve_pct",
+            "peak_shaving_redundancy",
+            "peak_shaving_schedule_id",
+            "peak_shaving_all_day",
+            "peak_shaving_start_time",
+            "peak_shaving_end_time",
+            "peak_shaving_repeat_days",
+            "peak_shaving_min_peak_power_w",
+            "peak_shaving_created_ts",
+        ):
+            val = data.get(key)
+            if val is not None:
+                attrs[key] = val
+        return attrs
 
 
 class EmaldoBatteryModuleSensor(
