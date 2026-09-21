@@ -1,5 +1,20 @@
 # Changes
 
+## v1.0.0-beta39
+
+### Fixed
+
+- **Peak-shaving status sensor no longer dips to `unknown` on empty or partial
+  0x5B/0x5C reads.** `read_peak_shaving` always returns a dict — `config` and/or
+  `schedule` are `None` when the read times out or fails to parse. On such a
+  cycle the changed state was left without any peak-shaving keys, so
+  `sensor.power_store_peak_shaving_status` went `unknown` for one poll interval
+  (recurring roughly every 20-40 min, because the backend intermittently fails
+  to answer the poll). The poll loop now back-fills every peak-shaving key the
+  read did not produce from the previously-known data (fresh read values still
+  win), which covers both fully-empty and partial reads. Completes the fix
+  started with the PS-key forward-copy on non-poll cycles (beta38.1).
+
 ## v1.0.0-beta38
 
 ### Added

@@ -2902,9 +2902,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         ):
                             if src_key in sched:
                                 data[dst_key] = sched[src_key]
-                elif self.data:
+                # read_peak_shaving always returns a dict (e2e.py); config and/or
+                # schedule are None on timeout/parse failure. Back-fill any PS key
+                # this read did not produce from the previously-known data, so an
+                # empty or partial read never strips the sensor values between
+                # successful polls.
+                if self.data:
                     for _k in _PS_KEYS:
-                        if _k in self.data:
+                        if _k not in data and _k in self.data:
                             data[_k] = self.data[_k]
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Peak shaving state read failed: %s", err)
