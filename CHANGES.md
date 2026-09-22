@@ -22,6 +22,12 @@
   list into the Diagnostics category, so they no longer clutter the regular
   Sensors view. States and entities themselves are unchanged.
 
+- **Battery module SoC and temperature reclassified as diagnostics.** The
+  per-module `battery_module_soc` and `battery_module_temperature` sensors
+  joined the other module metrics (current, health, cycles, stored energy,
+  capacity, voltage, …) in the Diagnostics category, decluttering the
+  regular Sensors view. Values and entities are unchanged.
+
 ## v1.0.0-beta38
 
 ### Added

@@ -1503,6 +1503,7 @@ _BATTERY_MODULE_METRIC_CONFIG: dict[str, dict[str, Any]] = {
         # of showing the whole Power Store SoC in the device top-right.
         "state_class": SensorStateClass.MEASUREMENT,
         "icon": "mdi:battery",
+        "diagnostic": True,
     },
     "current_a": {
         "translation_key": "battery_module_current",
@@ -1543,6 +1544,7 @@ _BATTERY_MODULE_METRIC_CONFIG: dict[str, dict[str, Any]] = {
         "unit": UnitOfTemperature.CELSIUS,
         "device_class": SensorDeviceClass.TEMPERATURE,
         "state_class": SensorStateClass.MEASUREMENT,
+        "diagnostic": True,
     },
     "electrode_a_temp_c": {
         "translation_key": "battery_module_cell_a_temp",
