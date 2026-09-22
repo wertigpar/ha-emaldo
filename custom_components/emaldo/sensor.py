@@ -641,6 +641,7 @@ FAN_PACK_DESCRIPTIONS: tuple[EmaldoSensorEntityDescription, ...] = tuple(
         icon="mdi:fan",
         device_class=SensorDeviceClass.ENUM,
         options=["stopped", "running", "fault", "unknown"],
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=(lambda d, idx=n - 1: _fan_pack_state(d, idx)),
     )
     for n in range(1, 4)

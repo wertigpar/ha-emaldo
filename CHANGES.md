@@ -15,6 +15,13 @@
   win), which covers both fully-empty and partial reads. Completes the fix
   started with the PS-key forward-copy on non-poll cycles (beta38.1).
 
+### Changed
+
+- **Fan Pack sensors reclassified as diagnostics.** The per-phase Fan Pack
+  state sensors (`fan_pack_01`-`fan_pack_03`) moved out of the default sensor
+  list into the Diagnostics category, so they no longer clutter the regular
+  Sensors view. States and entities themselves are unchanged.
+
 ## v1.0.0-beta38
 
 ### Added
