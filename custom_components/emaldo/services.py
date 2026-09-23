@@ -307,6 +307,48 @@ def _get_coordinator_and_client(
     return schedule_coord, client
 
 
+def _resolve_markers(
+    coord,
+    current: dict | None,
+    high: int | None,
+    low: int | None,
+    bro: bool | None,
+) -> tuple[int, int, bool]:
+    """Resolve omitted override markers for a write (#72).
+
+    Priority: caller-supplied values → the coordinator's last validated
+    snapshot → the fresh read → hard-coded defaults. The fresh read is only
+    consulted when the snapshot has no markers, because echoing a read's
+    markers straight back into a write lets a garbage (but parse-valid)
+    frame silently rewrite the battery reserve range on the next override.
+    """
+    cached = None
+    if coord is not None and coord.data:
+        cached = coord.data.get("overrides")
+    if high is None:
+        if cached and cached.get("high_marker") is not None:
+            high = int(cached["high_marker"])
+        elif current:
+            high = int(current["high_marker"])
+        else:
+            high = DEFAULT_MARKER_HIGH
+    if low is None:
+        if cached and cached.get("low_marker") is not None:
+            low = int(cached["low_marker"])
+        elif current:
+            low = int(current["low_marker"])
+        else:
+            low = DEFAULT_MARKER_LOW
+    if bro is None:
+        if cached and cached.get("battery_range_override") is not None:
+            bro = bool(cached["battery_range_override"])
+        elif current:
+            bro = bool(current.get("battery_range_override", False))
+        else:
+            bro = False
+    return high, low, bro
+
+
 async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle the set_slot_range service call."""
     device_id = call.data.get("device_id")
@@ -320,7 +362,6 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
     # Read current overrides, then patch the range
     def _do_override():
         nonlocal high, low, bro
-        resolved = False
         last_err = None
         last_reason = None
         slots = None
@@ -335,15 +376,10 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 if current is None and coord.data:
                     current = coord.data.get("overrides")
 
-                # Resolve omitted header fields from device state (first attempt)
-                if not resolved:
-                    if high is None:
-                        high = current["high_marker"] if current else DEFAULT_MARKER_HIGH
-                    if low is None:
-                        low = current["low_marker"] if current else DEFAULT_MARKER_LOW
-                    if bro is None:
-                        bro = current.get("battery_range_override", False) if current else False
-                    resolved = True
+                # Resolve omitted header fields — cache wins over the fresh
+                # read so a garbage frame never gets echoed back as a write
+                # (#72).
+                high, low, bro = _resolve_markers(coord, current, high, low, bro)
 
                 slot_value = encode_override_action(action, low, high)
 
@@ -447,7 +483,6 @@ async def async_handle_apply_bulk_schedule(
 
     def _do_bulk():
         nonlocal high, low, bro
-        resolved = False
         last_err = None
         last_reason = None
         coord = None
@@ -458,26 +493,13 @@ async def async_handle_apply_bulk_schedule(
                 )
                 hid, did, model = coord.home_id, coord._device_id, coord._model
 
-                # Resolve omitted header fields from device state (first attempt)
-                if not resolved and (high is None or low is None or bro is None):
-                    current = client.get_overrides(hid, did, model)
-                    if current is None and coord.data:
-                        current = coord.data.get("overrides")
-                    if current:
-                        if high is None:
-                            high = current["high_marker"]
-                        if low is None:
-                            low = current["low_marker"]
-                        if bro is None:
-                            bro = current.get("battery_range_override", False)
-                    else:
-                        if high is None:
-                            high = DEFAULT_MARKER_HIGH
-                        if low is None:
-                            low = DEFAULT_MARKER_LOW
-                        if bro is None:
-                            bro = False
-                    resolved = True
+                # Resolve omitted header fields — cache wins over the fresh
+                # read so a garbage frame never gets echoed back as a write
+                # (#72).
+                current = client.get_overrides(hid, did, model)
+                if current is None and coord.data:
+                    current = coord.data.get("overrides")
+                high, low, bro = _resolve_markers(coord, current, high, low, bro)
 
                 rt = _get_target_set(
                     hass, coordinator_key="schedule", device_id=device_id,
@@ -590,7 +612,6 @@ def _reset_one_device(
     the intended slots, so a relay ACK that didn't actually clear state is
     caught and reported as a failure.
     """
-    resolved = False
     last_err = None
     last_reason = None
     slots = None
@@ -603,27 +624,13 @@ def _reset_one_device(
             hid, did, model = coord.home_id, coord._device_id, coord._model
 
             if reset_all:
-                # Resolve omitted header fields from device state
-                if not resolved:
-                    if high is None or low is None or bro is None:
-                        current = client.get_overrides(hid, did, model)
-                        if current is None and coord.data:
-                            current = coord.data.get("overrides")
-                        if current:
-                            if high is None:
-                                high = current["high_marker"]
-                            if low is None:
-                                low = current["low_marker"]
-                            if bro is None:
-                                bro = current.get("battery_range_override", False)
-                        else:
-                            if high is None:
-                                high = DEFAULT_MARKER_HIGH
-                            if low is None:
-                                low = DEFAULT_MARKER_LOW
-                            if bro is None:
-                                bro = False
-                    resolved = True
+                # Resolve omitted header fields — cache wins over the fresh
+                # read so a garbage frame never gets echoed back as a write
+                # (#72).
+                current = client.get_overrides(hid, did, model)
+                if current is None and coord.data:
+                    current = coord.data.get("overrides")
+                high, low, bro = _resolve_markers(coord, current, high, low, bro)
 
                 slot_bytes = bytes([SLOT_NO_OVERRIDE] * 96)
                 rt = _get_target_set(
@@ -669,13 +676,10 @@ def _reset_one_device(
                 else:
                     slots = [SLOT_NO_OVERRIDE] * 96
 
-                # Resolve omitted header fields from device state
-                if high is None:
-                    high = current["high_marker"] if current else DEFAULT_MARKER_HIGH
-                if low is None:
-                    low = current["low_marker"] if current else DEFAULT_MARKER_LOW
-                if bro is None:
-                    bro = current.get("battery_range_override", False) if current else False
+                # Resolve omitted header fields — cache wins over the fresh
+                # read so a garbage frame never gets echoed back as a write
+                # (#72).
+                high, low, bro = _resolve_markers(coord, current, high, low, bro)
 
                 for i in range(start_slot, min(end_slot, 96)):
                     slots[i] = SLOT_NO_OVERRIDE

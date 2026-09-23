@@ -18,8 +18,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, EV_UNSUPPORTED_MODELS
 from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
 from .schedule_coordinator import EmaldoScheduleCoordinator
+from .emaldo_lib.const import valid_marker_pair
 from .emaldo_lib.e2e import EV_MODE_INSTANT_FIXED
-from .emaldo_lib.exceptions import EmaldoAuthError
+from .emaldo_lib.exceptions import (
+    EmaldoAuthError,
+    EmaldoConnectionError,
+    EmaldoE2EError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -194,16 +199,43 @@ class EmaldoBatteryRangeMarker(
             return
 
         def _write() -> bool:
+            w_smart, w_emergency, w_enable = smart, emergency, enable
             for attempt in range(2):
                 try:
                     client = self.coordinator._ensure_client()  # noqa: SLF001
+                    # Read the sibling markers fresh on this very write. The
+                    # coordinator snapshot only refreshes *after* this write,
+                    # so two rapid slider writes would otherwise each echo the
+                    # other's pre-write value and the second write would undo
+                    # the first (#72). Garbage/invalid reads are ignored in
+                    # favour of the snapshot.
+                    try:
+                        fresh = client.get_overrides(
+                            self.coordinator.home_id,
+                            self.coordinator._device_id,  # noqa: SLF001
+                            self.coordinator._model,      # noqa: SLF001
+                        )
+                    except (EmaldoConnectionError, EmaldoE2EError):
+                        fresh = None
+                    if fresh and valid_marker_pair(
+                        fresh["low_marker"], fresh["high_marker"]
+                    ):
+                        w_smart = fresh["high_marker"]
+                        w_emergency = fresh["low_marker"]
+                        w_enable = bool(
+                            fresh.get("battery_range_override", False)
+                        )
+                        if self._kind == "smart":
+                            w_smart = smart
+                        else:
+                            w_emergency = emergency
                     return client.set_battery_range(
                         self.coordinator.home_id,
                         self.coordinator._device_id,  # noqa: SLF001
                         self.coordinator._model,      # noqa: SLF001
-                        smart_pct=smart,
-                        emergency_pct=emergency,
-                        enable=enable,
+                        smart_pct=w_smart,
+                        emergency_pct=w_emergency,
+                        enable=w_enable,
                         slot_values=cached_slots,
                     )
                 except EmaldoAuthError:

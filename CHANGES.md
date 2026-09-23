@@ -1,5 +1,29 @@
 # Changes
 
+## v1.0.0-beta40
+
+### Fixed
+
+- **Bad battery-marker reads could silently rewrite the reserve range (#72).**
+  Service handlers (`set_slot_range`, `apply_bulk_schedule`,
+  `reset_to_internal`) resolved omitted `high_marker`/`low_marker` header
+  fields by reading device state *on the same call* and echoing that read
+  straight back into the write. A garbage-but-parseable frame (e.g. a
+  `low_marker=13`/`high_marker=8` pair) was therefore persisted back to the
+  device as the new reserve range — exactly what an angry user reported
+  after an overnight 21204 storm. Fixed in three layers:
+  - `parse_override_state` now rejects any marker pair that is not
+    self-consistent (both in 0-100, high ≥ low), not just out-of-range
+    bytes, so the coordinator keeps its last validated snapshot.
+  - Service handlers prefer the coordinator's validated marker snapshot over
+    a fresh read whenever it is available; the fresh read is only consulted
+    when the snapshot has no markers.
+  - `EmaldoBatteryRangeMarker.async_set_native_value` reads the sibling
+    marker fresh *before* writing (instead of reusing the pre-write
+    snapshot), so two rapid slider writes can no longer undo each other.
+  - Defense-in-depth `assert` in `build_override_payload` mirrors the parse
+    guard, so an invalid pair can never reach the wire as a write.
+
 ## v1.0.0-beta39
 
 ### Fixed

@@ -80,6 +80,22 @@ DEFAULT_MARKER_HIGH = 72
 DEFAULT_MARKER_LOW = 20
 MIN_MARKER_GAP = 15  # Minimum gap between high and low markers
 
+
+def valid_marker_pair(low: int, high: int) -> bool:
+    """Return True when a ``(low, high)`` marker pair is self-consistent.
+
+    Both markers must be integers in 0-100 with the smart (high) marker at
+    least as large as the emergency (low) one. Used to reject garbage or
+    partially-corrupt override frames at parse time and before echo into
+    writes (#72).
+    """
+    return (
+        isinstance(low, int)
+        and isinstance(high, int)
+        and 0 <= low <= high <= 100
+    )
+
+
 # Currency sub-unit labels by timezone
 _TZ_CURRENCY_SUBUNIT = {
     "Europe/Stockholm": "öre",
