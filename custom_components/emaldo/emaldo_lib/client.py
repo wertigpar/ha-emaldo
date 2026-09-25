@@ -1147,7 +1147,11 @@ class EmaldoClient:
                     and entry is not None
                     and not self._may_rotate_device(home_id, now)
                 ):
-                    _LOGGER.warning(
+                    # Defensive tripwire only — the storm self-heals and the
+                    # hold re-fires on every re-entrant forced refresh, so it
+                    # is noise in HA's error-log panel. Keep it at DEBUG so a
+                    # genuine storm is still visible with debug logging on.
+                    _LOGGER.debug(
                         "Forced E2E refresh held for %s (%.0f s rotation "
                         "interval) — reusing cached credentials",
                         home_id,

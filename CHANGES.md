@@ -1,5 +1,16 @@
 # Changes
 
+## v1.0.0-beta42
+
+### Changed
+
+- **Storm-guard tripwire logs demoted to DEBUG.** The Phase 2.2 forced-E2E-refresh
+  hold (`client.py:1150`) is a defensive tripwire that re-fires on every
+  re-entrant forced refresh during a logout storm and self-heals — it is not a
+  fault. It surfaced in HA's error-log panel as a one-off "error from a custom
+  integration" even on healthy runs, so it now logs at `debug`. Genuine storms
+  are still visible with debug logging enabled.
+
 ## v1.0.0-beta41
 
 ### Fixed
