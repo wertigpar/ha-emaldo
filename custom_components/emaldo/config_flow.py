@@ -17,6 +17,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import callback
 
 from .emaldo_lib import EmaldoClient, EmaldoAuthError
+from .uid_base import UID_BASE_DEVICE, is_valid_device
 
 from .const import (
     DOMAIN,
@@ -31,6 +32,7 @@ from .const import (
     DEFAULT_APP_SECRET,
     DEFAULT_APP_VERSION,
     CONF_SCHEDULE_INTERVAL,
+    CONF_UID_BASE,
     CONF_REALTIME_STREAM_MODE,
     REALTIME_STREAM_MODE,
     DEFAULT_SCHEDULE_INTERVAL,
@@ -48,6 +50,8 @@ def _select_device(
 
     Already-configured device ids are skipped so a second entry for the same
     account picks the remaining cabinet instead of re-selecting the first.
+    Unprovisioned id-less modules are never a valid choice (#73) — they can
+    come first from the backend and must not get pinned into a fresh entry.
     """
     if not devices:
         return None
@@ -55,14 +59,22 @@ def _select_device(
     configured = configured_ids or set()
     wanted = (preferred_id or "").strip()
 
-    for device in devices:
-        if str(device.get("id", "")) == wanted:
+    # Only modules with a usable non-empty string id are candidates.
+    usable = [d for d in devices if is_valid_device(d)]
+
+    for device in usable:
+        if str(device.get("id", "")).strip() == wanted:
             return device
 
-    available = [d for d in devices if str(d.get("id", "")) not in configured]
+    available = [
+        d for d in usable if str(d.get("id", "")).strip() not in configured
+    ]
     if available:
         return available[0]
-    return devices[0]
+    # Every usable device is already configured (duplicate-entry attempt; the
+    # unique_id abort catches it) — or nothing usable exists at all. Never
+    # fall back to an id-less module; the runtime Op-A guard owns that case.
+    return usable[0] if usable else None
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -80,7 +92,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Emaldo."""
 
-    VERSION = 2
+    VERSION = 3
 
     @staticmethod
     @callback
@@ -149,6 +161,7 @@ class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_EMAIL: user_input[CONF_EMAIL],
                             CONF_PASSWORD: user_input[CONF_PASSWORD],
                             CONF_HOME_ID: home_id,
+                            CONF_UID_BASE: UID_BASE_DEVICE,
                             CONF_DEVICE_ID: selected["id"],
                             CONF_DEVICE_MODEL: selected["model"],
                             CONF_DEVICE_NAME: selected.get("name", selected["id"]),
@@ -209,6 +222,7 @@ class EmaldoConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_EMAIL: user_input[CONF_EMAIL],
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
                         CONF_HOME_ID: home_id,
+                        CONF_UID_BASE: entry.data.get(CONF_UID_BASE, UID_BASE_DEVICE),
                         CONF_DEVICE_ID: selected["id"],
                         CONF_DEVICE_MODEL: selected["model"],
                         CONF_DEVICE_NAME: selected.get("name", selected["id"]),

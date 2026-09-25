@@ -7,7 +7,7 @@ import time as _time
 from datetime import datetime
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryNotReady
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
@@ -18,6 +18,7 @@ from .const import (
     DOMAIN,
     CONF_HOME_ID,
     CONF_DEVICE_ID,
+    CONF_UID_BASE,
     CONF_APP_ID,
     CONF_APP_SECRET,
     CONF_APP_VERSION,
@@ -30,6 +31,14 @@ from .schedule_coordinator import EmaldoScheduleCoordinator
 from .shared_client import async_acquire_shared_client, async_release_shared_client
 from .services import async_register_services, async_unregister_services
 from .storm_state import HomeStormState
+from .uid_base import (
+    UID_BASE_HOME,
+    UID_BASE_DEVICE,
+    derive_uid_base,
+    first_valid_device,
+    has_legacy_uid,
+    legacy_mode,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +72,24 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         migrated.setdefault(CONF_APP_VERSION, DEFAULT_APP_VERSION)
         hass.config_entries.async_update_entry(entry, data=migrated, version=2)
 
+    if entry.version < 3:
+        # v3 stamps the one-time sticky UID-scheme marker (#73). Derive it from
+        # this entry's OWN entity registry first: legacy home_id-prefixed uids
+        # present -> keep "home" (existing entity set stays stable); else the
+        # entry was born after #68 -> "device". Runs before any platform set-up
+        # and before the options-update listener is registered, so writing the
+        # entry here cannot re-trigger a reload.
+        ent_reg = er.async_get(hass)
+        home_id = entry.data.get(CONF_HOME_ID, "")
+        existing_uids = {
+            e.unique_id
+            for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+        }
+        migrated = dict(entry.data)
+        if CONF_UID_BASE not in migrated:
+            migrated[CONF_UID_BASE] = derive_uid_base(existing_uids, home_id)
+        hass.config_entries.async_update_entry(entry, data=migrated, version=3)
+
     return True
 
 
@@ -78,6 +105,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         power_coordinator = EmaldoCoordinator(hass, entry, shared_client)
         await power_coordinator.async_config_entry_first_refresh()
+
+        # Op-A (#73): the primary slot must carry a usable non-empty device id.
+        # The backend can return unprovisioned id-less modules first, and a
+        # polluted entry can pin one ("" persisted) — which would leave the
+        # primary on a fallback (home_id) identity. Rebind to the first valid
+        # device and persist, or fail setup if none exists.
+        if not power_coordinator.device_id:
+            _LOGGER.warning(
+                "Emaldo device binding missing/invalid for entry %s — "
+                "rebinding primary to first provisioned device",
+                entry.entry_id,
+            )
+
+            def _list_devices() -> list[dict]:
+                client = power_coordinator._ensure_client()  # noqa: SLF001
+                return client.list_devices(entry.data[CONF_HOME_ID])
+
+            discovered_devices = await hass.async_add_executor_job(_list_devices)
+            rebound = first_valid_device(discovered_devices)
+            if rebound is None:
+                raise ConfigEntryNotReady(
+                    "No provisioned Emaldo device found for the primary slot"
+                )
+            power_coordinator._device_id = rebound["id"]  # noqa: SLF001
+            power_coordinator._model = rebound.get("model")  # noqa: SLF001
+            power_coordinator._device_name = rebound.get(  # noqa: SLF001
+                "name", rebound["id"]
+            )
+            await power_coordinator._async_persist_device_binding()  # noqa: SLF001
+            _LOGGER.info(
+                "Emaldo primary rebound to device id=%s model=%s (#73)",
+                rebound["id"],
+                rebound.get("model"),
+            )
 
         selected_device_id = entry.data.get(CONF_DEVICE_ID)
         devices_to_setup: list[dict[str, str | None]] = [
@@ -116,17 +177,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         coordinator_sets: list[dict[str, object]] = []
 
-        # Detect whether this config entry was originally set up with the legacy
-        # home_id-based unique ID scheme. Multiple config entries can share the
-        # same home_id (e.g. two batteries on one account), so legacy mode must
-        # be scoped to the entry's own entity registry — not assumed True.
+        # Sticky UID-scheme marker (#73): "home" = entry born under the legacy
+        # home_id-based uid scheme, "device" = entry created after #73. Stamped
+        # by the config flow / migration — never re-derived here. Entity
+        # registry inspection is retained only as a defensive tripwire (WARN):
+        # a marker drift is observed and logged, never silently corrected.
         ent_reg = er.async_get(hass)
         home_id = entry.data[CONF_HOME_ID]
         existing_uids = {
             e.unique_id
             for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
         }
-        has_legacy_uids = any(uid.startswith(f"{home_id}_") for uid in existing_uids)
+        legacy_uid_count = sum(
+            has_legacy_uid(uid, home_id) for uid in existing_uids
+        )
+        uid_base = entry.data.get(CONF_UID_BASE)
+        if uid_base is None:
+            # No marker: entry was created before v3 but never migrated (e.g.
+            # import/export). Single defensive WARN-only derivation.
+            uid_base = derive_uid_base(existing_uids, home_id)
+            _LOGGER.warning(
+                "Emaldo entry %s missing uid_base marker; derived=%s "
+                "(%d legacy uids) — not persisted here, reconfigure to fix (#73)",
+                entry.entry_id,
+                uid_base,
+                legacy_uid_count,
+            )
+        elif derive_uid_base(existing_uids, home_id) != uid_base:
+            _LOGGER.warning(
+                "Emaldo uid_base drift entry=%s marker=%s registry-derived=%s "
+                "legacy=%d — keeping marker (#73)",
+                entry.entry_id,
+                uid_base,
+                derive_uid_base(existing_uids, home_id),
+                legacy_uid_count,
+            )
 
         for i, device in enumerate(devices_to_setup):
             # Deterministic per-home primary: first device_id encountered wins.
@@ -139,7 +224,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             is_primary = _ptracker[home_id] == device["id"]
             if i == 0:
                 power = power_coordinator
-                setattr(power, "_legacy_uid_mode", has_legacy_uids and is_primary)
+                setattr(
+                    power,
+                    "_legacy_uid_mode",
+                    legacy_mode(uid_base, is_primary=is_primary),
+                )
             else:
                 power = EmaldoCoordinator(
                     hass,
@@ -268,7 +357,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # existing entity_ids, history and dashboards are preserved. The
     # duplicate entry holding the new UID (created by #68 with no history)
     # is removed first to avoid a UID collision.
-    if has_legacy_uids:
+    if uid_base == UID_BASE_HOME:
         _home_primaries = hass.data.setdefault(DOMAIN, {}).setdefault(
             "_home_primaries", {}
         )

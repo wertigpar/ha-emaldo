@@ -1,5 +1,31 @@
 # Changes
 
+## v1.0.0-beta41
+
+### Fixed
+
+- **Id-less backend modules could never again pollute the entry (Op-A, #73).**
+  When the backend returns an unprovisioned module without an `id` (observed
+  returning first during the beta40 incident), the primary coordinator slot
+  could bind to it and fall back to the home_id-based identity — recreating
+  the legacy 83-entity screen on a fresh setup. Now `_select_device` never
+  picks an id-less module, and setup re-validates the primary slot after the
+  first refresh: no usable device id → rebind to the first provisioned device
+  and persist the binding, or fail setup with `ConfigEntryNotReady` when none
+  exists.
+
+### Changed
+
+- **UID-scheme marker is now sticky and explicit (Op-C, #73).** Entries carry
+  a `uid_base` marker in entry data (`"home"` = legacy home_id-based unique
+  IDs, `"device"` = post-#68 device-scoped IDs). Config entries migrate
+  version 2 → 3, deriving the marker once from the entry's own entity
+  registry; the config flow stamps fresh entries `"device"` and reconfigure
+  preserves the marker. Setup no longer re-derives the scheme on every boot:
+  a drift between marker and registry is logged as a warning trip-wire only,
+  so a polluted entry stays on the `"home"` scheme permanently instead of
+  flipping back to the legacy screen after a restart.
+
 ## v1.0.0-beta40
 
 ### Fixed
