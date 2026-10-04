@@ -243,7 +243,11 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _retry_callback(self, _now: datetime) -> None:
         """Fire a coordinator refresh after backoff delay."""
         _LOGGER.debug("Backoff retry %d firing", self._retry_count)
-        self.hass.async_create_task(self.async_request_refresh())
+        self._entry.async_create_background_task(
+            self.hass,
+            self.async_request_refresh(),
+            name=f"{DOMAIN}_schedule_backoff_refresh",
+        )
 
     @callback
     def _cancel_retry(self) -> None:
@@ -327,7 +331,11 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "E2E retries exhausted, overrides unavailable"
                     )
 
-        self.hass.async_create_task(_retry_e2e())
+        self._entry.async_create_background_task(
+            self.hass,
+            _retry_e2e(),
+            name=f"{DOMAIN}_schedule_e2e_retry",
+        )
 
     @callback
     def _cancel_e2e_retry(self) -> None:
@@ -350,7 +358,11 @@ class EmaldoScheduleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         def _on_interval(now: datetime) -> None:
             """Refresh schedule/override data from the API on the interval."""
             _LOGGER.debug("Schedule interval trigger fired at %s", now)
-            self.hass.async_create_task(self.async_request_refresh())
+            self._entry.async_create_background_task(
+                self.hass,
+                self.async_request_refresh(),
+                name=f"{DOMAIN}_schedule_interval_refresh",
+            )
 
         @callback
         def _on_slot_tick(now: datetime) -> None:

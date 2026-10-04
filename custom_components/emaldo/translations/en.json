@@ -46,6 +46,7 @@
     },
     "abort": {
       "already_configured": "This account is already configured.",
+      "all_devices_configured": "All battery devices in this home are already configured. Add another cabinet from a different Emaldo account.",
       "reconfigure_successful": "Credentials updated and integration reloaded."
     }
   },
@@ -53,8 +54,10 @@
     "step": {
       "init": {
         "title": "Schedule Polling",
-        "description": "Configure when the integration checks for schedule updates.",
-        "data": {          "schedule_interval": "Repeat interval (seconds)"
+        "description": "How often the integration refreshes schedule and override data (60-600s). Active mode and plan source also recompute every minute at no API cost.",
+        "data": {
+          "schedule_interval": "Repeat interval (seconds)",
+          "realtime_stream_mode": "Realtime stream mode (recommended; turn off for poll/compatibility mode if realtime data stalls on your network)"
         }
       }
     }
@@ -100,8 +103,6 @@
       "battery_module_voltage": { "name": "Battery Module {module} Voltage" },
       "battery_module_serial": { "name": "Battery Module {module} Serial" },
       "battery_module_position": { "name": "Battery Module {module} Position" },
-      "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
-      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
       "fan_pack_01": { "name": "Fan pack 01" },
       "fan_pack_02": { "name": "Fan pack 02" },
       "fan_pack_03": { "name": "Fan pack 03" },

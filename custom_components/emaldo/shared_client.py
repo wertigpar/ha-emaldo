@@ -21,7 +21,6 @@ from .const import (
     DEFAULT_APP_VERSION,
 )
 from .emaldo_lib import EmaldoClient
-from .emaldo_lib.const import set_params
 
 _SHARED_CLIENTS_DATA_KEY = f"{DOMAIN}_shared_clients"
 
@@ -44,11 +43,13 @@ class SharedEmaldoClient:
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def ensure_client(self) -> EmaldoClient:
-        """Return an authenticated client, logging in on demand."""
+        """Return an authenticated client, logging in on demand.
+
+        Side-effect free with respect to global state: the emaldo_lib app-id
+        module globals used by the E2E packet builders are written once per
+        process by the owning entry's ``async_setup_entry``, never per call.
+        """
         with self._lock:
-            # E2E packet builders still consume global app-id from emaldo_lib.const.
-            # Keep it synchronized with this shared account tuple for now.
-            set_params(self.app_id, self.app_secret, self.app_version)
             if self.client is None or not self.client.is_authenticated:
                 self.client = EmaldoClient(
                     app_id=self.app_id,
@@ -66,8 +67,17 @@ class SharedEmaldoClient:
                 self.client.invalidate_auth()   # new, see 1.2
 
     def reset(self) -> None:   # unchanged hard reset, now used only for auth errors
-        """Drop the shared client so the next operation re-authenticates."""
+        """Drop the shared client so the next operation re-authenticates.
+
+        The outgoing client's HTTP session is closed before the reference is
+        dropped — otherwise every hard reset (reached from ~12 transient-error
+        paths in the coordinators) leaked one ``requests.Session`` plus its
+        urllib3 connection pool until the next unload. ``ensure_client()``
+        rebuilds transparently on the next call.
+        """
         with self._lock:
+            if self.client is not None:
+                self.client.close()
             self.client = None
 
 
@@ -113,6 +123,13 @@ def async_release_shared_client(hass: HomeAssistant, entry: ConfigEntry) -> None
 
     shared_client.ref_count = max(0, shared_client.ref_count - 1)
     if shared_client.ref_count == 0:
+        # Last entry on this account is going away: close the HTTP session
+        # before the store entry (and the last reference to the client) is
+        # dropped, so a full unload leaks no urllib3 pool either.
+        with shared_client._lock:
+            if shared_client.client is not None:
+                shared_client.client.close()
+            shared_client.client = None
         store.pop(key, None)
     if not store:
         hass.data.pop(_SHARED_CLIENTS_DATA_KEY, None)

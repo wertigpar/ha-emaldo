@@ -8,6 +8,7 @@
           "email": "E-post",
           "password": "Passord",
           "home_id": "Hjem-ID (la stå tom for automatisk gjenkjenning)",
+          "device_id": "Enhets-ID (valgfritt, lås til en bestemt batterienhet)",
           "app_id": "App-ID",
           "app_secret": "App-hemmelighet",
           "app_version": "App-versjon"
@@ -25,6 +26,7 @@
           "email": "E-post",
           "password": "Passord",
           "home_id": "Hjem-ID (la stå tom for ny gjenkjenning)",
+          "device_id": "Enhets-ID (valgfritt, lås til en bestemt batterienhet)",
           "app_id": "App-ID",
           "app_secret": "App-hemmelighet",
           "app_version": "App-versjon"
@@ -39,10 +41,12 @@
     "error": {
       "invalid_auth": "Ugyldig e-post eller passord.",
       "cannot_connect": "Kunne ikke koble til Emaldo API.",
-      "no_devices": "Ingen batterienheter funnet i det angitte hjemmet."
+      "no_devices": "Ingen batterienheter funnet i det angitte hjemmet.",
+      "invalid_device": "Det angitte enhets-ID-en ble ikke funnet i det valgte hjemmet."
     },
     "abort": {
       "already_configured": "Denne kontoen er allerede konfigurert.",
+      "all_devices_configured": "Alle batterienheter i dette hjemmet er allerede konfigurert. Legg til et annet skap fra en annen Emaldo-konto.",
       "reconfigure_successful": "Påloggingsinformasjon oppdatert og integrasjonen lastet på nytt."
     }
   },
@@ -50,8 +54,10 @@
     "step": {
       "init": {
         "title": "Tidsplanpolling",
-        "description": "Konfigurer når integrasjonen sjekker for tidsplanoppdateringer.",
-        "data": {          "schedule_interval": "Gjentaksintervall (sekunder)"
+        "description": "Hvor ofte integrasjonen oppdaterer tidsplan- og overstyringsdata (60-600 s). Aktiv modus og plankilde beregnes på nytt i tillegg hvert minutt utpen API-kostnader.",
+        "data": {
+          "schedule_interval": "Gjentaksintervall (sekunder)",
+          "realtime_stream_mode": "Sanntidsstreammodus (anbefalt; slå av for polling/kompatibilitetsmodus hvis sanntidsdata stopper på nettverket ditt)"
         }
       }
     }
@@ -74,8 +80,8 @@
       "dual_power": { "name": "Forbruk" },
       "solar_power": { "name": "Soleffekt" },
       "car_charge_power": { "name": "Ladeeffekt bil" },
-      "addition_load_power": { "name": "Additional load power" },
-      "other_load_power": { "name": "Other load power" },
+      "addition_load_power": { "name": "Ekstra belastningseffekt" },
+      "other_load_power": { "name": "Annen belastningseffekt" },
       "plan_source": { "name": "Plankilde" },
       "active_mode": { "name": "Aktiv modus" },
       "schedule_chart": { "name": "Tidsplandiagram" },
@@ -97,8 +103,6 @@
       "battery_module_voltage": { "name": "Batterimodul {module} Spenning" },
       "battery_module_serial": { "name": "Batterimodul {module} Serienummer" },
       "battery_module_position": { "name": "Batterimodul {module} Posisjon" },
-      "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
-      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
       "fan_pack_01": { "name": "Viftepakke 01" },
       "fan_pack_02": { "name": "Viftepakke 02" },
       "fan_pack_03": { "name": "Viftepakke 03" },

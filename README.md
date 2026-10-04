@@ -761,7 +761,6 @@ cards:
 ```
 emaldo/
 ├── __init__.py              # Entry setup, platform forwarding, options listener
-├── calendar.py              # Battery schedule calendar entity
 ├── config_flow.py           # Config + options + reconfigure flow
 ├── const.py                 # Integration constants and defaults
 ├── coordinator.py           # Power/battery data coordinator (60s polling)

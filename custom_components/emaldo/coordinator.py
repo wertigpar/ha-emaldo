@@ -3047,8 +3047,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if isinstance(self.data, dict):
                     self.data["battery_modules"] = self._battery_modules
                     self.data["battery_module_slots"] = self._battery_module_slots
-                # Persist for next startup (fire-and-forget).
-                self._save_battery_cache()
+                # Persist for next startup.
+                await self._save_battery_cache()
             else:
                 _LOGGER.debug(
                     "Battery module info poll returned no modules; retaining cached_modules=%d",
@@ -3184,23 +3184,22 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             _LOGGER.debug("Accessory state read failed: %s", err, exc_info=True)
             self._accessories_poll_counter = 9
 
-    def _save_battery_cache(self) -> None:
-        """Persist battery module data for next startup (fire-and-forget).
+    async def _save_battery_cache(self) -> None:
+        """Persist battery module data for next startup.
 
         Payload is versioned so a schema change can be detected on load.
-        Called from the background scan task; a failed save must never
-        break the scan.
+        Called from (and awaited by) the background scan, so the write is
+        complete before the scan finishes rather than racing its own
+        lifecycle; ``Store.async_save`` offloads the disk work to an executor,
+        so awaiting it here is cheap.  A failed save must never break the scan.
         """
         try:
-            self.hass.async_create_task(
-                self._battery_store.async_save(
-                    {
-                        "version": 1,
-                        "modules": self._battery_modules,
-                        "slots": self._battery_module_slots,
-                    }
-                ),
-                name=f"{DOMAIN}_battery_cache_save",
+            await self._battery_store.async_save(
+                {
+                    "version": 1,
+                    "modules": self._battery_modules,
+                    "slots": self._battery_module_slots,
+                }
             )
         except Exception as err:  # noqa: BLE001 - storage must never break scan
             _LOGGER.debug("Battery cache save failed: %s", err, exc_info=True)

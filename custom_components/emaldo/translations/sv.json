@@ -8,6 +8,7 @@
           "email": "E-post",
           "password": "Lösenord",
           "home_id": "Hem-ID (lämna tomt för automatisk identifiering)",
+          "device_id": "Enhets-ID (valfritt, lås till ett visst batteri)",
           "app_id": "App-ID",
           "app_secret": "App-hemlighet",
           "app_version": "App-version"
@@ -25,6 +26,7 @@
           "email": "E-post",
           "password": "Lösenord",
           "home_id": "Hem-ID (lämna tomt för omidentifiering)",
+          "device_id": "Enhets-ID (valfritt, lås till ett visst batteri)",
           "app_id": "App-ID",
           "app_secret": "App-hemlighet",
           "app_version": "App-version"
@@ -39,10 +41,12 @@
     "error": {
       "invalid_auth": "Ogiltigt e-postmeddelande eller lösenord.",
       "cannot_connect": "Det gick inte att ansluta till Emaldo API.",
-      "no_devices": "Inga batterienheter hittades i det angivna hemmet."
+      "no_devices": "Inga batterienheter hittades i det angivna hemmet.",
+      "invalid_device": "Det angivna enhets-ID:t hittades inte i det valda hemmet."
     },
     "abort": {
       "already_configured": "Det här kontot är redan konfigurerat.",
+      "all_devices_configured": "Alla batterienheter i det här hemmet är redan konfigurerade. Lägg till ett annat skåp från ett annat Emaldo-konto.",
       "reconfigure_successful": "Inloggningsuppgifter uppdaterade och integrationen omladdad."
     }
   },
@@ -50,8 +54,10 @@
     "step": {
       "init": {
         "title": "Schemaomfrågning",
-        "description": "Konfigurera när integrationen kontrollerar schemauppdateringar.",
-        "data": {          "schedule_interval": "Upprepningsintervall (sekunder)"
+        "description": "Hur ofta integrationen uppdaterar schema- och överstyrningsdata (60-600 s). Aktivt läge och plankälla beräknas dessutom om varje minut utan API-kostnader.",
+        "data": {
+          "schedule_interval": "Upprepningsintervall (sekunder)",
+          "realtime_stream_mode": "Realtidsstream-läge (rekommenderat; stäng av och använd polling-/kompatibilitetsläge om realtidsdata står still i ditt nätverk)"
         }
       }
     }
@@ -74,8 +80,8 @@
       "dual_power": { "name": "Förbrukning" },
       "solar_power": { "name": "Soleffekt" },
       "car_charge_power": { "name": "Laddningseffekt bil" },
-      "addition_load_power": { "name": "Additional load power" },
-      "other_load_power": { "name": "Other load power" },
+      "addition_load_power": { "name": "Extra belastningseffekt" },
+      "other_load_power": { "name": "Övrig belastningseffekt" },
       "plan_source": { "name": "Plankälla" },
       "active_mode": { "name": "Aktivt läge" },
       "schedule_chart": { "name": "Schemadiagram" },
@@ -97,8 +103,6 @@
       "battery_module_voltage": { "name": "Batterimodul {module} Spänning" },
       "battery_module_serial": { "name": "Batterimodul {module} Serienummer" },
       "battery_module_position": { "name": "Batterimodul {module} Position" },
-      "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
-      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
       "fan_pack_01": { "name": "Fläktpaket 01" },
       "fan_pack_02": { "name": "Fläktpaket 02" },
       "fan_pack_03": { "name": "Fläktpaket 03" },

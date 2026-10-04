@@ -1,5 +1,61 @@
 # Changes
 
+## v1.0.0-beta43
+
+### Fixed
+
+- **The REST client session is now closed instead of leaked.** Every client
+  rebuild — triggered by a transient E2E, connection or auth error — dropped the
+  old `requests.Session` on the floor without closing it, so each rebuild left
+  a socket pool behind until the OS reaped it. Over a multi-day 21204 storm
+  that is hundreds of orphaned sessions. The session is now closed on reset and
+  when the shared client is released.
+
+- **Translation completeness.** The `realtime_stream_mode` option field and the
+  `all_devices_configured` abort reason were missing from *every* locale,
+  including English, so those labels fell back to the raw option key. The
+  `device_id` selector label and the `invalid_device` error were missing from
+  da/nb/fi/sv. All of them are now present in all five locales, and two stale
+  `facility_id_consumption` / `facility_id_production` sensor names (leftovers
+  from a removed entity, absent from `strings.json`) are gone. All five files
+  now carry the same 101 leaf keys as `strings.json`. Two more gaps closed in
+  the same pass: the options-flow step description was a stale, shortened
+  variant in all five locales — it had lost the 60-600 s poll interval range and
+  the note that active mode and plan source recompute every minute at no API
+  cost — and all five now carry a translation of the authoritative
+  `strings.json` text; the `Additional load power` and `Other load power` sensor
+  names were untranslated English in every locale and are now translated in
+  da/nb/fi/sv (en.json correctly keeps the English source text).
+
+### Changed
+
+- **The E2E app-id globals are written once at setup, not on every poll cycle.**
+  `SharedEmaldoClient.ensure_client()` rewrote `emaldo_lib.const`'s module-level
+  app id, secret and version on every coordinator cycle, while the E2E packet
+  builders read those globals without a lock — a cross-thread data race on any
+  install running more than one config entry. The write now happens once during
+  config-entry setup and `ensure_client()` is side-effect free.
+  Known limitation: one app identity per Home Assistant process. Multiple
+  homes and multiple accounts are supported; multiple *different* app
+  identities in a single install are not. That is planned for 1.1.0.
+
+- **The never-registered calendar platform was removed.** `calendar.py` has
+  been in the tree since the initial commit with full translations, but
+  `Platform.CALENDAR` was never added to `PLATFORMS`, so no calendar entity has
+  ever existed. Its timezone source (`schedule["timezone"]`) was never populated
+  by the schedule coordinator either, so wiring it up as-is would have produced
+  events offset by the local UTC offset rather than the site's actual timezone.
+  The file is removed rather than shipped as dead code. The
+  `entity.calendar.battery_schedule` translation keys are kept, so a future
+  release can re-add the platform without re-translating it.
+
+- **Fire-and-forget tasks are now created as tracked background tasks.**
+  Fire-and-forget work handed straight to the event loop kept only a bare
+  reference, leaving it eligible for garbage collection while still running.
+  They are now created through the tracked-background-task helper, so Home
+  Assistant holds a reference for the duration and can still surface an
+  unhandled exception at shutdown.
+
 ## v1.0.0-beta42
 
 ### Changed

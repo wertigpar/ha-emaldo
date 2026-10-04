@@ -129,6 +129,7 @@ class EmaldoClient:
         )
         self._app_version = app_version if app_version is not None else get_default_app_version()
         self._http = requests.Session()
+        self._http_closed = False
         self._storm_state_provider = storm_state_provider
         self._device_rotation_last_attempt: dict[str, float] = {}
         # Retry only on transient HTTP errors (502/503/504), not on
@@ -231,6 +232,42 @@ class EmaldoClient:
     def is_authenticated(self) -> bool:
         """Whether we have a valid token."""
         return bool(self._session.get("token"))
+
+    def get_app_tuple(self) -> tuple[str, str | bytes, str]:
+        """Return this client's app identity ``(app_id, app_secret, app_version)``.
+
+        The instance always stores ``_app_secret`` as bytes (``__init__``
+        encodes a str for the crypto paths), but the str form is what the
+        module-global ``set_params`` / ``get_app_secret`` pair expects, so a
+        utf-8 secret is decoded back here. A secret supplied as raw bytes and
+        not decodable as utf-8 is returned unchanged as bytes.
+        """
+        secret: str | bytes = self._app_secret
+        if isinstance(secret, bytes):
+            try:
+                secret = secret.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        return (self._app_id, secret, self._app_version)
+
+    def close(self) -> None:
+        """Close the HTTP session and release its urllib3 connection pool.
+
+        Idempotent — the first call closes the pool, every later call is a
+        no-op. The client may still be *used* afterwards: a closed
+        ``requests.Session`` transparently reopens its adapters, so the only
+        reason to call this is to stop leaking the pool while the client is
+        being discarded (see ``SharedEmaldoClient.reset`` / release). This is
+        not a logout — call :meth:`invalidate_auth` to drop the token while
+        keeping the E2E credential caches.
+        """
+        if getattr(self, "_http_closed", False):
+            return
+        self._http_closed = True
+        try:
+            self._http.close()
+        except Exception:  # noqa: BLE001 - close must never raise at teardown
+            pass
 
     # ------------------------------------------------------------------
     # Low-level API

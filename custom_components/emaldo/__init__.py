@@ -27,6 +27,7 @@ from .const import (
     DEFAULT_APP_VERSION,
 )
 from .coordinator import EmaldoCoordinator, EmaldoRealtimeCoordinator
+from .emaldo_lib.const import set_params
 from .schedule_coordinator import EmaldoScheduleCoordinator
 from .shared_client import async_acquire_shared_client, async_release_shared_client
 from .services import async_register_services, async_unregister_services
@@ -102,6 +103,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_DEVICE_ID),
     )
     shared_client = async_acquire_shared_client(hass, entry)
+
+    # ONE-TIME app-identity write, done here by the entry that owns the
+    # credentials and before any coordinator / E2E work begins.
+    # emaldo_lib's E2E packet builders (build_alive_packet /
+    # build_heartbeat_packet / build_wake_packet / build_subscription_packet)
+    # still read the app id from emaldo_lib.const module globals, and read them
+    # WITHOUT the lock from executor threads. That global write must therefore
+    # happen exactly once, never per coordinator cycle — otherwise it is a data
+    # race across HA's executor pool.
+    # RULE: one app-id tuple per HA process. Entries sharing a process must use
+    # the same app identity; last setup wins. Multi-app-tuple installs are
+    # unsupported until 1.1.0, which removes the globals by threading app_id /
+    # app_secret / app_version through every packet builder and the login path.
+    # The tuple is the shared client's own (built by _shared_client_key from
+    # CONF_APP_ID / CONF_APP_SECRET / CONF_APP_VERSION plus the component
+    # defaults) — the same one EmaldoClient is constructed with.
+    with shared_client._lock:  # noqa: SLF001 - serialize against ensure_client()
+        set_params(
+            shared_client.app_id,
+            shared_client.app_secret,
+            shared_client.app_version,
+        )
+
     try:
         power_coordinator = EmaldoCoordinator(hass, entry, shared_client)
         await power_coordinator.async_config_entry_first_refresh()

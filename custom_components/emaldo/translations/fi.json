@@ -8,6 +8,7 @@
           "email": "Sähköposti",
           "password": "Salasana",
           "home_id": "Kodin tunnus (jätä tyhjäksi automaattitunnistusta varten)",
+          "device_id": "Laitteen tunnus (valinnainen, sitoa tiettyyn akkuun)",
           "app_id": "Sovellustunnus",
           "app_secret": "Sovellussalaisuus",
           "app_version": "Sovellusversio"
@@ -25,6 +26,7 @@
           "email": "Sähköposti",
           "password": "Salasana",
           "home_id": "Kodin tunnus (jätä tyhjäksi uudelleentunnistusta varten)",
+          "device_id": "Laitteen tunnus (valinnainen, sitoa tiettyyn akkuun)",
           "app_id": "Sovellustunnus",
           "app_secret": "Sovellussalaisuus",
           "app_version": "Sovellusversio"
@@ -39,10 +41,12 @@
     "error": {
       "invalid_auth": "Virheellinen sähköpostiosoite tai salasana.",
       "cannot_connect": "Emaldo-ohjelmointirajapintaan ei saada yhteyttä.",
-      "no_devices": "Määritetystä kodista ei löydy akkulaitteitä."
+      "no_devices": "Määritetystä kodista ei löydy akkulaitteita.",
+      "invalid_device": "Määritettyä laitteen tunnusta ei löydy valitusta kodista."
     },
     "abort": {
       "already_configured": "Tili on jo määritetty.",
+      "all_devices_configured": "Kaikki tämän kodin akkulaitteet on jo määritetty. Lisää toinen kaappi eri Emaldo-tililtä.",
       "reconfigure_successful": "Tunnistetiedot päivitetty ja integraatio ladattu uudelleen."
     }
   },
@@ -50,8 +54,10 @@
     "step": {
       "init": {
         "title": "Aikataulukyselyt",
-        "description": "Määritä, milloin integraatio tarkistaa aikataulupäivitykset.",
-        "data": {          "schedule_interval": "Toistovälintervalli (sekuntia)"
+        "description": "Miten usein integraatio päivittää aikataulu- ja ohjaustiedot (60-600 s). Aktiivinen tila ja suunnitelman lähde lasketaan lisäksi uudelleen joka minuutti ilman API-kustannuksia.",
+        "data": {
+          "schedule_interval": "Toistovälintervalli (sekuntia)",
+          "realtime_stream_mode": "Reaaliaikainen stream-tila (suositellaan; kytke pois päältä ja käytä kysely-/yhteensopivuustilaa, jos reaaliaikaiset tiedot katkeavat verkossasi)"
         }
       }
     }
@@ -74,8 +80,8 @@
       "dual_power": { "name": "Kulutus" },
       "solar_power": { "name": "Aurinkoteho" },
       "car_charge_power": { "name": "Auton latasteho" },
-      "addition_load_power": { "name": "Additional load power" },
-      "other_load_power": { "name": "Other load power" },
+      "addition_load_power": { "name": "Lisakuorman teho" },
+      "other_load_power": { "name": "Muu kuorman teho" },
       "plan_source": { "name": "Suunnitelman lähde" },
       "active_mode": { "name": "Aktiivinen tila" },
       "schedule_chart": { "name": "Aikataulukaavio" },
@@ -97,8 +103,6 @@
       "battery_module_voltage": { "name": "Akkumoduuli {module} Jännite" },
       "battery_module_serial": { "name": "Akkumoduuli {module} Sarjanumero" },
       "battery_module_position": { "name": "Akkumoduuli {module} Sijainti" },
-      "facility_id_consumption": { "name": "Facility ID - Consumption (GSRN)" },
-      "facility_id_production": { "name": "Facility ID - Production (GSRN)" },
       "fan_pack_01": { "name": "Puhallinpaketti 01" },
       "fan_pack_02": { "name": "Puhallinpaketti 02" },
       "fan_pack_03": { "name": "Puhallinpaketti 03" },
