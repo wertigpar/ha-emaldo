@@ -113,9 +113,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # happen exactly once, never per coordinator cycle — otherwise it is a data
     # race across HA's executor pool.
     # RULE: one app-id tuple per HA process. Entries sharing a process must use
-    # the same app identity; last setup wins. Multi-app-tuple installs are
-    # unsupported until 1.1.0, which removes the globals by threading app_id /
-    # app_secret / app_version through every packet builder and the login path.
+    # the same app identity; last setup wins. Multi-app-tuple installs are out
+    # of scope by design, not a pending defect: the constraint would only lift
+    # by threading app_id / app_secret / app_version through every packet
+    # builder and the login path, and that rework is not planned.
     # The tuple is the shared client's own (built by _shared_client_key from
     # CONF_APP_ID / CONF_APP_SECRET / CONF_APP_VERSION plus the component
     # defaults) — the same one EmaldoClient is constructed with.

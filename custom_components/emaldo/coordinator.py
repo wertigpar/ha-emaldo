@@ -656,7 +656,9 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Used after a stream-path command failure to force the next
         ``_ensure_session()`` call to create a fresh session (with a new
-        handshake and potentially fresh credentials).
+        handshake and potentially fresh credentials).  The coroutine is closed
+        here only when scheduling itself failed, so it never fires a
+        "was never awaited" warning on that path.
         """
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
@@ -666,10 +668,21 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if item.get("power") is self:
                     realtime = item.get("realtime")
                     if realtime is not None:
-                        future = asyncio.run_coroutine_threadsafe(
-                            realtime._close_session(), self.hass.loop
-                        )
-                        future.result(timeout=5)
+                        coro = realtime._close_session()
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(
+                                coro, self.hass.loop
+                            )
+                        except Exception:
+                            coro.close()
+                            raise
+                        try:
+                            future.result(timeout=5)
+                        except Exception:
+                            _LOGGER.debug(
+                                "Failed to close paired stream session",
+                                exc_info=True,
+                            )
                     return
         except Exception:
             _LOGGER.debug("Failed to close paired stream session", exc_info=True)

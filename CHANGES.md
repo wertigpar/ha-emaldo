@@ -36,6 +36,16 @@
   unchanged. `CancelledError` is deliberately not swallowed by the existing
   guard, so a cancelled shutdown is never suppressed.
 
+- **The paired stream-session close is no longer dropped unawaited.** The
+  `EmaldoCoordinator._close_realtime_session` built the close coroutine inline
+  as an argument to `asyncio.run_coroutine_threadsafe`, so when scheduling
+  itself failed — a closed or non-running loop, exactly what this teardown
+  path can hit — the coroutine was dropped unawaited, producing a
+  `RuntimeWarning` that the surrounding `except` then hid. It is now bound
+  first and closed only when scheduling failed; once scheduled the loop owns
+  it, so a `future.result()` timeout no longer risks closing a running
+  coroutine.
+
 ### Changed
 
 - **The E2E app-id globals are written once at setup, not on every poll cycle.**
@@ -44,9 +54,10 @@
   builders read those globals without a lock — a cross-thread data race on any
   install running more than one config entry. The write now happens once during
   config-entry setup and `ensure_client()` is side-effect free.
-  Known limitation: one app identity per Home Assistant process. Multiple
-  homes and multiple accounts are supported; multiple *different* app
-  identities in a single install are not. That is planned for 1.1.0.
+  By design: exactly one app identity per Home Assistant process. Multiple
+  homes and multiple accounts on that one identity are supported; running two
+  different app identities side by side in a single install is out of scope
+  and is not planned.
 
 - **The never-registered calendar platform was removed.** `calendar.py` has
   been in the tree since the initial commit with full translations, but
