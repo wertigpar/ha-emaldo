@@ -979,7 +979,6 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 or "unknown"
             )
             _p = self.hass.config.path(f".storage/emaldo_session_{_dev}.json")
-            import json as _json
             import time as _tm
 
             _dup = dict(self._prev_session_summary)
@@ -990,8 +989,27 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             _dup["stale_at_shutdown_s"] = (
                 round(_tm.time() - _ls, 1) if _ls else None
             )
-            with open(_p, "w", encoding="utf-8") as _fh:
-                _json.dump(_dup, _fh, indent=2)
+
+            def _write_session(path: str, payload: dict) -> None:
+                import json as _json
+
+                with open(path, "w", encoding="utf-8") as _fh:
+                    _json.dump(payload, _fh, indent=2)
+
+            # The write is blocking, so it runs in the executor, not on the
+            # loop — same pattern as __init__.py's _write_session. Exceptions
+            # raised here are still covered by the guard below, which now
+            # covers a failure raised *inside the executor thread* instead of
+            # one raised inline.
+            #
+            # Deliberately NOT widened: asyncio.CancelledError (a BaseException,
+            # so this guard never covered it) keeps propagating — swallowing it
+            # would suppress the caller's cancellation and let a cancelled
+            # shutdown keep running past its await. A closed-loop RuntimeError
+            # is not special-cased either: the session close further below is
+            # an executor job too and would raise the same error unguarded, so
+            # guarding only this call would be false assurance.
+            await self.hass.async_add_executor_job(_write_session, _p, _dup)
             _LOGGER.info(
                 "EMALDO_DEBUG[prev_session_persist] written %s (stale=%s)",
                 _p,

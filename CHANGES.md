@@ -27,6 +27,15 @@
   names were untranslated English in every locale and are now translated in
   da/nb/fi/sv (en.json correctly keeps the English source text).
 
+- **The session telemetry write no longer blocks the event loop.** Home
+  Assistant's blocking-call detector flagged `async_shutdown`: the
+  end-of-session telemetry file (`.storage/emaldo_session_<device>.json`) was
+  written inline on the event loop on every shutdown. The write now runs
+  through `hass.async_add_executor_job` — the same pattern the session
+  cache already uses in `__init__.py`. Payload, path and log line are
+  unchanged. `CancelledError` is deliberately not swallowed by the existing
+  guard, so a cancelled shutdown is never suppressed.
+
 ### Changed
 
 - **The E2E app-id globals are written once at setup, not on every poll cycle.**
