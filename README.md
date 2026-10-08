@@ -314,8 +314,9 @@ Override a time range with a specific charge/discharge action.
 | `start_time` | time | yes | Start time (HH:MM) |
 | `end_time` | time | yes | End time (HH:MM) |
 | `action` | select | yes | One of: `charge-low`, `charge-high`, `charge-100`, `idle`, `discharge-low`, `discharge-high`, `clear` |
-| `high_marker` | int | no | High battery threshold % (default: 72) |
-| `low_marker` | int | no | Low battery threshold % (default: 20) |
+| `high_marker` | int | no | High battery threshold %. Omit to reuse the device's current marker — the integration never invents a value. |
+| `low_marker` | int | no | Low battery threshold %. Omit to reuse the device's current marker. |
+| `battery_range_override` | boolean | no | true = constrain the AI to the marker band; false (default) leaves Battery Range in AI mode, where the markers are stored but not applied |
 
 ```yaml
 service: emaldo.set_slot_range
@@ -332,13 +333,102 @@ Push a full 96-slot override array. Used by the [Battery Optimizer](../battery_o
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `slots` | list[int] | yes | 96 integers (0–255) |
-| `high_marker` | int | no | High battery threshold % (default: 72) |
-| `low_marker` | int | no | Low battery threshold % (default: 20) |
+| `high_marker` | int | no | High battery threshold %. Omit to reuse the device's current marker — the integration never invents a value. |
+| `low_marker` | int | no | Low battery threshold %. Omit to reuse the device's current marker. |
+| `battery_range_override` | boolean | no | true = constrain the AI to the marker band; false (default) leaves Battery Range in AI mode, where the markers are stored but not applied |
 
 ```yaml
 service: emaldo.apply_bulk_schedule
 data:
   slots: [128, 128, 128, 128, 20, 20, 20, 20, 72, 72, 72, 72, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 184, 184, 184, 184, 184, 184, 184, 184, 128, 128, 128, 128, 0, 0, 0, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]
+```
+
+Optimizers should always send the markers and the flag together:
+
+```yaml
+service: emaldo.apply_bulk_schedule
+data:
+  slots: [128, 128, 128, 128, 20, 20, 20, 20, 72, 72, 72, 72, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 184, 184, 184, 184, 184, 184, 184, 184, 128, 128, 128, 128, 0, 0, 0, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]
+  high_marker: 55
+  low_marker: 15
+  battery_range_override: true
+```
+
+### Battery range and markers
+
+Two independent things travel in every override write, and confusing them is the
+most common reason a marker appears to do nothing:
+
+| What | Governed by | Effect |
+|---|---|---|
+| Per-slot actions | `action` / `slots` | Which 15-minute slots charge, discharge or idle |
+| Battery range band | `high_marker` + `low_marker` + `battery_range_override` | The SoC window the AI is allowed to work within |
+
+**The band only applies when override mode is on.** `battery_range_override` is
+byte 2 of the override payload. With it `false` — the default — the markers are
+stored but the battery stays in **AI mode** and keeps choosing its own range, so
+a read-back returns the AI's values instead of the ones you sent. The same flag
+is exposed as a switch:
+
+```yaml
+service: switch.turn_on
+target:
+  entity_id: switch.power_store_ai_battery_range_override
+```
+
+**Omitted markers are echoed back, not defaulted.** If you leave `high_marker` or
+`low_marker` out of a call, the integration re-writes the device's current
+markers instead of guessing. This is deliberate — it stops an unrelated override
+write from silently resetting your battery range. Pass them explicitly whenever
+the value matters.
+
+**Read back after refreshing.** The coordinator's override snapshot only updates
+on the schedule poll (default 10 minutes) or on an explicit
+`emaldo.refresh_schedule`. Reading immediately after a write shows the previous
+pair.
+
+#### Examples
+
+```yaml
+# Full control: slots + explicit markers + override mode on
+service: emaldo.set_slot_range
+data:
+  start_time: "01:00"
+  end_time: "05:00"
+  action: charge-low
+  high_marker: 55
+  low_marker: 15
+  battery_range_override: true
+```
+
+```yaml
+# Setting the reserve band itself - preferred over raw markers for reserves
+service: emaldo.set_battery_range
+data:
+  smart_pct: 55
+  emergency_pct: 15
+  enable: true
+```
+
+```yaml
+# Verify a write: force a refresh, then read number.power_store_ai_smart_reserve
+service: emaldo.refresh_schedule
+```
+
+For `emaldo.apply_bulk_schedule` — which optimizers use — pass the markers and the
+flag in the same call, exactly as the first example does.
+
+The most common cause of "my markers are ignored" is the flag being left out:
+
+```yaml
+service: emaldo.set_slot_range
+data:
+  start_time: "01:00"
+  end_time: "05:05"
+  action: charge-low
+  high_marker: 55
+  low_marker: 15
+  # battery_range_override omitted -> AI keeps choosing the range
 ```
 
 ### `emaldo.reset_to_internal`
@@ -350,8 +440,9 @@ Clear overrides, returning to the Emaldo AI schedule.
 | `start_time` | time | no | Start time (HH:MM). Omit for full reset. |
 | `end_time` | time | no | End time (HH:MM). Omit for full reset. |
 | `all` | boolean | no | If true, reset all 96 slots (default: false) |
-| `high_marker` | int | no | High battery threshold % (default: 72) |
-| `low_marker` | int | no | Low battery threshold % (default: 20) |
+| `high_marker` | int | no | High battery threshold %. Omit to reuse the device's current marker — the integration never invents a value. |
+| `low_marker` | int | no | Low battery threshold %. Omit to reuse the device's current marker. |
+| `battery_range_override` | boolean | no | true = constrain the AI to the marker band; false (default) leaves Battery Range in AI mode, where the markers are stored but not applied |
 
 ```yaml
 # Reset all overrides
@@ -488,13 +579,18 @@ The Emaldo battery uses single-byte override values per 15-minute slot:
 
 | Action | Byte Value |
 |---|---|
-| `charge-low` | `low_marker` (default: 20) |
-| `charge-high` | `high_marker` (default: 72) |
+| `charge-low` | `low_marker` |
+| `charge-high` | `high_marker` |
 | `charge-100` | `100` |
 | `idle` | `0` |
-| `discharge-low` | `256 − low_marker` (default: 236) |
-| `discharge-high` | `256 − high_marker` (default: 184) |
+| `discharge-low` | `256 − low_marker` |
+| `discharge-high` | `256 − high_marker` |
 | `clear` / `none` | `128` |
+
+The marker-derived values use whichever `high_marker` / `low_marker` the write
+carries. Omit them in a service call and the integration re-uses the device's
+current markers rather than defaulting to 72/20 — see
+[Battery range and markers](#battery-range-and-markers).
 
 ## Events
 
@@ -755,6 +851,21 @@ cards:
 - Check the schedule polling options: default interval is 10 minutes.
 - Force a refresh: call `emaldo.refresh_schedule` from Developer Tools → Services.
 - Check logs for `emaldo` entries.
+
+### Battery range or markers don't change
+
+Work through these in order:
+
+1. **Is override mode on?** `switch.power_store_ai_battery_range_override` must be
+   `on`, otherwise the markers are stored but the AI keeps choosing the range.
+2. **Were the markers actually passed?** Omitted `high_marker` / `low_marker` are
+   echoed from the device, not defaulted to 72/20.
+3. **Did you refresh before reading?** Call `emaldo.refresh_schedule` first;
+   otherwise the snapshot lags by up to one poll interval.
+4. **What does the Emaldo app itself show?** The app's AI mode re-applies its own
+   range on a daily schedule and will overwrite markers written from Home
+   Assistant. If the app displays the same pair, the app is winning — that is
+   expected, not a failed write.
 
 ## Architecture
 
