@@ -33,8 +33,7 @@ set_slot_range:
             - clear
     high_marker:
       name: High marker
-      description: High battery threshold percentage (default 72).
-      default: 72
+      description: High battery threshold percentage. Leave empty to keep the device's current marker.
       selector:
         number:
           min: 1
@@ -42,13 +41,21 @@ set_slot_range:
           unit_of_measurement: "%"
     low_marker:
       name: Low marker
-      description: Low battery threshold percentage (default 20).
-      default: 20
+      description: Low battery threshold percentage. Leave empty to keep the device's current marker.
       selector:
         number:
           min: 1
           max: 100
           unit_of_measurement: "%"
+    battery_range_override:
+      name: Battery range override
+      description: >
+        True constrains the AI to the marker band above. False (default)
+        leaves Battery Range in AI mode - the markers are stored but the AI
+        keeps choosing its own range, so a read-back will not show them.
+      default: false
+      selector:
+        boolean:
 
 apply_bulk_schedule:
   name: Apply bulk schedule
@@ -63,8 +70,7 @@ apply_bulk_schedule:
         object:
     high_marker:
       name: High marker
-      description: High battery threshold percentage (default 72).
-      default: 72
+      description: High battery threshold percentage. Leave empty to keep the device's current marker.
       selector:
         number:
           min: 1
@@ -72,13 +78,21 @@ apply_bulk_schedule:
           unit_of_measurement: "%"
     low_marker:
       name: Low marker
-      description: Low battery threshold percentage (default 20).
-      default: 20
+      description: Low battery threshold percentage. Leave empty to keep the device's current marker.
       selector:
         number:
           min: 1
           max: 100
           unit_of_measurement: "%"
+    battery_range_override:
+      name: Battery range override
+      description: >
+        True constrains the AI to the marker band above. False (default)
+        leaves Battery Range in AI mode - the markers are stored but the AI
+        keeps choosing its own range, so a read-back will not show them.
+      default: false
+      selector:
+        boolean:
 
 reset_to_internal:
   name: Reset to internal
@@ -104,8 +118,7 @@ reset_to_internal:
         boolean:
     high_marker:
       name: High marker
-      description: High battery threshold percentage (default 72).
-      default: 72
+      description: High battery threshold percentage. Leave empty to keep the device's current marker.
       selector:
         number:
           min: 1
@@ -113,13 +126,21 @@ reset_to_internal:
           unit_of_measurement: "%"
     low_marker:
       name: Low marker
-      description: Low battery threshold percentage (default 20).
-      default: 20
+      description: Low battery threshold percentage. Leave empty to keep the device's current marker.
       selector:
         number:
           min: 1
           max: 100
           unit_of_measurement: "%"
+    battery_range_override:
+      name: Battery range override
+      description: >
+        True constrains the AI to the marker band above. False (default)
+        leaves Battery Range in AI mode - the markers are stored but the AI
+        keeps choosing its own range, so a read-back will not show them.
+      default: false
+      selector:
+        boolean:
 
 refresh_schedule:
   name: Refresh schedule
