@@ -1,5 +1,14 @@
 # Changes
 
+## v1.0.0-beta44
+
+### Fixed
+
+- Fixed two missing entity translation strings (`facility_id_consumption` and
+  `facility_id_production`) that caused those diagnostic sensors to render with the
+  device name instead of their own names. The strings were absent from `strings.json`
+  and every locale file.
+
 ## v1.0.0-beta43
 
 ### Fixed
@@ -16,8 +25,8 @@
   including English, so those labels fell back to the raw option key. The
   `device_id` selector label and the `invalid_device` error were missing from
   da/nb/fi/sv. All of them are now present in all five locales, and two stale
-  `facility_id_consumption` / `facility_id_production` sensor names (leftovers
-  from a removed entity, absent from `strings.json`) are gone. All five files
+  `facility_id_consumption` / `facility_id_production` translation entries (leftover
+  strings with no `strings.json` source of truth) were removed from the locale files. All five files
   now carry the same 101 leaf keys as `strings.json`. Two more gaps closed in
   the same pass: the options-flow step description was a stale, shortened
   variant in all five locales — it had lost the 60-600 s poll interval range and

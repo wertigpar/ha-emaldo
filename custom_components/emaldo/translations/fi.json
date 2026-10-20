@@ -75,6 +75,8 @@
       "grid_import_today": { "name": "Verkkotuonti tänään" },
       "grid_export_today": { "name": "Verkkovienti tänään" },
       "load_energy_today": { "name": "Kulutusenergia tänään" },
+      "facility_id_consumption": { "name": "Facility ID consumption" },
+      "facility_id_production":   { "name": "Facility ID production" },
       "battery_power": { "name": "Akkuteho" },
       "grid_power": { "name": "Verkkoteho" },
       "dual_power": { "name": "Kulutus" },

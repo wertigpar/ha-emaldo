@@ -75,6 +75,8 @@
       "grid_import_today": { "name": "Nätimport idag" },
       "grid_export_today": { "name": "Nätexport idag" },
       "load_energy_today": { "name": "Förbrukningsenergi idag" },
+      "facility_id_consumption": { "name": "Facility ID consumption" },
+      "facility_id_production":   { "name": "Facility ID production" },
       "battery_power": { "name": "Batterieffekt" },
       "grid_power": { "name": "Näteffekt" },
       "dual_power": { "name": "Förbrukning" },
