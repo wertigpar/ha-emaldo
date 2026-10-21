@@ -27,6 +27,7 @@ A Home Assistant custom integration for [Emaldo](https://emaldo.com/) battery sy
 - **Resilient polling** — On API failures, sensors keep their last-known values while exponential-backoff retries recover automatically (60 s → 120 s → 4 min → … capped at 30 min)
 - **Next-day schedule event** — Fires `emaldo_next_day_schedule_ready` when tomorrow's schedule appears
 - **Reconfigure without removing** — Update credentials or app version via the Reconfigure menu
+- **Multi-unit awareness** — Detects a parallel ("multi-unit") installation, reports which unit is the master, and exposes frame validity flags that distinguish a measured 0 W from a channel the backend did not populate
 
 ## Prerequisites
 
@@ -148,7 +149,61 @@ One set of sensors per physical battery module, registered dynamically on the fi
 
 | Sensor | Description |
 |---|---|
-| **Realtime connection** | E2E realtime session health/state |
+| **Realtime connection** | E2E realtime session health/state, plus power-flow frame validity (see below) |
+| **Parallel status** | Whether the home is a multi-unit ("parallel") install, and whether this device is the master unit |
+
+#### Power-flow validity attributes
+
+The **Realtime connection** sensor carries attributes describing the last power-flow frame, so
+that a reading of exactly 0 W can be told apart from a channel the backend did not populate:
+
+| Attribute | Meaning |
+|---|---|
+| `power_flow_grid_valid` | The device reports a valid grid CT reading |
+| `power_flow_bsensor_valid` | The device reports a valid battery sensor |
+| `power_flow_solar_efficiency` | Reported PV efficiency (`0` unknown, `1` low, `2` normal, `3` high) |
+| `power_flow_thirdparty_pv_on` | Third-party PV routing is enabled on the device |
+| `power_flow_zero_channels` | Channels that came back as exactly 0 in the last frame — any of `battery`, `solar`, `grid`, `load` |
+
+A channel listed in `power_flow_zero_channels` while its matching `power_flow_*_valid` flag
+is `true` means the device has the sensor, but the backend did not fill that channel in the
+frame — the value is not a measurement.
+
+### Multi-unit (parallel) installations
+
+Official app 3.0.0 introduced multi-unit ("parallel") installations, where several Power
+Stores are coordinated as a single system. The integration detects the parallel
+configuration and reports it, but does not yet reproduce the app's multi-unit behaviour in
+full.
+
+The **Parallel status** sensor reports one of these states:
+
+| State | Meaning |
+|---|---|
+| `single` | This home is not a multi-unit install |
+| `master` | The backend named this device as the home's master unit |
+| `slave` | The backend named a different device as the master |
+| `unknown` | Several units are configured, but the master could not be determined |
+
+Its attributes are `parallel_unit_count` (units this integration manages for the home),
+`parallel_reported_unit_count` (the backend's own count, when it reports one),
+`parallel_master_device_id`, `parallel_master_device_name`, `parallel_master_device_model`,
+`parallel_bmt_models`, `parallel_home_dual_power_open` (home-level dual-power state),
+`parallel_is_master_device`, and `parallel_master_lookup_status`.
+
+`parallel_master_lookup_status` says what happened during the master lookup:
+
+| Status | Meaning |
+|---|---|
+| `pending` | Not looked up yet |
+| `ok` | The backend reported a master unit |
+| `no_master` | The backend answered that this home has no master unit — the normal answer for a home that is not a multi-unit install |
+| `failed` | The lookup could not be completed; `parallel_master_lookup_error` holds the reason |
+
+**Known limitation:** in a multi-unit install the realtime power sensors can read 0 W, because
+the backend's aggregated ("global") power-flow frame does not carry the battery and solar
+channels for such a home. Energy totals are unaffected. This is tracked in
+[issue #77](https://github.com/wertigpar/ha-emaldo/issues/77).
 
 ### Schedule Sensors
 
@@ -866,6 +921,19 @@ Work through these in order:
    range on a daily schedule and will overwrite markers written from Home
    Assistant. If the app displays the same pair, the app is winning — that is
    expected, not a failed write.
+
+### Power sensor reads 0 W
+
+- Check the `power_flow_zero_channels` attribute on the **Realtime connection** sensor. A
+  channel listed there came back as exactly 0 in the last frame.
+- If the channel is listed *and* the matching `power_flow_*_valid` flag is `true`, the device
+  has the sensor but the backend did not fill that channel in the frame — the value is not a
+  measurement. See [Power-flow validity attributes](#power-flow-validity-attributes).
+- If the channel is *not* listed, the reading is a real measurement of zero.
+- In a multi-unit ("parallel") install this is known backend behaviour — see
+  [Multi-unit (parallel) installations](#multi-unit-parallel-installations).
+- Compare against the official app: if it shows a different value for the same moment, the two
+  are reading different sources.
 
 ## Architecture
 

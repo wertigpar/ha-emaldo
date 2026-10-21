@@ -657,6 +657,10 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     entities: list[SensorEntity] = []
 
+    # Number of devices configured for this home — the authoritative
+    # multi-unit ("parallel") signal, independent of what the backend reports.
+    _unit_count = len(data.get("devices") or [data])
+
     for item in data.get("devices") or [data]:
         coordinator: EmaldoCoordinator = item["power"]
         realtime_coordinator: EmaldoRealtimeCoordinator = item["realtime"]
@@ -713,6 +717,8 @@ async def async_setup_entry(
 
         # Diagnostic: realtime connection status
         entities.append(EmaldoRealtimeStatusSensor(realtime_coordinator))
+        # Diagnostic: this device's role in a multi-unit ("parallel") home
+        entities.append(EmaldoParallelStatusSensor(coordinator, _unit_count))
         entities.append(EmaldoPeakShavingSensor(realtime_coordinator))
         entities.append(EmaldoBalancingStateSensor(realtime_coordinator))
         entities.append(EmaldoBatteryTotalEnergySensor(realtime_coordinator))
@@ -1423,6 +1429,35 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
                     session, "_stream_frames_received", None
                 )
 
+        # Power-flow frame validity (#77). A channel reading exactly 0 W is
+        # indistinguishable from a channel the backend did not populate, so
+        # the frame's own validity flags are surfaced together with the list
+        # of channels that came back as exactly zero. That lets a user tell
+        # "the inverter reported 0 W" apart from "the backend did not fill
+        # this channel in the last frame".
+        data = c.data or {}
+        zero_channels = [
+            name
+            for name, key in (
+                ("battery", "battery_w"),
+                ("solar", "solar_w"),
+                ("grid", "grid_w"),
+                ("load", "dual_power_w"),
+            )
+            if key in data and data[key] == 0
+        ]
+        power_flow_attrs: dict[str, Any] = {}
+        for _attr, _key in (
+            ("power_flow_grid_valid", "grid_valid"),
+            ("power_flow_bsensor_valid", "bsensor_valid"),
+            ("power_flow_solar_efficiency", "solar_efficiency"),
+            ("power_flow_thirdparty_pv_on", "thirdparty_pv_on"),
+        ):
+            if _key in data and data[_key] is not None:
+                power_flow_attrs[_attr] = data[_key]
+        if zero_channels:
+            power_flow_attrs["power_flow_zero_channels"] = zero_channels
+
         return {
             "total_polls": c.stats_total_polls,
             "successful_polls": c.stats_successful_polls,
@@ -1482,7 +1517,89 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             ),
             "last_failure": _to_iso(c.stats_last_failure),
             "last_reconnect": _to_iso(c.stats_last_reconnect),
+            **power_flow_attrs,
         }
+
+
+class EmaldoParallelStatusSensor(
+    CoordinatorEntity[EmaldoCoordinator], SensorEntity
+):
+    """Diagnostic sensor reporting the multi-unit ("parallel") state of a home.
+
+    State is one of:
+    - ``single``: this home is not a multi-unit install.
+    - ``master``: the backend named this device as the home's master unit.
+    - ``slave``: the backend named a different device as the master.
+    - ``unknown``: several units are configured, but the master could not be
+      determined (the backend reports no master, or the lookup failed — see the
+      ``parallel_master_lookup_status`` attribute).
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "parallel_status"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:home-group"
+
+    def __init__(
+        self, coordinator: EmaldoCoordinator, unit_count: int = 1
+    ) -> None:
+        """Initialize the parallel-status diagnostic sensor."""
+        super().__init__(coordinator)
+        self._unit_count = unit_count
+        self._attr_unique_id = f"{_uid_base(coordinator)}_parallel_status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking to the main Emaldo device."""
+        c = self.coordinator
+        return DeviceInfo(
+            identifiers={(DOMAIN, c.device_id or c.home_id)},
+            name=c.device_name or "Emaldo Battery",
+            manufacturer="Emaldo",
+            model=c.device_model,
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the parallel/master state of this device.
+
+        "master" / "slave" when the backend reported a master unit for the
+        home, "single" when this home is not a multi-unit install, and
+        "unknown" when several units are configured but the master could not
+        be determined.
+        """
+        c = self.coordinator
+        master = c.master_bmt
+        if master is not None:
+            return "master" if c.is_master_device else "slave"
+        # The backend has not told us which unit is the master. Fall back to
+        # the unit count so a genuinely single-unit home does not read
+        # "unknown" just because it has no master to report.
+        if self._unit_count > 1:
+            return "unknown"
+        return "single"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the master-unit details reported by the backend."""
+        c = self.coordinator
+        master_bmt = c.master_bmt or {}
+        attrs: dict[str, Any] = {"parallel_unit_count": self._unit_count}
+        for key, value in (
+            ("parallel_reported_unit_count", master_bmt.get("unit_count")),
+            ("parallel_master_device_id", master_bmt.get("id")),
+            ("parallel_master_device_name", master_bmt.get("name")),
+            ("parallel_master_device_model", master_bmt.get("model")),
+            ("parallel_bmt_models", master_bmt.get("bmt_models")),
+            ("parallel_home_dual_power_open", c.home_dual_power_open),
+            ("parallel_is_master_device", c.is_master_device),
+            ("parallel_master_lookup_status", c.master_bmt_status),
+        ):
+            if value is not None:
+                attrs[key] = value
+        if c.master_bmt_status == "failed" and c.master_bmt_error:
+            attrs["parallel_master_lookup_error"] = c.master_bmt_error
+        return attrs
 
 
 # Per-module battery metric definitions: translation_key, unit, device_class,

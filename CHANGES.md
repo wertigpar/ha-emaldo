@@ -1,5 +1,26 @@
 # Changes
 
+## v1.0.0-beta45
+
+### Added
+
+- **Multi-unit (parallel) awareness.** The integration now queries the backend's
+  master-unit lookup and its home-level dual-power probe, both of which were
+  introduced with official app 3.0.0. A new diagnostic sensor, "Parallel status",
+  reports whether the home is a multi-unit install, whether this device is the master
+  unit, and the home-level dual-power state. The outcome of the master lookup is
+  reported separately from an error: a home the backend has not assigned a master to
+  is shown as "no master" rather than as a failure, which is the normal answer for
+  a single-unit install.
+
+### Fixed
+
+- **A zero reading is now distinguishable from a missing measurement.** A power
+  channel reporting exactly 0 W looked identical to a channel the backend did not
+  populate. The realtime diagnostic sensor now exposes the frame's own validity
+  flags and lists the channels that came back as exactly zero, so "the inverter
+  reported 0 W" can be told apart from "the backend did not fill this channel".
+
 ## v1.0.0-beta44
 
 ### Fixed

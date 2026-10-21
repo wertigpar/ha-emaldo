@@ -127,6 +127,14 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._dual_power_fail_count: int = 0
         self._dual_power_fail_since: float | None = None
         self._dual_power_last_log: float = 0.0
+        # Multi-unit ("parallel") support. The master unit of a home is
+        # identified by the backend; see client.get_master_bmt().
+        self._master_bmt: dict | None = None
+        self._home_dual_power_open: bool | None = None
+        # Outcome of the last master-BMT lookup: "pending" | "ok" |
+        # "no_master" | "failed", plus the failure text when it failed.
+        self._master_bmt_status: str = "pending"
+        self._master_bmt_error: str | None = None
         self._rest_fail_count: int = 0
         self._rest_fail_since: float | None = None
         self._rest_last_log: float = 0.0
@@ -150,6 +158,57 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def device_name(self) -> str | None:
         """Return the discovered device name."""
         return self._device_name
+
+    @property
+    def master_bmt(self) -> dict | None:
+        """Master-unit info for this home, or *None* when not yet known.
+
+        Populated from the backend's master-BMT lookup. The dict carries
+        ``id``, ``model``, ``name``, ``group_id``, ``bmt_models`` and
+        ``unit_count``.
+        """
+        return self._master_bmt
+
+    @property
+    def master_bmt_status(self) -> str:
+        """Outcome of the last master-BMT lookup.
+
+        One of "pending", "ok", "no_master" or "failed". "no_master" means
+        the backend answered that this home has no master unit assigned,
+        which is the normal answer for a home that is not configured as a
+        multi-unit install.
+        """
+        return self._master_bmt_status
+
+    @property
+    def master_bmt_error(self) -> str | None:
+        """Failure text of the last master-BMT lookup, or *None*."""
+        return self._master_bmt_error
+
+    @property
+    def is_multi_unit(self) -> bool:
+        """True when the backend reports more than one BMT for this home."""
+        info = self._master_bmt
+        if not info:
+            return False
+        try:
+            return int(info.get("unit_count") or 0) > 1
+        except (TypeError, ValueError):
+            return False
+
+    @property
+    def is_master_device(self) -> bool:
+        """True when this device is the home's master unit."""
+        info = self._master_bmt
+        if not info:
+            return False
+        master_id = info.get("id")
+        return bool(master_id) and master_id == self._device_id
+
+    @property
+    def home_dual_power_open(self) -> bool | None:
+        """Home-level dual-power state, or *None* when unknown/unavailable."""
+        return self._home_dual_power_open
 
     def _reset_client(self) -> None:
         """Invalidate the shared REST client so the next request re-authenticates."""
@@ -307,6 +366,36 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 raise UpdateFailed(f"Error fetching Emaldo data: {err}") from err
 
         self._on_rest_recovered()
+
+        # Multi-unit ("parallel") support: master-BMT lookup and the
+        # home-level dual-power state. Both probes are best-effort and
+        # cached client-side (300 s per home), so a failure must never break
+        # the update -- the stored values stay *None*.
+        try:
+            self._master_bmt = await self.hass.async_add_executor_job(
+                client.get_master_bmt, self.home_id
+            )
+            if client is not None:
+                self._master_bmt_status = client.master_bmt_status(self.home_id)
+                self._master_bmt_error = client.master_bmt_error(self.home_id)
+        except Exception as err:
+            _LOGGER.debug("Master BMT lookup failed: %s", err)
+            self._master_bmt = None
+            self._master_bmt_status = "failed"
+            self._master_bmt_error = str(err)
+
+        if self._device_id:
+            try:
+                self._home_dual_power_open = await self.hass.async_add_executor_job(
+                    client.get_is_home_dual_power_open,
+                    self.home_id,
+                    self._device_id,
+                )
+            except Exception as err:
+                _LOGGER.debug("Home dual-power state fetch failed: %s", err)
+                self._home_dual_power_open = None
+        else:
+            self._home_dual_power_open = None
 
         # Solar MPPT stats — best-effort, not all devices have solar
         solar = None

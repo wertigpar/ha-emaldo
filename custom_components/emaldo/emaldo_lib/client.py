@@ -92,6 +92,27 @@ class E2ECredentialCacheEntry:
 MIN_DEVICE_ROTATION_INTERVAL = 90.0
 
 
+# TTL for the cached master-BMT lookup and the home-level dual-power probe.
+# The client instance is shared by every device of a home, so these caches
+# collapse N per-device polls into one request per home per TTL.
+MASTER_BMT_CACHE_TTL = 300.0
+HOME_DUAL_POWER_CACHE_TTL = 300.0
+
+
+def _is_no_master_error(err: Exception) -> bool:
+    """Return True when the backend answered "this home has no master unit".
+
+    The master-BMT endpoint reports a domain-level error for homes that have
+    no master assigned: status -86 with a message naming ``masterBmtId is
+    null``. That is a valid answer, not a transport failure, and must not be
+    surfaced as an error.
+    """
+    if not isinstance(err, EmaldoAPIError):
+        return False
+    msg = str(err).lower()
+    return "masterbmtid" in msg and "null" in msg
+
+
 class EmaldoClient:
     """Client for the Emaldo battery system API.
 
@@ -132,6 +153,18 @@ class EmaldoClient:
         self._http_closed = False
         self._storm_state_provider = storm_state_provider
         self._device_rotation_last_attempt: dict[str, float] = {}
+        # Per-home caches for the master-BMT lookup and the home-level
+        # dual-power probe. Value is (expiry_monotonic, payload).
+        # (expiry_monotonic, payload_or_None, status)
+        self._master_bmt_cache: dict[str, tuple[float, dict | None, str]] = {}
+        self._home_dual_power_cache: dict[str, tuple[float, bool]] = {}
+        # Per-home outcome of the last master-BMT lookup. Values:
+        #   "pending"  - not looked up yet
+        #   "ok"       - the backend reported a master unit
+        #   "no_master" - the backend answered that this home has no master
+        #   "failed"   - the lookup could not be completed
+        self._master_bmt_status: dict[str, str] = {}
+        self._master_bmt_error: dict[str, str | None] = {}
         # Retry only on transient HTTP errors (502/503/504), not on
         # read timeouts or connection failures — those block the executor
         # thread for up to total*timeout seconds if retried.
@@ -732,6 +765,152 @@ class EmaldoClient:
             "grid": r_grid.get("Result") or {},
             "dual_power": dual_power,
         }
+
+    def get_master_bmt(self, home_id: str) -> dict | None:
+        """Return the master BMT of a home, or *None* when unavailable.
+
+        Identifies which unit is the master of a multi-unit ("parallel")
+        installation. Cached per home for :data:`MASTER_BMT_CACHE_TTL` seconds,
+        because the client instance is shared by every device of a home and
+        each device polls independently.
+
+        Args:
+            home_id: Home whose master unit to look up.
+
+        Returns:
+            Dict with keys ``id``, ``model``, ``name``, ``group_id``,
+            ``bmt_models`` (list of str) and ``unit_count`` (int, the length
+            of ``bmt_models``), or *None* when the endpoint is unreachable or
+            returns no master.
+        """
+        now = time.monotonic()
+        cached = self._master_bmt_cache.get(home_id)
+        if cached is not None and now < cached[0]:
+            _, cached_payload, status = cached
+            self._master_bmt_status[home_id] = status
+            self._master_bmt_error[home_id] = None
+            return dict(cached_payload) if cached_payload is not None else None
+
+        try:
+            resp = self.api_request(
+                "/bmt/get-master-bmt/",
+                json_data={"home_id": home_id},
+            )
+            result = resp.get("Result") or {}
+            master = result.get("master") or {}
+            if not master.get("id"):
+                # Backend answered, but this home has no master unit.
+                self._master_bmt_status[home_id] = "no_master"
+                self._master_bmt_error[home_id] = None
+                self._master_bmt_cache[home_id] = (
+                    now + MASTER_BMT_CACHE_TTL,
+                    None,
+                    "no_master",
+                )
+                _LOGGER.debug(
+                    "No master BMT for home %s: backend reported no master",
+                    home_id,
+                )
+                return None
+            bmt_models = list(result.get("bmt_models") or [])
+            payload = {
+                "id": master.get("id"),
+                "model": master.get("model"),
+                "name": master.get("name"),
+                "group_id": master.get("group_id"),
+                "bmt_models": bmt_models,
+                "unit_count": len(bmt_models),
+            }
+        except Exception as err:  # noqa: BLE001 - best-effort lookup
+            if _is_no_master_error(err):
+                # Backend answered "this home has no master unit" with a
+                # domain error. That is a valid answer, not a failure.
+                self._master_bmt_status[home_id] = "no_master"
+                self._master_bmt_error[home_id] = None
+                self._master_bmt_cache[home_id] = (
+                    now + MASTER_BMT_CACHE_TTL,
+                    None,
+                    "no_master",
+                )
+                _LOGGER.debug(
+                    "No master BMT for home %s: backend reported no master (%s)",
+                    home_id,
+                    err,
+                )
+                return None
+            self._master_bmt_status[home_id] = "failed"
+            self._master_bmt_error[home_id] = str(err)
+            _LOGGER.warning(
+                "Master BMT lookup failed for home %s: %s", home_id, err
+            )
+            return None
+
+        self._master_bmt_status[home_id] = "ok"
+        self._master_bmt_error[home_id] = None
+        self._master_bmt_cache[home_id] = (now + MASTER_BMT_CACHE_TTL, payload, "ok")
+        return dict(payload)
+
+    def master_bmt_status(self, home_id: str) -> str:
+        """Return the outcome of the last master-BMT lookup for a home.
+
+        One of ``"pending"`` (not looked up yet), ``"ok"`` (the backend
+        reported a master unit), ``"no_master"`` (the backend answered that
+        this home has no master unit) or ``"failed"`` (the lookup could not
+        be completed).
+        """
+        return self._master_bmt_status.get(home_id, "pending")
+
+    def master_bmt_error(self, home_id: str) -> str | None:
+        """Return the failure text of the last master-BMT lookup, or None.
+
+        Only populated when :meth:`master_bmt_status` reports ``"failed"``.
+        """
+        return self._master_bmt_error.get(home_id)
+
+    def get_is_home_dual_power_open(
+        self, home_id: str, device_id: str
+    ) -> bool | None:
+        """Return the home-level dual-power state, or *None* when unavailable.
+
+        Asks whether the home's combined household+solar ("dual power")
+        measurement channel is open. This is the multi-unit counterpart of
+        the per-device ``/bmt/is-dual-power-open/`` probe and uses the ``id``
+        request field (not ``bmt_id``).
+
+        Cached per home for :data:`HOME_DUAL_POWER_CACHE_TTL` seconds.
+
+        Args:
+            home_id: Home to probe.
+            device_id: Device the probe is made on behalf of.
+
+        Returns:
+            *True* / *False* from the endpoint's ``is_open`` flag, or *None*
+            when the endpoint is unreachable or does not report a value.
+        """
+        now = time.monotonic()
+        cached = self._home_dual_power_cache.get(home_id)
+        if cached is not None and now < cached[0]:
+            return cached[1]
+
+        try:
+            resp = self.api_request(
+                "/bmt/is-home-dual-power-open/",
+                json_data={"home_id": home_id, "id": device_id},
+            )
+            result = resp.get("Result") or {}
+            value = result.get("is_open")
+        except Exception as err:  # noqa: BLE001 - best-effort probe
+            _LOGGER.debug("Home dual-power probe failed for home %s: %s", home_id, err)
+            return None
+
+        if not isinstance(value, bool):
+            return None
+
+        self._home_dual_power_cache[home_id] = (
+            now + HOME_DUAL_POWER_CACHE_TTL,
+            value,
+        )
+        return value
 
     def get_solar(
         self, home_id: str, device_id: str, model: str, offset: int = 0

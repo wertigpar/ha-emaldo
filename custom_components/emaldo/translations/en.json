@@ -90,6 +90,7 @@
       "balancing_state": { "name": "Balancing state" },
       "realtime_connection": { "name": "Realtime connection" },
       "peak_shaving_status": { "name": "Peak shaving status", "state": { "on": "On", "off": "Off" } },
+      "parallel_status": { "name": "Parallel status" },
       "total_energy": { "name": "Total energy" },
       "battery_module_model": { "name": "Battery Module {module} Model" },
       "battery_module_soc": { "name": "Battery Module {module} SoC" },

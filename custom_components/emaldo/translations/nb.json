@@ -90,6 +90,7 @@
       "balancing_state": { "name": "Frekvensregulering" },
       "realtime_connection": { "name": "Sanntidsforbindelse" },
       "peak_shaving_status": { "name": "Effekttoppstatus", "state": { "on": "På", "off": "Av" } },
+      "parallel_status": { "name": "Parallelstatus" },
       "total_energy": { "name": "Total energi" },
       "battery_module_model": { "name": "Batterimodul {module} Modell" },
       "battery_module_soc": { "name": "Batterimodul {module} SoC" },
