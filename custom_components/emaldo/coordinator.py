@@ -16,6 +16,7 @@ import functools
 import logging
 import struct
 import threading
+import time
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -34,6 +35,7 @@ from .emaldo_lib.exceptions import EmaldoE2EError
 from .emaldo_lib.e2e import (
     build_override_payload,
     build_subscription_packet,
+    clustering_io_state_to_power_flow,
     decrypt_response,
     generate_nonce,
     get_power_flow_sanity_drops,
@@ -867,6 +869,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._consecutive_stream_stall_resets: int = 0
         self._stream_poll_mode_hint_logged: bool = False
         self._regulate_frequency: dict | None = None
+        # Last master 0x49 clustering-iostate probe (#77 parallel homes).
+        self._last_clustering_read_monotonic: float = 0.0
+        self._clustering_diag: dict = {}
         # Seed so the first successful poll triggers an auxiliary-state read
         # immediately, regardless of the (mode-dependent) cadence below.
         self._balancing_poll_counter: int = (
@@ -1566,7 +1571,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
             if data is None and session.closed:
                 self._invalidate_session_ref()
-            return data
+                return data
+            return self._merge_clustering_io_state(session, data)
         # Collect diagnostic info — will be logged from main thread in _async_update_data
         self._e2e_diag = f"host={session._creds.get('host','?')} has_log={session._log is not None} closed={session.closed}"
         data = session.read_power_flow()
@@ -1605,9 +1611,73 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.stats_powerflow_sanity_drops += delta
         self._last_powerflow_sanity_drops = cur
         if data is None and session.closed:
-            # Session died mid-read — force recreation on next call
+            # Session died mid-read - force recreation on next call
             self._invalidate_session_ref()
-        return data
+            return data
+        return self._merge_clustering_io_state(session, data)
+
+    _CLUSTERING_PROBE_INTERVAL_S = 30.0
+
+    def _merge_clustering_io_state(
+        self, session: PersistentE2ESession, data: dict | None,
+    ) -> dict | None:
+        """Overlay master 0x49 values on parallel homes (#77).
+
+        On a parallel home the 0x30 frame is a per-slave placeholder: the
+        battery and PV channels arrive as literal zeros even while the master
+        reports real power. The official app does not rely on 0x30 there by
+        reading ``get_clustering_iostate`` (cmd 0x49) from the master instead.
+        Probe it only when the 0x30 frame looks empty, at most every
+        ``_CLUSTERING_PROBE_INTERVAL_S`` seconds, and never on single-unit
+        homes or non-master devices.
+
+        Only ``battery_w``, ``solar_w`` and ``soc`` are overlaid; the grid and
+        load channels keep coming from 0x30.
+        """
+        if data is None:
+            return data
+        try:
+            if not (self._parent.is_multi_unit and self._parent.is_master_device):
+                return data
+        except Exception:  # noqa: BLE001 - property access is best-effort
+            return data
+        if data.get("battery_w") not in (0, None) or data.get("solar_w") not in (0, None):
+            return data
+        now = time.monotonic()
+        if now - self._last_clustering_read_monotonic < self._CLUSTERING_PROBE_INTERVAL_S:
+            return data
+        self._last_clustering_read_monotonic = now
+        try:
+            state = session.read_clustering_io_state()
+            flow = clustering_io_state_to_power_flow(state)
+        except Exception as err:  # noqa: BLE001 - never break the poll path
+            self._clustering_diag = {
+                "result": "error", "error": str(err), "at": now,
+            }
+            _LOGGER.debug("[#77] clustering iostate probe failed: %s", err)
+            return data
+        if flow is None:
+            self._clustering_diag = {"result": "empty", "at": now}
+            return data
+        merged = dict(data)
+        merged["battery_w"] = flow["battery_w"]
+        merged["solar_w"] = flow["solar_w"]
+        merged["soc"] = flow["soc"]
+        merged["power_flow_source"] = "clustering"
+        merged["clustering_io_state"] = state
+        self._clustering_diag = {
+            "result": "ok",
+            "at": now,
+            "battery_w": flow["battery_w"],
+            "solar_w": flow["solar_w"],
+            "soc": flow["soc"],
+            "bsensor_valid": flow["bsensor_valid"],
+        }
+        _LOGGER.debug(
+            "[#77] clustering overlay battery=%sW solar=%sW soc=%s%%",
+            flow["battery_w"], flow["solar_w"], flow["soc"],
+        )
+        return merged
 
     def _accumulate_stream_stats(self, session: PersistentE2ESession) -> None:
         """Roll per-session stream counters into cumulative coordinator totals.

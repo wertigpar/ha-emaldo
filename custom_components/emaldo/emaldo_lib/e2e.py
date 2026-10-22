@@ -1190,6 +1190,128 @@ def _is_power_flow_payload(payload: bytes) -> bool:
     return _has_reasonable_power_flow_values(payload)
 
 
+# ---------------------------------------------------------------------------
+# 0x49 clustering iostate (#77: parallel homes)
+# ---------------------------------------------------------------------------
+
+CLUSTERING_IO_STATE_CMD = 0x49
+CLUSTERING_IO_STATE_MIN_LEN = 73
+
+
+def _is_clustering_io_state_payload(payload: bytes) -> bool:
+    """Validate a decrypted 0x49 ``get_clustering_iostate`` payload.
+
+    Frames are at least 73 bytes of little-endian 32-bit centi-watt values,
+    so the 16-bit reasonability guard used for 0x30 does not apply.  Only the
+    length and the two boolean flags are checked, which is enough to keep the
+    decrypt search from accepting unrelated relay frames.
+    """
+    if len(payload) < CLUSTERING_IO_STATE_MIN_LEN:
+        return False
+    if payload[0] not in (0, 1):
+        return False
+    if payload[39] not in (0, 1):
+        return False
+    return True
+
+
+def parse_clustering_io_state(payload: bytes) -> dict | None:
+    """Parse a 0x49 clustering iostate payload (parallel homes only).
+
+    On a parallel home the official app reads realtime battery/solar from the
+    master via ``get_clustering_iostate`` (0x49) instead of 0x30.  Layout is
+    little-endian, centi-watts for powers:
+
+    ======  ====  =========================  ==============================
+    Offset  Size  Field                      Description
+    ======  ====  =========================  ==============================
+    0       1     bsensor_plugged_in         external meter present
+    1-4     4     bsensor_power_indoor       meter indoor power
+    5-8     4     bsensor_power_outdoor      meter outdoor power
+    9-10    2     soc                        state of charge (%)
+    11-14   4     battery_charging_power     battery charging power
+    15-18   4     battery_discharging_power  battery discharging power
+    19-22   4     mppt_generating_power      PV generation
+    23-26   4     ev_charging_power          EV charging power
+    27-30   4     ev_discharging_power       EV discharging power
+    31-34   4     keepon_load                base load
+    35-38   4     addition_load              additional load
+    39      1     thirdparty_pv_enabled      third-party PV flag
+    40-43   4     dual_power_output          dual power output
+    44-47   4     dual_power_input           dual power input
+    48-51   4     inverter_to_grid_power     inverter -> grid
+    52-55   4     grid_to_inverter_power     grid -> inverter
+    56-59   4     balancing_input_power      balancing input
+    60-63   4     balancing_output_power     balancing output
+    64-65   2     remain_time                remaining time
+    66-67   2     charge_time                charge time
+    68-71   4     balance                    balance value
+    72      1     ev_status                  EV status
+    73      1     on_grid                    on-grid flag (optional)
+    ======  ====  =========================  ==============================
+
+    Returns *None* for payloads shorter than :data:`CLUSTERING_IO_STATE_MIN_LEN`.
+    """
+    if not payload or len(payload) < CLUSTERING_IO_STATE_MIN_LEN:
+        return None
+
+    def _i32(off: int) -> int:
+        return struct.unpack_from("<i", payload, off)[0]
+
+    return {
+        "bsensor_plugged_in": payload[0] == 1,
+        "bsensor_power_indoor": _i32(1),
+        "bsensor_power_outdoor": _i32(5),
+        "soc": struct.unpack_from("<H", payload, 9)[0],
+        "battery_charging_power": _i32(11),
+        "battery_discharging_power": _i32(15),
+        "mppt_generating_power": _i32(19),
+        "ev_charging_power": _i32(23),
+        "ev_discharging_power": _i32(27),
+        "keepon_load": _i32(31),
+        "addition_load": _i32(35),
+        "thirdparty_pv_enabled": payload[39] == 1,
+        "dual_power_output": _i32(40),
+        "dual_power_input": _i32(44),
+        "inverter_to_grid_power": _i32(48),
+        "grid_to_inverter_power": _i32(52),
+        "balancing_input_power": _i32(56),
+        "balancing_output_power": _i32(60),
+        "remain_time": struct.unpack_from("<H", payload, 64)[0],
+        "charge_time": struct.unpack_from("<H", payload, 66)[0],
+        "balance": _i32(68),
+        "ev_status": payload[72],
+        "on_grid": (payload[73] == 1) if len(payload) > 73 else True,
+    }
+
+
+def clustering_io_state_to_power_flow(state: dict | None) -> dict | None:
+    """Map a parsed 0x49 state onto 0x30-compatible power-flow keys.
+
+    Sign convention is identical to :func:`parse_power_flow` and to the HA
+    sensors: battery positive = discharging, grid positive = importing, solar
+    positive.  Wire values are centi-watts, converted to watts here.
+    """
+    if not state:
+        return None
+
+    battery = state["battery_discharging_power"] - state["battery_charging_power"]
+    if state.get("bsensor_plugged_in"):
+        grid = state["bsensor_power_indoor"] - state["bsensor_power_outdoor"]
+    else:
+        grid = state["grid_to_inverter_power"] - state["inverter_to_grid_power"]
+
+    return {
+        "battery_w": int(round(battery / 100.0)),
+        "solar_w": int(round(state["mppt_generating_power"] / 100.0)),
+        "grid_w": int(round(grid / 100.0)),
+        "soc": state["soc"],
+        "grid_valid": bool(state.get("on_grid")),
+        "bsensor_valid": bool(state.get("bsensor_plugged_in")),
+        "thirdparty_pv_on": bool(state.get("thirdparty_pv_enabled")),
+    }
+
+
 def parse_power_flow(payload: bytes) -> dict | None:
     """Parse a type 0x30 power-flow response payload.
 
@@ -4031,6 +4153,88 @@ class PersistentE2ESession:
             return self._read_power_flow_locked(
                 reconnect_on_expiry=False, creds=target_creds
             )
+
+    def read_clustering_io_state(self) -> dict | None:
+        """Read the master-only 0x49 clustering iostate (#77 parallel homes).
+
+        Returns the parsed state dict, or *None* when the frame is unavailable
+        (no session, stream reconnecting, timeout, 21204, unparseable).
+        Never re-handshakes: the primary 0x30 read owns session recovery.
+        """
+        if self._sock is None or self._closed:
+            raise EmaldoE2EError("Session is not connected")
+        return self._read_clustering_io_state_locked()
+
+    def _read_clustering_io_state_locked(self) -> dict | None:
+        """0x49 probe body.  Mirrors the accessory-probe guard rails."""
+        if self._stream_needs_reconnect:
+            return None
+        not_before = self._stream_reconnect_not_before
+        if not_before is not None and time.perf_counter() < not_before:
+            return None
+
+        with self._lock:
+            if self._sock is None or self._closed:
+                return None
+            prev_timeout = self._sock.gettimeout()
+            self._sock.settimeout(min(self._timeout, 1.5))
+            try:
+                pkt = build_subscription_packet(
+                    self._creds,
+                    CLUSTERING_IO_STATE_CMD,
+                    self._session_nonce,
+                    payload=bytes([0x01]),
+                )
+                resp = self._send_raw(pkt, "ClusteringIOState(0x49)")
+                if resp is None:
+                    return None
+                if self._log:
+                    self._log(
+                        f"ClusteringIOState(0x49) raw ({len(resp)}B): "
+                        f"{resp[:160].hex()}"
+                    )
+                if self._is_session_expired(resp):
+                    return None
+                decrypted = self._decrypt_clustering_io_state(resp)
+                if decrypted is None:
+                    try:
+                        resp2, _ = self._sock.recvfrom(4096)
+                    except socket.timeout:
+                        return None
+                    if self._is_session_expired(resp2):
+                        return None
+                    decrypted = self._decrypt_clustering_io_state(resp2)
+                if decrypted is None:
+                    return None
+                return parse_clustering_io_state(decrypted)
+            finally:
+                try:
+                    self._sock.settimeout(prev_timeout)
+                except OSError:
+                    pass
+
+    def _decrypt_clustering_io_state(self, resp: bytes) -> bytes | None:
+        """Decrypt a 0x49 response with the session key, then home secret."""
+        keys: list[str] = []
+        if self._creds:
+            for key_name in ("chat_secret", "home_chat_secret"):
+                value = self._creds.get(key_name)
+                if value and value not in keys:
+                    keys.append(value)
+        for key in keys:
+            try:
+                decrypted = decrypt_response(
+                    resp,
+                    key,
+                    payload_validator=_is_clustering_io_state_payload,
+                    fallback_ivs=[self._session_nonce.encode()],
+                    silent=True,
+                )
+            except Exception:  # noqa: BLE001 - best-effort parse
+                continue
+            if decrypted is not None:
+                return decrypted
+        return None
 
     def _read_power_flow_locked(
         self, *, reconnect_on_expiry: bool, creds: dict | None = None

@@ -185,11 +185,17 @@ The **Parallel status** sensor reports one of these states:
 | `slave` | The backend named a different device as the master |
 | `unknown` | Several units are configured, but the master could not be determined |
 
-Its attributes are `parallel_unit_count` (units this integration manages for the home),
-`parallel_reported_unit_count` (the backend's own count, when it reports one),
-`parallel_master_device_id`, `parallel_master_device_name`, `parallel_master_device_model`,
-`parallel_bmt_models`, `parallel_home_dual_power_open` (home-level dual-power state),
-`parallel_is_master_device`, and `parallel_master_lookup_status`.
+Its attributes are `parallel_unit_count` (units this integration manages for the home,
+counted across every config entry that shares the same home), `parallel_entry_unit_count`
+(units managed by this config entry only), `parallel_reported_unit_count` (the backend's own
+count, when it reports one), `parallel_master_device_id`, `parallel_master_device_name`,
+`parallel_master_device_model`, `parallel_bmt_models`, `parallel_home_dual_power_open`
+(home-level dual-power state), `parallel_is_master_device`, and
+`parallel_master_lookup_status`.
+
+If a parallel home is configured as several config entries, one Power Store per entry, the
+sensor still counts the whole home: entries that share a `home_id` are summed.
+`parallel_entry_unit_count` shows the share managed by this entry.
 
 `parallel_master_lookup_status` says what happened during the master lookup:
 

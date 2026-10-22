@@ -1457,6 +1457,10 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
                 power_flow_attrs[_attr] = data[_key]
         if zero_channels:
             power_flow_attrs["power_flow_zero_channels"] = zero_channels
+        if data.get("power_flow_source"):
+            power_flow_attrs["power_flow_source"] = data["power_flow_source"]
+        if data.get("clustering_io_state"):
+            power_flow_attrs["power_flow_clustering"] = data["clustering_io_state"]
 
         return {
             "total_polls": c.stats_total_polls,
@@ -1548,6 +1552,36 @@ class EmaldoParallelStatusSensor(
         self._unit_count = unit_count
         self._attr_unique_id = f"{_uid_base(coordinator)}_parallel_status"
 
+    def _home_unit_count(self) -> int:
+        """Return the home-wide unit count across all config entries."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return self._unit_count
+        base = getattr(hass, "data", None)
+        if base is None:
+            base = {}
+        base_domain = base.get(DOMAIN) or {}
+        if not isinstance(base_domain, dict):
+            return self._unit_count
+        my_home_id = getattr(self.coordinator, "home_id", None)
+        if my_home_id is None:
+            return self._unit_count
+        total = 0
+        for value in base_domain.values():
+            if not isinstance(value, dict):
+                continue
+            if "devices" not in value:
+                continue
+            devs = value.get("devices") or []
+            if not devs:
+                continue
+            first_dev = devs[0] or {}
+            power = first_dev.get("power")
+            entry_home = getattr(power, "home_id", None)
+            if entry_home == my_home_id and entry_home is not None:
+                total += len(devs)
+        return max(total, 1)
+
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info linking to the main Emaldo device."""
@@ -1575,7 +1609,7 @@ class EmaldoParallelStatusSensor(
         # The backend has not told us which unit is the master. Fall back to
         # the unit count so a genuinely single-unit home does not read
         # "unknown" just because it has no master to report.
-        if self._unit_count > 1:
+        if self._home_unit_count() > 1:
             return "unknown"
         return "single"
 
@@ -1584,7 +1618,9 @@ class EmaldoParallelStatusSensor(
         """Expose the master-unit details reported by the backend."""
         c = self.coordinator
         master_bmt = c.master_bmt or {}
-        attrs: dict[str, Any] = {"parallel_unit_count": self._unit_count}
+        attrs: dict[str, Any] = {"parallel_unit_count": self._home_unit_count()}
+        if self._unit_count is not None:
+            attrs["parallel_entry_unit_count"] = self._unit_count
         for key, value in (
             ("parallel_reported_unit_count", master_bmt.get("unit_count")),
             ("parallel_master_device_id", master_bmt.get("id")),

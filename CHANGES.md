@@ -1,5 +1,22 @@
 # Changes
 
+## v1.0.0-beta46
+
+### Added
+
+- **Realtime battery and PV readings on parallel (multi-unit) homes.** On a
+  parallel home the per-unit power-flow frame (0x30) reports the battery and PV
+  channels as literal zeros; only the master unit carries the real values, and
+  the official app reads them with a separate command (`get_clustering_iostate`,
+  0x49) that this integration now issues. It is sent only by the master unit of a
+  detected parallel home, at most every 30 seconds, and only while the ordinary
+  frame still reads 0 W for battery and PV, so single-unit homes never send it.
+  Battery power, PV power and state of charge are overlaid onto the normal frame;
+  grid and load channels keep coming from 0x30. The realtime diagnostic sensor
+  gains `power_flow_source` (set to `clustering` when the overlay applied) plus
+  the raw `power_flow_clustering` payload so the mapping can be verified against
+  the official app. Master statistics are unchanged.
+
 ## v1.0.0-beta45
 
 ### Added
@@ -14,6 +31,13 @@
   a single-unit install.
 
 ### Fixed
+
+- **Parallel unit count was scoped to a single config entry.** A parallel home
+  configured as several config entries (one Power Store per entry) counted only
+  the current entry's device, so a genuine two-unit home reported a count of 1
+  and the "unknown" state was unreachable. The count is now summed across all
+  entries sharing the same `home_id`, and a new `parallel_entry_unit_count`
+  attribute reports how many of those units this entry manages.
 
 - **A zero reading is now distinguishable from a missing measurement.** A power
   channel reporting exactly 0 W looked identical to a channel the backend did not
