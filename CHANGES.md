@@ -1,5 +1,27 @@
 # Changes
 
+## v1.0.0-beta47
+
+### Fixed
+
+- **Parallel homes still reported 0 W battery and PV when the backend named no
+  master.** beta46 armed the clustering-iostate probe (0x49) only on a unit the
+  backend had explicitly designated as master. Many parallel homes never get
+  that answer - the master lookup returns `find master error masterBmtId is
+  null` - so the probe stayed disabled and every unit kept reporting the
+  placeholder zeros from 0x30. The probe is now also armed when Home Assistant
+  itself sees two or more units sharing the same `home_id`, which is the only
+  signal such a half-paired home exposes.
+
+### Added
+
+- **Clustering probe diagnostics.** The realtime diagnostic sensor gains
+  `power_flow_clustering_gate` (`master` or `home_units`; absent when the probe
+  is disabled) and `power_flow_clustering_probe` (result `ok`, `empty` or
+  `error`, plus `gate`, `device_id` and the decoded values of the last probe).
+  That makes it possible to tell from the entity attributes whether the probe
+  never ran, ran and got no answer, or ran and was overlaid.
+
 ## v1.0.0-beta46
 
 ### Added

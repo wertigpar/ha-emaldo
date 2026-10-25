@@ -1461,6 +1461,15 @@ class EmaldoRealtimeStatusSensor(SensorEntity):
             power_flow_attrs["power_flow_source"] = data["power_flow_source"]
         if data.get("clustering_io_state"):
             power_flow_attrs["power_flow_clustering"] = data["clustering_io_state"]
+        # #77 diagnostics: why the 0x49 probe is armed, and what the last one
+        # returned. Without them a parallel home that still reads 0 W gives no
+        # hint whether the gate stayed closed or the master answered nothing.
+        clustering_gate = getattr(c, "_clustering_gate_reason", None)
+        if clustering_gate is not None:
+            power_flow_attrs["power_flow_clustering_gate"] = clustering_gate
+        clustering_probe = getattr(c, "_clustering_diag", None)
+        if clustering_probe:
+            power_flow_attrs["power_flow_clustering_probe"] = clustering_probe
 
         return {
             "total_polls": c.stats_total_polls,

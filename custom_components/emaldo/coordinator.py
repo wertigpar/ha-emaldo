@@ -872,6 +872,9 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Last master 0x49 clustering-iostate probe (#77 parallel homes).
         self._last_clustering_read_monotonic: float = 0.0
         self._clustering_diag: dict = {}
+        # Why the 0x49 probe is allowed on this device ("master" / "home_units")
+        # or None when it is disabled. Exposed as a diagnostic attribute.
+        self._clustering_gate_reason: str | None = None
         # Seed so the first successful poll triggers an auxiliary-state read
         # immediately, regardless of the (mode-dependent) cadence below.
         self._balancing_poll_counter: int = (
@@ -1618,6 +1621,65 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     _CLUSTERING_PROBE_INTERVAL_S = 30.0
 
+    def _home_unit_count(self) -> int:
+        """Return how many units HA sees for this home across all entries.
+
+        Mirrors ``EmaldoParallelStatusSensor._home_unit_count``: the unit count
+        guards the 0x49 probe, so it must work even when the backend refuses to
+        name a master (``masterBmtId is null``).
+        """
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return 1
+        base = getattr(hass, "data", None) or {}
+        base_domain = base.get(DOMAIN) or {}
+        if not isinstance(base_domain, dict):
+            return 1
+        try:
+            my_home_id = self._parent.home_id
+        except Exception:  # noqa: BLE001 - entry may lack a home id
+            return 1
+        if my_home_id is None:
+            return 1
+        total = 0
+        for value in base_domain.values():
+            if not isinstance(value, dict) or "devices" not in value:
+                continue
+            devs = value.get("devices") or []
+            if not devs:
+                continue
+            first_dev = devs[0] or {}
+            power = first_dev.get("power")
+            if getattr(power, "home_id", None) == my_home_id:
+                total += len(devs)
+        return max(total, 1)
+
+    def _clustering_probe_reason(self) -> str | None:
+        """Return why the 0x49 probe is allowed here, or None when it is not.
+
+        ``master``: the backend named this device the master unit (the
+        originally shipped beta46 gate).
+
+        ``home_units``: HA sees two or more units sharing this ``home_id``
+        while the backend names no master at all. Parallel-capable homes in
+        that half-paired state still answer 0x49 on their real master, and
+        without the probe every unit stays at 0 W (#77).
+        """
+        try:
+            multi = self._parent.is_multi_unit
+            is_master = self._parent.is_master_device
+        except Exception:  # noqa: BLE001 - property access is best-effort
+            multi = False
+            is_master = False
+        if multi and is_master:
+            return "master"
+        try:
+            if self._home_unit_count() > 1:
+                return "home_units"
+        except Exception:  # noqa: BLE001 - diagnostics only
+            return None
+        return None
+
     def _merge_clustering_io_state(
         self, session: PersistentE2ESession, data: dict | None,
     ) -> dict | None:
@@ -1629,17 +1691,20 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         reading ``get_clustering_iostate`` (cmd 0x49) from the master instead.
         Probe it only when the 0x30 frame looks empty, at most every
         ``_CLUSTERING_PROBE_INTERVAL_S`` seconds, and never on single-unit
-        homes or non-master devices.
+        homes. The probe is allowed when the backend named this device the
+        master, or - since the backend often refuses to name one even on a
+        parallel home - when HA itself sees several units for this home.
 
         Only ``battery_w``, ``solar_w`` and ``soc`` are overlaid; the grid and
         load channels keep coming from 0x30.
         """
+        # Resolve the gate first so the reason is reported even on polls that
+        # carry no frame at all (that is exactly the case worth diagnosing).
+        reason = self._clustering_probe_reason()
+        self._clustering_gate_reason = reason
         if data is None:
             return data
-        try:
-            if not (self._parent.is_multi_unit and self._parent.is_master_device):
-                return data
-        except Exception:  # noqa: BLE001 - property access is best-effort
+        if reason is None:
             return data
         if data.get("battery_w") not in (0, None) or data.get("solar_w") not in (0, None):
             return data
@@ -1653,11 +1718,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         except Exception as err:  # noqa: BLE001 - never break the poll path
             self._clustering_diag = {
                 "result": "error", "error": str(err), "at": now,
+                "gate": reason,
+                "device_id": self._parent._device_id,  # noqa: SLF001
             }
             _LOGGER.debug("[#77] clustering iostate probe failed: %s", err)
             return data
         if flow is None:
-            self._clustering_diag = {"result": "empty", "at": now}
+            self._clustering_diag = {
+                "result": "empty", "at": now, "gate": reason,
+                "device_id": self._parent._device_id,  # noqa: SLF001
+            }
             return data
         merged = dict(data)
         merged["battery_w"] = flow["battery_w"]
@@ -1668,14 +1738,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._clustering_diag = {
             "result": "ok",
             "at": now,
+            "gate": reason,
+            "device_id": self._parent._device_id,  # noqa: SLF001
             "battery_w": flow["battery_w"],
             "solar_w": flow["solar_w"],
             "soc": flow["soc"],
             "bsensor_valid": flow["bsensor_valid"],
         }
         _LOGGER.debug(
-            "[#77] clustering overlay battery=%sW solar=%sW soc=%s%%",
-            flow["battery_w"], flow["solar_w"], flow["soc"],
+            "[#77] clustering overlay (%s) battery=%sW solar=%sW soc=%s%%",
+            reason, flow["battery_w"], flow["solar_w"], flow["soc"],
         )
         return merged
 

@@ -164,6 +164,10 @@ that a reading of exactly 0 W can be told apart from a channel the backend did n
 | `power_flow_solar_efficiency` | Reported PV efficiency (`0` unknown, `1` low, `2` normal, `3` high) |
 | `power_flow_thirdparty_pv_on` | Third-party PV routing is enabled on the device |
 | `power_flow_zero_channels` | Channels that came back as exactly 0 in the last frame — any of `battery`, `solar`, `grid`, `load` |
+| `power_flow_source` | `clustering` when battery/PV/SOC were overlaid from the master's clustering-iostate answer (parallel homes only) |
+| `power_flow_clustering` | The decoded clustering-iostate payload the overlay used |
+| `power_flow_clustering_gate` | Why the clustering probe is armed: `master` (backend named this device the master) or `home_units` (the integration sees more than one unit for the home); absent when the probe is disabled |
+| `power_flow_clustering_probe` | Outcome of the last clustering probe: `result` (`ok`, `empty`, `error`), `gate`, `device_id`, and the decoded values when it succeeded |
 
 A channel listed in `power_flow_zero_channels` while its matching `power_flow_*_valid` flag
 is `true` means the device has the sensor, but the backend did not fill that channel in the
@@ -206,9 +210,16 @@ sensor still counts the whole home: entries that share a `home_id` are summed.
 | `no_master` | The backend answered that this home has no master unit — the normal answer for a home that is not a multi-unit install |
 | `failed` | The lookup could not be completed; `parallel_master_lookup_error` holds the reason |
 
-**Known limitation:** in a multi-unit install the realtime power sensors can read 0 W, because
-the backend's aggregated ("global") power-flow frame does not carry the battery and solar
-channels for such a home. Energy totals are unaffected. This is tracked in
+**Known limitation:** on a multi-unit install the ordinary power-flow frame (0x30) reports the
+battery and solar channels as literal zeros, so the per-unit power sensors used to read 0 W.
+The integration now reads those two channels (and SOC) from the master unit with the same
+command the official app uses (`get_clustering_iostate`, 0x49), at most every 30 seconds and
+only while the ordinary frame still shows 0 W there. The probe runs when the backend named this
+device the master, or when the integration itself sees more than one unit for the home — the
+backend often refuses to name a master (`no_master`), especially on a half-paired home. Grid and
+load channels still come from 0x30. Check `power_flow_source`, `power_flow_clustering_gate` and
+`power_flow_clustering_probe` on the **Realtime connection** sensor to see whether the overlay
+applied. Tracked in
 [issue #77](https://github.com/wertigpar/ha-emaldo/issues/77).
 
 ### Schedule Sensors
@@ -937,7 +948,9 @@ Work through these in order:
   measurement. See [Power-flow validity attributes](#power-flow-validity-attributes).
 - If the channel is *not* listed, the reading is a real measurement of zero.
 - In a multi-unit ("parallel") install this is known backend behaviour — see
-  [Multi-unit (parallel) installations](#multi-unit-parallel-installations).
+  [Multi-unit (parallel) installations](#multi-unit-parallel-installations). Check
+  `power_flow_clustering_gate` (is the probe armed at all?) and `power_flow_clustering_probe`
+  (`result`: `ok` / `empty` / `error`, and `device_id`) to see whether the master answered.
 - Compare against the official app: if it shows a different value for the same moment, the two
   are reading different sources.
 
