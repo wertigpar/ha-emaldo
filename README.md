@@ -164,7 +164,7 @@ that a reading of exactly 0 W can be told apart from a channel the backend did n
 | `power_flow_solar_efficiency` | Reported PV efficiency (`0` unknown, `1` low, `2` normal, `3` high) |
 | `power_flow_thirdparty_pv_on` | Third-party PV routing is enabled on the device |
 | `power_flow_zero_channels` | Channels that came back as exactly 0 in the last frame — any of `battery`, `solar`, `grid`, `load` |
-| `power_flow_source` | `clustering` when battery/PV/SOC were overlaid from the master's clustering-iostate answer (parallel homes only) |
+| `power_flow_source` | `clustering` when battery/PV/grid/SOC of this poll came from a fresh master clustering-iostate read, `clustering_cached` when they were re-applied from the cached read (parallel homes only) |
 | `power_flow_clustering` | The decoded clustering-iostate payload the overlay used |
 | `power_flow_clustering_gate` | Why the clustering probe is armed: `master` (backend named this device the master) or `home_units` (the integration sees more than one unit for the home); absent when the probe is disabled |
 | `power_flow_clustering_probe` | Outcome of the last clustering probe: `result` (`ok`, `empty`, `error`), `gate`, `device_id`, and the decoded values when it succeeded |
@@ -212,12 +212,15 @@ sensor still counts the whole home: entries that share a `home_id` are summed.
 
 **Known limitation:** on a multi-unit install the ordinary power-flow frame (0x30) reports the
 battery and solar channels as literal zeros, so the per-unit power sensors used to read 0 W.
-The integration now reads those two channels (and SOC) from the master unit with the same
+The integration now reads those two channels plus grid and SOC from the master unit with the same
 command the official app uses (`get_clustering_iostate`, 0x49), at most every 30 seconds and
 only while the ordinary frame still shows 0 W there. The probe runs when the backend named this
 device the master, or when the integration itself sees more than one unit for the home — the
-backend often refuses to name a master (`no_master`), especially on a half-paired home. Grid and
-load channels still come from 0x30. Check `power_flow_source`, `power_flow_clustering_gate` and
+backend often refuses to name a master (`no_master`), especially on a half-paired home. Because
+the frame is polled far more often than the probe, the last answer is cached for 180 seconds and
+re-applied on the polls in between, otherwise the sensors would flap between the real value and
+0 W. Battery/PV/grid load channels come from the probe, the remaining loads still come from 0x30.
+Check `power_flow_source`, `power_flow_clustering_gate` and
 `power_flow_clustering_probe` on the **Realtime connection** sensor to see whether the overlay
 applied. Tracked in
 [issue #77](https://github.com/wertigpar/ha-emaldo/issues/77).

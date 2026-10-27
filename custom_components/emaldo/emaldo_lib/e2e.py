@@ -4206,6 +4206,14 @@ class PersistentE2ESession:
                     decrypted = self._decrypt_clustering_io_state(resp2)
                 if decrypted is None:
                     return None
+                if self._log:
+                    # Plaintext hex lets a user log calibrate the field offsets
+                    # and scales against the app (#77); the encrypted envelope
+                    # above is not enough for that.
+                    self._log(
+                        f"ClusteringIOState(0x49) payload ({len(decrypted)}B): "
+                        f"{decrypted[:96].hex()}"
+                    )
                 return parse_clustering_io_state(decrypted)
             finally:
                 try:

@@ -1,5 +1,31 @@
 # Changes
 
+## v1.0.0-beta48
+
+### Fixed
+
+- **Parallel-home power still flipped back to 0 W between probes.** beta47
+  proved the 0x49 clustering probe works (the master answers with real battery,
+  PV, grid and SOC values), but the overlay only lived for the single poll that
+  performed the read: the probe runs at most every 30 seconds while the realtime
+  frame updates every few seconds, so the next ordinary poll overwrote the
+  values with the placeholder zeros from 0x30. The last successful 0x49 answer
+  is now cached for 180 seconds and re-applied on every poll that still carries
+  placeholders, so the sensors hold their values between probes. The cache is
+  dropped as soon as 0x30 delivers real battery or PV power.
+- **Grid power on parallel homes stayed at 0 W.** The 0x49 answer carries the
+  grid channel too (external meter when present, otherwise inverter-to-grid and
+  grid-to-inverter), and it is now overlaid alongside battery and PV. On the
+  reporter's home the app showed ~5.8 kW import while HA reported 0 W.
+
+### Added
+
+- `power_flow_source` gains the value `clustering_cached` for polls served from
+  the cached 0x49 answer; `power_flow_clustering_probe` gains `grid_w`,
+  `applied` (`fresh`/`cached`) and `cached_polls`.
+- The 0x49 response payload is now logged in plaintext hex, so a user log can be
+  used to calibrate the field offsets and scales against the official app.
+
 ## v1.0.0-beta47
 
 ### Fixed

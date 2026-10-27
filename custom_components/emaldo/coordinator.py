@@ -871,6 +871,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._regulate_frequency: dict | None = None
         # Last master 0x49 clustering-iostate probe (#77 parallel homes).
         self._last_clustering_read_monotonic: float = 0.0
+        # Last successful 0x49 flow, reused while the 0x30 frame stays empty so
+        # the sensors do not flap back to 0 W between probes (#77).
+        self._clustering_overlay: tuple[dict, dict | None] | None = None
+        self._clustering_overlay_monotonic: float = 0.0
+        self._clustering_cached_polls: int = 0
         self._clustering_diag: dict = {}
         # Why the 0x49 probe is allowed on this device ("master" / "home_units")
         # or None when it is disabled. Exposed as a diagnostic attribute.
@@ -1620,6 +1625,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return self._merge_clustering_io_state(session, data)
 
     _CLUSTERING_PROBE_INTERVAL_S = 30.0
+    # A successful 0x49 read is reused for this long.  Must exceed the probe
+    # interval so a steady parallel home never falls back to the empty 0x30
+    # frame between probes, but stay short enough to notice a silent master.
+    _CLUSTERING_OVERLAY_TTL_S = 180.0
 
     def _home_unit_count(self) -> int:
         """Return how many units HA sees for this home across all entries.
@@ -1701,54 +1710,96 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Resolve the gate first so the reason is reported even on polls that
         # carry no frame at all (that is exactly the case worth diagnosing).
         reason = self._clustering_probe_reason()
+        if reason != self._clustering_gate_reason:
+            # Log only on change: the gate is polled every few seconds, but a
+            # user-supplied log must show whether beta47 is even running and
+            # why the probe is armed or not (#77).
+            _LOGGER.info(
+                "[#77] clustering probe gate=%s device=%s units=%s "
+                "multi_unit=%s master=%s",
+                reason, self._parent._device_id,  # noqa: SLF001
+                self._home_unit_count(),
+                getattr(self._parent, "is_multi_unit", None),
+                getattr(self._parent, "is_master_device", None),
+            )
         self._clustering_gate_reason = reason
         if data is None:
             return data
         if reason is None:
+            self._clustering_overlay = None
             return data
         if data.get("battery_w") not in (0, None) or data.get("solar_w") not in (0, None):
+            # The 0x30 frame carries real values, so it wins and any cached
+            # overlay is dropped: the home is no longer emitting placeholders.
+            self._clustering_overlay = None
             return data
+
         now = time.monotonic()
-        if now - self._last_clustering_read_monotonic < self._CLUSTERING_PROBE_INTERVAL_S:
-            return data
-        self._last_clustering_read_monotonic = now
-        try:
-            state = session.read_clustering_io_state()
-            flow = clustering_io_state_to_power_flow(state)
-        except Exception as err:  # noqa: BLE001 - never break the poll path
+        applied = "cached"
+        if self._clustering_overlay is not None and (
+            now - self._clustering_overlay_monotonic <= self._CLUSTERING_OVERLAY_TTL_S
+        ):
+            flow, state = self._clustering_overlay
+        elif now - self._last_clustering_read_monotonic >= self._CLUSTERING_PROBE_INTERVAL_S:
+            self._last_clustering_read_monotonic = now
+            try:
+                state = session.read_clustering_io_state()
+                flow = clustering_io_state_to_power_flow(state)
+            except Exception as err:  # noqa: BLE001 - never break the poll path
+                self._clustering_diag = {
+                    "result": "error", "error": str(err), "at": now,
+                    "gate": reason,
+                    "device_id": self._parent._device_id,  # noqa: SLF001
+                }
+                _LOGGER.debug("[#77] clustering iostate probe failed: %s", err)
+                return data
+            if flow is None:
+                self._clustering_diag = {
+                    "result": "empty", "at": now, "gate": reason,
+                    "device_id": self._parent._device_id,  # noqa: SLF001
+                }
+                return data
+            self._clustering_overlay = (flow, state)
+            self._clustering_overlay_monotonic = now
+            applied = "fresh"
+            self._clustering_cached_polls = 0
             self._clustering_diag = {
-                "result": "error", "error": str(err), "at": now,
+                "result": "ok",
+                "at": now,
                 "gate": reason,
                 "device_id": self._parent._device_id,  # noqa: SLF001
+                "battery_w": flow["battery_w"],
+                "solar_w": flow["solar_w"],
+                "grid_w": flow["grid_w"],
+                "soc": flow["soc"],
+                "bsensor_valid": flow["bsensor_valid"],
+                "applied": applied,
             }
-            _LOGGER.debug("[#77] clustering iostate probe failed: %s", err)
+            _LOGGER.debug(
+                "[#77] clustering overlay (%s) battery=%sW solar=%sW "
+                "grid=%sW soc=%s%%",
+                reason, flow["battery_w"], flow["solar_w"], flow["grid_w"],
+                flow["soc"],
+            )
+        else:
             return data
-        if flow is None:
-            self._clustering_diag = {
-                "result": "empty", "at": now, "gate": reason,
-                "device_id": self._parent._device_id,  # noqa: SLF001
-            }
-            return data
+
         merged = dict(data)
         merged["battery_w"] = flow["battery_w"]
         merged["solar_w"] = flow["solar_w"]
+        merged["grid_w"] = flow["grid_w"]
         merged["soc"] = flow["soc"]
-        merged["power_flow_source"] = "clustering"
-        merged["clustering_io_state"] = state
-        self._clustering_diag = {
-            "result": "ok",
-            "at": now,
-            "gate": reason,
-            "device_id": self._parent._device_id,  # noqa: SLF001
-            "battery_w": flow["battery_w"],
-            "solar_w": flow["solar_w"],
-            "soc": flow["soc"],
-            "bsensor_valid": flow["bsensor_valid"],
-        }
-        _LOGGER.debug(
-            "[#77] clustering overlay (%s) battery=%sW solar=%sW soc=%s%%",
-            reason, flow["battery_w"], flow["solar_w"], flow["soc"],
+        merged["power_flow_source"] = (
+            "clustering" if applied == "fresh" else "clustering_cached"
         )
+        merged["clustering_io_state"] = state
+        if applied == "cached" and self._clustering_diag:
+            self._clustering_cached_polls += 1
+            self._clustering_diag = {
+                **self._clustering_diag,
+                "cached_polls": self._clustering_cached_polls,
+                "applied": "cached",
+            }
         return merged
 
     def _accumulate_stream_stats(self, session: PersistentE2ESession) -> None:
