@@ -83,6 +83,13 @@ from .storm_state import stall_reset_needs_fresh_creds
 
 _LOGGER = logging.getLogger(__name__)
 
+# beta49 (#77): the 0x49 clustering reading describes the whole cluster, so all
+# config entries belonging to one home share a single cache. Exactly one unit
+# per home fills it each cycle; the others read it instead of sending their own
+# 0x49 probe (only the master answers, so a slave probe is pure stream traffic).
+# value: {"flow": dict, "state": dict | None, "flow_at": float, "device_id": str}
+_CLUSTERING_HOME_STATE: dict[str, dict] = {}
+
 
 class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Slow coordinator for REST battery/power data (60s)."""
@@ -1689,6 +1696,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return None
         return None
 
+    def _clustering_home_key(self) -> str:
+        """Key for the home-scoped 0x49 cache; falls back to the device id."""
+        try:
+            home_id = self._parent.home_id
+        except Exception:  # noqa: BLE001 - entry may lack a home id
+            home_id = None
+        if home_id:
+            return str(home_id)
+        return str(getattr(self._parent, "_device_id", "home"))
+
     def _merge_clustering_io_state(
         self, session: PersistentE2ESession, data: dict | None,
     ) -> dict | None:
@@ -1732,57 +1749,89 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # The 0x30 frame carries real values, so it wins and any cached
             # overlay is dropped: the home is no longer emitting placeholders.
             self._clustering_overlay = None
+            _CLUSTERING_HOME_STATE.pop(self._clustering_home_key(), None)
             return data
 
         now = time.monotonic()
-        applied = "cached"
-        if self._clustering_overlay is not None and (
-            now - self._clustering_overlay_monotonic <= self._CLUSTERING_OVERLAY_TTL_S
+        device_id = self._parent._device_id  # noqa: SLF001
+        shared = _CLUSTERING_HOME_STATE.setdefault(self._clustering_home_key(), {})
+        leader = shared.get("device_id")
+        flow = shared.get("flow")
+        state = shared.get("state")
+        flow_at = shared.get("flow_at", 0.0)
+        cache_fresh = (
+            flow is not None
+            and now - flow_at <= self._CLUSTERING_OVERLAY_TTL_S
+        )
+        applied = "cached" if cache_fresh else None
+        # One prober per home: whoever filled a still-valid cache keeps
+        # refreshing it; everyone else just reads it. When the cache expires
+        # any unit may probe, so an offline master never wedges the home.
+        may_probe = cache_fresh is False or leader is None or leader == device_id
+        if may_probe and (
+            now - self._last_clustering_read_monotonic >= self._CLUSTERING_PROBE_INTERVAL_S
         ):
-            flow, state = self._clustering_overlay
-        elif now - self._last_clustering_read_monotonic >= self._CLUSTERING_PROBE_INTERVAL_S:
             self._last_clustering_read_monotonic = now
+            probed_flow = None
+            probed_state = None
             try:
-                state = session.read_clustering_io_state()
-                flow = clustering_io_state_to_power_flow(state)
+                probed_state = session.read_clustering_io_state()
+                if probed_state is not None:
+                    probed_flow = clustering_io_state_to_power_flow(probed_state)
             except Exception as err:  # noqa: BLE001 - never break the poll path
                 self._clustering_diag = {
                     "result": "error", "error": str(err), "at": now,
-                    "gate": reason,
-                    "device_id": self._parent._device_id,  # noqa: SLF001
+                    "gate": reason, "device_id": device_id, "leader": leader,
+                    "applied": "cached" if cache_fresh else None,
                 }
                 _LOGGER.debug("[#77] clustering iostate probe failed: %s", err)
-                return data
-            if flow is None:
+                if not cache_fresh:
+                    return data
+                applied = "cached"
+            if probed_flow is not None:
+                flow, state, flow_at = probed_flow, probed_state, now
+                leader = device_id
+                shared.update({
+                    "flow": flow,
+                    "state": state,
+                    "flow_at": now,
+                    "device_id": device_id,
+                })
+                applied = "fresh"
+                self._clustering_cached_polls = 0
+                self._clustering_diag = {
+                    "result": "ok",
+                    "at": now,
+                    "gate": reason,
+                    "device_id": device_id,
+                    "leader": device_id,
+                    "battery_w": flow["battery_w"],
+                    "solar_w": flow["solar_w"],
+                    "grid_w": flow["grid_w"],
+                    "soc": flow["soc"],
+                    "bsensor_valid": flow["bsensor_valid"],
+                    "applied": applied,
+                }
+                _LOGGER.debug(
+                    "[#77] clustering overlay (%s) battery=%sW solar=%sW "
+                    "grid=%sW soc=%s%%",
+                    reason, flow["battery_w"], flow["solar_w"], flow["grid_w"],
+                    flow["soc"],
+                )
+            elif probed_state is None and not cache_fresh:
                 self._clustering_diag = {
                     "result": "empty", "at": now, "gate": reason,
-                    "device_id": self._parent._device_id,  # noqa: SLF001
+                    "device_id": device_id, "leader": leader,
                 }
                 return data
-            self._clustering_overlay = (flow, state)
-            self._clustering_overlay_monotonic = now
-            applied = "fresh"
-            self._clustering_cached_polls = 0
-            self._clustering_diag = {
-                "result": "ok",
-                "at": now,
-                "gate": reason,
-                "device_id": self._parent._device_id,  # noqa: SLF001
-                "battery_w": flow["battery_w"],
-                "solar_w": flow["solar_w"],
-                "grid_w": flow["grid_w"],
-                "soc": flow["soc"],
-                "bsensor_valid": flow["bsensor_valid"],
-                "applied": applied,
-            }
-            _LOGGER.debug(
-                "[#77] clustering overlay (%s) battery=%sW solar=%sW "
-                "grid=%sW soc=%s%%",
-                reason, flow["battery_w"], flow["solar_w"], flow["grid_w"],
-                flow["soc"],
-            )
-        else:
+            elif not cache_fresh:
+                # Probe errored with nothing cached: nothing to publish.
+                return data
+
+        if flow is None:
             return data
+        self._clustering_overlay = (flow, state)
+        self._clustering_overlay_monotonic = flow_at
 
         merged = dict(data)
         merged["battery_w"] = flow["battery_w"]
@@ -1793,12 +1842,22 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "clustering" if applied == "fresh" else "clustering_cached"
         )
         merged["clustering_io_state"] = state
-        if applied == "cached" and self._clustering_diag:
+        if applied == "cached":
             self._clustering_cached_polls += 1
             self._clustering_diag = {
                 **self._clustering_diag,
-                "cached_polls": self._clustering_cached_polls,
+                "result": self._clustering_diag.get("result", "cached"),
+                "at": flow_at,
+                "gate": reason,
+                "device_id": device_id,
+                "leader": leader,
+                "battery_w": flow["battery_w"],
+                "solar_w": flow["solar_w"],
+                "grid_w": flow["grid_w"],
+                "soc": flow["soc"],
+                "bsensor_valid": flow["bsensor_valid"],
                 "applied": "cached",
+                "cached_polls": self._clustering_cached_polls,
             }
         return merged
 

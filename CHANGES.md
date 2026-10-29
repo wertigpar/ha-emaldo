@@ -1,5 +1,31 @@
 # Changes
 
+## v1.0.0-beta49
+
+### Fixed
+
+- **The second unit of a parallel home kept reporting 0 W.** The 0x49 clustering
+  reading covers the whole cluster, but every unit ran its own probe and only the
+  master answers: on the reporter's home one unit held 1 W while the other stayed
+  at 0 W for the entire log. The reading is now cached per `home_id` and shared by
+  every unit of that home, so both units publish the same cluster values.
+- **Only one unit per home probes.** The unit that filled the cache keeps
+  refreshing it; the other units read the cache instead of sending probes that
+  cannot be answered (on the reporter's Home Assistant, four out of five probes
+  returned unrelated 178-212 byte frames because only the master replies). When
+  the cache expires any unit may probe, so an offline master does not wedge the
+  home.
+- **Values no longer freeze for up to three minutes.** The probe now refreshes the
+  reading every 30 seconds while the cache is still valid; before, a valid cache
+  short-circuited the probe, so the sensors showed the same values until the
+  180 s cache expired. A failed refresh keeps serving the previous reading instead
+  of falling back to the placeholder zeros.
+
+### Added
+
+- `power_flow_clustering_probe` gains `leader`, the device id that produced the
+  shared reading, making it visible which unit is doing the probing.
+
 ## v1.0.0-beta48
 
 ### Fixed

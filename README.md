@@ -167,7 +167,7 @@ that a reading of exactly 0 W can be told apart from a channel the backend did n
 | `power_flow_source` | `clustering` when battery/PV/grid/SOC of this poll came from a fresh master clustering-iostate read, `clustering_cached` when they were re-applied from the cached read (parallel homes only) |
 | `power_flow_clustering` | The decoded clustering-iostate payload the overlay used |
 | `power_flow_clustering_gate` | Why the clustering probe is armed: `master` (backend named this device the master) or `home_units` (the integration sees more than one unit for the home); absent when the probe is disabled |
-| `power_flow_clustering_probe` | Outcome of the last clustering probe: `result` (`ok`, `empty`, `error`), `gate`, `device_id`, and the decoded values when it succeeded |
+| `power_flow_clustering_probe` | Outcome of the last clustering probe: `result` (`ok`, `empty`, `error`), `gate`, `device_id`, `leader` (the unit that produced the shared reading) and the decoded values when it succeeded |
 
 A channel listed in `power_flow_zero_channels` while its matching `power_flow_*_valid` flag
 is `true` means the device has the sensor, but the backend did not fill that channel in the
@@ -216,13 +216,14 @@ The integration now reads those two channels plus grid and SOC from the master u
 command the official app uses (`get_clustering_iostate`, 0x49), at most every 30 seconds and
 only while the ordinary frame still shows 0 W there. The probe runs when the backend named this
 device the master, or when the integration itself sees more than one unit for the home — the
-backend often refuses to name a master (`no_master`), especially on a half-paired home. Because
-the frame is polled far more often than the probe, the last answer is cached for 180 seconds and
-re-applied on the polls in between, otherwise the sensors would flap between the real value and
-0 W. Battery/PV/grid load channels come from the probe, the remaining loads still come from 0x30.
-Check `power_flow_source`, `power_flow_clustering_gate` and
+backend often refuses to name a master (`no_master`), especially on a half-paired home. Only one
+unit per home probes: the reading is cached per home and shared, because only the master answers
+0x49 and a slave's probe comes back as an unrelated frame. The cached answer is refreshed every
+30 seconds and kept for 180 seconds, so a failed refresh keeps showing the previous reading
+instead of falling back to 0 W. Battery/PV/grid and SOC come from the probe, the remaining loads
+still come from 0x30. Check `power_flow_source`, `power_flow_clustering_gate` and
 `power_flow_clustering_probe` on the **Realtime connection** sensor to see whether the overlay
-applied. Tracked in
+applied and which unit is leading. Tracked in
 [issue #77](https://github.com/wertigpar/ha-emaldo/issues/77).
 
 ### Schedule Sensors
@@ -953,7 +954,8 @@ Work through these in order:
 - In a multi-unit ("parallel") install this is known backend behaviour — see
   [Multi-unit (parallel) installations](#multi-unit-parallel-installations). Check
   `power_flow_clustering_gate` (is the probe armed at all?) and `power_flow_clustering_probe`
-  (`result`: `ok` / `empty` / `error`, and `device_id`) to see whether the master answered.
+  (`result`: `ok` / `empty` / `error`, `device_id` and `leader`) to see whether the master
+  answered and which unit probed.
 - Compare against the official app: if it shows a different value for the same moment, the two
   are reading different sources.
 
