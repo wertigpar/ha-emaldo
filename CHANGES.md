@@ -20,6 +20,17 @@
   short-circuited the probe, so the sensors showed the same values until the
   180 s cache expired. A failed refresh keeps serving the previous reading instead
   of falling back to the placeholder zeros.
+- **The Emergency charge switch stayed on after the charge stopped.** The session
+  was tracked with a bare optimistic boolean: nothing expired it, so once the
+  window end passed the battery stopped charging but Home Assistant kept showing
+  `on` until the switch was toggled by hand. The absolute window sent with the ON
+  command is now retained and evaluated, and the switch turns itself off when the
+  end time passes (or stays off while a queued window has not started yet), which
+  matches what the Emaldo app displays. The armed window is also persisted, so a
+  Home Assistant restart in the middle of a session keeps the switch `on` (a
+  window that ended during the downtime is dropped instead of being restored).
+  The protocol has no read-back for this session, so a session started or
+  cancelled from the app is still not visible.
 
 ### Added
 

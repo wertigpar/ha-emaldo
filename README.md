@@ -291,7 +291,7 @@ The sensor uses `device_class: enum`. It is best-effort — if the E2E connectio
 | **Sell Limit threshold** | Number | Daily export limit in kWh/day (1–300). Only effective when Sell Limit is ON |
 | **Manual selling** | Switch | Starts direct grid-export via E2E; ON = start, OFF = stop (E2E opcode 0x80) |
 | **Manual selling target** | Number | Total kWh to sell before auto-stopping (1–100 kWh). Configure before enabling |
-| **Emergency charge** | Switch | Starts a force-charge session for the configured time window; turn off to cancel |
+| **Emergency charge** | Switch | Starts a force-charge session for the configured time window; turns itself off when the window end passes, and can be turned off to cancel early |
 | **Emergency charge start** | Time | Window start time. If unset when the switch is turned on, defaults to now |
 | **Emergency charge end** | Time | Window end time. If unset when the switch is turned on, defaults to start + 1 hour |
 | **AI Battery Range override** | Switch | When ON, AI is constrained to the Smart/Emergency reserve band |
@@ -316,6 +316,8 @@ Emergency charge forces the battery to charge from the grid during a specific ti
 The integration sends the start/end Unix timestamps directly to the battery. The official app restricts the inputs to full hours; this integration accepts any minute-level precision.
 
 To cancel an active session, turn the switch off.
+
+The switch follows the session it started: once the end time passes the battery stops charging and the switch turns itself off, the same way the Emaldo app shows it. The armed window is stored on disk, so a Home Assistant restart in the middle of a session keeps the switch on (a window that ended while Home Assistant was down is dropped). There is no read-back command for this session in the device protocol, so a session started or cancelled from the app is not reflected by the switch.
 
 **Automation example** — pre-charge every night at 02:00 until 05:00:
 

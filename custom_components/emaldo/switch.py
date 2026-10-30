@@ -457,9 +457,20 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
             self.coordinator._write_emergency_charge_on,  # noqa: SLF001
             start_unix, end_unix,
         )
+        await self.coordinator._save_emergency_charge_cache()  # noqa: SLF001
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
-            updated["emergency_charge_active"] = True
+            # The window may start in the future; report what the session
+            # really is instead of an unconditional "on" (#79).
+            updated["emergency_charge_active"] = (
+                self.coordinator.emergency_charge_active_now()
+            )
+            updated["emergency_charge_start_unix"] = (
+                self.coordinator._emergency_charge_start_unix  # noqa: SLF001
+            )
+            updated["emergency_charge_end_unix"] = (
+                self.coordinator._emergency_charge_end_unix  # noqa: SLF001
+            )
             self.coordinator.async_set_updated_data(updated)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -467,9 +478,12 @@ class EmaldoEmergencyChargeSwitch(CoordinatorEntity[EmaldoCoordinator], SwitchEn
         await self.hass.async_add_executor_job(
             self.coordinator._write_emergency_charge_off  # noqa: SLF001
         )
+        await self.coordinator._save_emergency_charge_cache()  # noqa: SLF001
         if self.coordinator.data is not None:
             updated = dict(self.coordinator.data)
             updated["emergency_charge_active"] = False
+            updated["emergency_charge_start_unix"] = None
+            updated["emergency_charge_end_unix"] = None
             self.coordinator.async_set_updated_data(updated)
 
 

@@ -123,6 +123,17 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._emergency_charge_active: bool = False
         self._emergency_charge_start_t: object = None  # datetime.time | None
         self._emergency_charge_end_t: object = None    # datetime.time | None
+        # Absolute window sent with the last ON command (unix seconds).  The
+        # device stops charging on its own at ``end``, so the switch state has
+        # to expire locally - there is no read-back command for it (#79).
+        self._emergency_charge_start_unix: int | None = None
+        self._emergency_charge_end_unix: int | None = None
+        # Persisted so a restart in the middle of a session keeps the switch
+        # on (and an expired window is dropped at startup).
+        self._emergency_store: Store = Store(
+            hass, 1, f"emaldo_emergency_charge_{entry.entry_id}"
+        )
+        self._emergency_cache_loaded: bool = False
         self._ev_poll_counter: int = 0
         # Facility ID (GSRN) numbers from the balance-contract info — fetched
         # exactly once at integration start (values are static once registered;
@@ -457,6 +468,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await self._save_contract_cache()
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Balance contract fetch failed: %s", err)
+        # Emergency charge window — one-shot restore at integration start so
+        # a restart in the middle of a session keeps the switch on (#79).
+        if not self._emergency_cache_loaded:
+            self._emergency_cache_loaded = True
+            await self._load_emergency_charge_cache()
         dp_ok = (
             battery.get("dual_power") is not None
             or power.get("dual_power") is not None
@@ -496,9 +512,11 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "power": power,
             "solar": solar,
             "ev": ev,
-            "emergency_charge_active": self._emergency_charge_active,
+            "emergency_charge_active": self.emergency_charge_active_now(),
             "emergency_charge_start_t": self._emergency_charge_start_t,
             "emergency_charge_end_t": self._emergency_charge_end_t,
+            "emergency_charge_start_unix": self._emergency_charge_start_unix,
+            "emergency_charge_end_unix": self._emergency_charge_end_unix,
             "contract": self._contract,
         }
 
@@ -523,6 +541,53 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._contract_store.async_save(self._contract)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Facility-ID cache save failed: %s", err)
+
+    async def _load_emergency_charge_cache(self) -> None:
+        """Restore the armed emergency-charge window after a restart."""
+        import time as _time
+        try:
+            stored = await self._emergency_store.async_load()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Emergency-charge cache load failed: %s", err)
+            return
+        if not isinstance(stored, dict):
+            return
+        start_unix = stored.get("start_unix")
+        end_unix = stored.get("end_unix")
+        if not isinstance(end_unix, int):
+            return
+        if end_unix < int(_time.time()):
+            _LOGGER.debug(
+                "[EmergencyCharge] stored window already ended at %d, dropped",
+                end_unix,
+            )
+            return
+        self._emergency_charge_active = True
+        self._emergency_charge_start_unix = (
+            start_unix if isinstance(start_unix, int) else None
+        )
+        self._emergency_charge_end_unix = end_unix
+        _LOGGER.debug(
+            "[EmergencyCharge] session restored start=%s end=%d",
+            self._emergency_charge_start_unix,
+            end_unix,
+        )
+
+    async def _save_emergency_charge_cache(self) -> None:
+        """Persist the armed window, or clear it when no session is armed."""
+        payload: dict[str, int | None] = {}
+        if (
+            self._emergency_charge_active
+            and self._emergency_charge_end_unix is not None
+        ):
+            payload = {
+                "start_unix": self._emergency_charge_start_unix,
+                "end_unix": self._emergency_charge_end_unix,
+            }
+        try:
+            await self._emergency_store.async_save(payload)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Emergency-charge cache save failed: %s", err)
 
     def _read_ev_state(self) -> dict | None:
         """Read EV charging mode (wire 0x20) and schedule (wire 0x21).
@@ -601,6 +666,30 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if mode in (EV_MODE_INSTANT_FULL, EV_MODE_INSTANT_FIXED):
             return set_ev_charging_mode_instant(creds, mode, fixed_kwh=fixed_kwh)
         raise ValueError(f"Unknown EV mode: {mode}")
+
+    def emergency_charge_active_now(self, now: float | None = None) -> bool:
+        """Return True while an emergency charge session is really running.
+
+        The device stops charging by itself when the window sent with the ON
+        command expires, but it exposes no read-back for that session, so the
+        window has to be evaluated locally.  Mirrors the Emaldo app, which
+        treats the session as active only while ``on`` is set *and* the
+        current time is inside ``startTime`` .. ``endTime``.  Without a known
+        window the optimistic boolean is returned unchanged.
+
+        ``now`` is an injectable unix timestamp (tests only).
+        """
+        import time as _time
+        if not self._emergency_charge_active:
+            return False
+        end_unix = self._emergency_charge_end_unix
+        if end_unix is None:
+            return True
+        current = _time.time() if now is None else now
+        start_unix = self._emergency_charge_start_unix
+        if start_unix is not None and current < start_unix:
+            return False
+        return current <= end_unix
 
     def _send_emergency_charge_via_stream(
         self, payload: bytes, label: str,
@@ -693,6 +782,12 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Emergency charge ON rejected by relay"
                     )
                 self._emergency_charge_active = True
+                self._emergency_charge_start_unix = start_unix
+                self._emergency_charge_end_unix = end_unix
+                _LOGGER.debug(
+                    "[EmergencyCharge] session window armed start=%d end=%d",
+                    start_unix, end_unix,
+                )
                 return
             except EmaldoE2ESessionExpired:
                 self._close_realtime_session()
@@ -735,6 +830,8 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Emergency charge OFF rejected by relay"
                     )
                 self._emergency_charge_active = False
+                self._emergency_charge_start_unix = None
+                self._emergency_charge_end_unix = None
                 return
             except EmaldoE2ESessionExpired:
                 self._close_realtime_session()
