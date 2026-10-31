@@ -11,9 +11,20 @@
   issue). The frame is internally consistent only in watts — the addition load
   field equals battery plus grid exactly (4600 = 2900 + 1700), and the 0x30
   `op2` field for the same minutes carries the same magnitudes (1670-3437) while
-  being treated as raw watts. The SoC drop confirms it as well: 36 -> 34 % over
-  ~5.5 minutes at ~2.6 kW is ~236 Wh, which matches two 6 kWh units. The values
-  are now published unscaled.
+  being treated as raw watts. The SoC drop rules out the old scale as well:
+  36 -> 34 % over ~5.5 minutes is hundreds of Wh on units of ~10 kWh each,
+  which needs an output in the kilowatt range, not the tens of watts the
+  centi-watt reading gave. The values are now published unscaled.
+
+### Known issues
+
+- **Grid power still reads 0 W on parallel homes.** The grid meter fields of the
+  0x49 frame are almost always 0 even while the grid is importing (one probe in
+  the reporter's logs carried a real 1700 W import, the other 23 did not), and
+  the 0x30 frame has no grid value on these homes. The source of the app's grid
+  figure is not known yet. Also, both units publish the same shared cluster
+  reading, so summing the two units' power sensors double-counts. Tracked in
+  [issue #77](https://github.com/wertigpar/ha-emaldo/issues/77).
 
 ## v1.0.0-beta49
 
