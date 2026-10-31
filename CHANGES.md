@@ -1,5 +1,20 @@
 # Changes
 
+## v1.0.0-beta50
+
+### Fixed
+
+- **Battery, solar and grid power were 100x too small on parallel homes.** The
+  0x49 clustering frame was decoded as centi-watts and divided by 100, but the
+  hardware sends whole watts: the reporter's log shows the cluster reporting a
+  2900 W discharge while Home Assistant showed 29 W (the "23 W vs 1700 W" in the
+  issue). The frame is internally consistent only in watts — the addition load
+  field equals battery plus grid exactly (4600 = 2900 + 1700), and the 0x30
+  `op2` field for the same minutes carries the same magnitudes (1670-3437) while
+  being treated as raw watts. The SoC drop confirms it as well: 36 -> 34 % over
+  ~5.5 minutes at ~2.6 kW is ~236 Wh, which matches two 6 kWh units. The values
+  are now published unscaled.
+
 ## v1.0.0-beta49
 
 ### Fixed

@@ -1201,7 +1201,7 @@ CLUSTERING_IO_STATE_MIN_LEN = 73
 def _is_clustering_io_state_payload(payload: bytes) -> bool:
     """Validate a decrypted 0x49 ``get_clustering_iostate`` payload.
 
-    Frames are at least 73 bytes of little-endian 32-bit centi-watt values,
+    Frames are at least 73 bytes of little-endian 32-bit whole-watt values,
     so the 16-bit reasonability guard used for 0x30 does not apply.  Only the
     length and the two boolean flags are checked, which is enough to keep the
     decrypt search from accepting unrelated relay frames.
@@ -1220,7 +1220,7 @@ def parse_clustering_io_state(payload: bytes) -> dict | None:
 
     On a parallel home the official app reads realtime battery/solar from the
     master via ``get_clustering_iostate`` (0x49) instead of 0x30.  Layout is
-    little-endian, centi-watts for powers:
+    little-endian, whole watts for powers:
 
     ======  ====  =========================  ==============================
     Offset  Size  Field                      Description
@@ -1290,7 +1290,11 @@ def clustering_io_state_to_power_flow(state: dict | None) -> dict | None:
 
     Sign convention is identical to :func:`parse_power_flow` and to the HA
     sensors: battery positive = discharging, grid positive = importing, solar
-    positive.  Wire values are centi-watts, converted to watts here.
+    positive.
+
+    Unlike ``0x30`` (hectowatts), the ``0x49`` clustering frame carries whole
+    watts, so the values are passed through unscaled (#77: dividing by 100 made
+    a 2.9 kW discharge read as 29 W).
     """
     if not state:
         return None
@@ -1302,9 +1306,9 @@ def clustering_io_state_to_power_flow(state: dict | None) -> dict | None:
         grid = state["grid_to_inverter_power"] - state["inverter_to_grid_power"]
 
     return {
-        "battery_w": int(round(battery / 100.0)),
-        "solar_w": int(round(state["mppt_generating_power"] / 100.0)),
-        "grid_w": int(round(grid / 100.0)),
+        "battery_w": int(battery),
+        "solar_w": int(state["mppt_generating_power"]),
+        "grid_w": int(grid),
         "soc": state["soc"],
         "grid_valid": bool(state.get("on_grid")),
         "bsensor_valid": bool(state.get("bsensor_plugged_in")),
