@@ -1,5 +1,42 @@
 # Changes
 
+## v1.0.0-beta52
+
+### Fixed
+
+- **Grid power read 0 W for the whole discharge window on a multi-unit installation**
+  ([#77](https://github.com/wertigpar/ha-emaldo/issues/77)). The 0x49
+  clustering overlay replaced the grid value of the 0x30 frame unconditionally.
+  On the reporter's home the meter reports `bsensor_plugged_in = 1` with both
+  meter powers at literal zero, so the overlay wrote a "measured" 0 W over a
+  real grid reading (beta51 log: 175 discharge samples, all grid 0 W). The
+  overlay now keeps the 0x30 grid value whenever the 0x49 sample carries no
+  usable grid measurement; battery, solar and SoC are still overlaid. The
+  probe debug line and `clustering_diag` mark such samples with
+  `(meter silent)` / `grid_applied: false` so a user log shows which source won.
+
+### Changed
+
+- **Terminology.** This and the README now say "multi-unit installation" (or the
+  vendor's own "parallel mode") for several linked units in one home, and
+  "parallel units" for the devices themselves. "Parallel home" was wrong: it
+  would mean two separate homes. Both units of the reporter's installation share
+  one backend `home_id`, so it is one home with two parallel units.
+- **Correction to the beta51 notes.** They said the 0x30 frame carries no grid
+  value on multi-unit installations. The beta48 log disproves that: its pre-overlay rows
+  show the master's 0x30 frame reporting 2500 -> 2700 W of grid while the
+  cluster was discharging. The grid data was there; the overlay was hiding it.
+
+### Known issues
+
+- **Still unproven for long discharges.** The fix restores whatever the 0x30
+  frame reports. If a unit's 0x30 frame really does send `grid_w = 0` for a
+  sustained discharge (the raw `grid_valid` byte was 0 in every capture so far),
+  the reading will stay 0 W and the grid source needs a new approach. Reporter
+  verification is pending.
+- Both units still publish the same shared cluster reading, so summing the two
+  units' power sensors double-counts.
+
 ## v1.0.0-beta51
 
 ### Changed

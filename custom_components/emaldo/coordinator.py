@@ -1818,8 +1818,11 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         master, or - since the backend often refuses to name one even on a
         parallel home - when HA itself sees several units for this home.
 
-        Only ``battery_w``, ``solar_w`` and ``soc`` are overlaid; the grid and
-        load channels keep coming from 0x30.
+        ``battery_w``, ``solar_w`` and ``soc`` are always overlaid. ``grid_w``
+        is overlaid only when the 0x49 sample carries a real grid measurement
+        (a meter reading, or the inverter flow when no meter is fitted): a
+        plugged-in meter that reports 0 W / 0 W would otherwise erase the live
+        grid value from 0x30 (#77).
         """
         # Resolve the gate first so the reason is reported even on polls that
         # carry no frame at all (that is exactly the case worth diagnosing).
@@ -1905,14 +1908,16 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     "battery_w": flow["battery_w"],
                     "solar_w": flow["solar_w"],
                     "grid_w": flow["grid_w"],
+                    "grid_applied": bool(flow.get("grid_measured", True)),
                     "soc": flow["soc"],
                     "bsensor_valid": flow["bsensor_valid"],
                     "applied": applied,
                 }
                 _LOGGER.debug(
                     "[#77] clustering overlay (%s) battery=%sW solar=%sW "
-                    "grid=%sW soc=%s%%",
+                    "grid=%sW%s soc=%s%%",
                     reason, flow["battery_w"], flow["solar_w"], flow["grid_w"],
+                    "" if flow.get("grid_measured", True) else " (meter silent)",
                     flow["soc"],
                 )
             elif probed_state is None and not cache_fresh:
@@ -1933,7 +1938,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         merged = dict(data)
         merged["battery_w"] = flow["battery_w"]
         merged["solar_w"] = flow["solar_w"]
-        merged["grid_w"] = flow["grid_w"]
+        # The 0x49 grid value is only usable when it is a real measurement.
+        # A plugged-in meter that reads 0 W / 0 W says nothing about the grid,
+        # and overwriting the 0x30 value there erased a live grid reading for
+        # the whole discharge window (#77).
+        grid_applied = bool(flow.get("grid_measured", True))
+        if grid_applied:
+            merged["grid_w"] = flow["grid_w"]
         merged["soc"] = flow["soc"]
         merged["power_flow_source"] = (
             "clustering" if applied == "fresh" else "clustering_cached"
@@ -1951,6 +1962,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 "battery_w": flow["battery_w"],
                 "solar_w": flow["solar_w"],
                 "grid_w": flow["grid_w"],
+                "grid_applied": grid_applied,
                 "soc": flow["soc"],
                 "bsensor_valid": flow["bsensor_valid"],
                 "applied": "cached",

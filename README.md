@@ -164,7 +164,7 @@ that a reading of exactly 0 W can be told apart from a channel the backend did n
 | `power_flow_solar_efficiency` | Reported PV efficiency (`0` unknown, `1` low, `2` normal, `3` high) |
 | `power_flow_thirdparty_pv_on` | Third-party PV routing is enabled on the device |
 | `power_flow_zero_channels` | Channels that came back as exactly 0 in the last frame — any of `battery`, `solar`, `grid`, `load` |
-| `power_flow_source` | `clustering` when battery/PV/grid/SOC of this poll came from a fresh master clustering-iostate read, `clustering_cached` when they were re-applied from the cached read (parallel homes only) |
+| `power_flow_source` | `clustering` when battery/PV/grid/SOC of this poll came from a fresh master clustering-iostate read, `clustering_cached` when they were re-applied from the cached read (multi-unit installations only) |
 | `power_flow_clustering` | The decoded clustering-iostate payload the overlay used |
 | `power_flow_clustering_gate` | Why the clustering probe is armed: `master` (backend named this device the master) or `home_units` (the integration sees more than one unit for the home); absent when the probe is disabled |
 | `power_flow_clustering_probe` | Outcome of the last clustering probe: `result` (`ok`, `empty`, `error`), `gate`, `device_id`, `leader` (the unit that produced the shared reading) and the decoded values when it succeeded |
@@ -197,7 +197,7 @@ count, when it reports one), `parallel_master_device_id`, `parallel_master_devic
 (home-level dual-power state), `parallel_is_master_device`, and
 `parallel_master_lookup_status`.
 
-If a parallel home is configured as several config entries, one Power Store per entry, the
+If a multi-unit installation is configured as several config entries, one Power Store per entry, the
 sensor still counts the whole home: entries that share a `home_id` are summed.
 `parallel_entry_unit_count` shows the share managed by this entry.
 

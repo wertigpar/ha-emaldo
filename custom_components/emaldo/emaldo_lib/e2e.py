@@ -1301,14 +1301,22 @@ def clustering_io_state_to_power_flow(state: dict | None) -> dict | None:
 
     battery = state["battery_discharging_power"] - state["battery_charging_power"]
     if state.get("bsensor_plugged_in"):
-        grid = state["bsensor_power_indoor"] - state["bsensor_power_outdoor"]
+        indoor = state.get("bsensor_power_indoor") or 0
+        outdoor = state.get("bsensor_power_outdoor") or 0
+        grid = indoor - outdoor
+        # A plugged-in meter that reports 0 W / 0 W is not evidence of a 0 W
+        # grid exchange (observed on a live parallel home while discharging,
+        # #77): mark the value unusable so the caller keeps the 0x30 reading.
+        grid_measured = bool(indoor or outdoor)
     else:
         grid = state["grid_to_inverter_power"] - state["inverter_to_grid_power"]
+        grid_measured = True
 
     return {
         "battery_w": int(battery),
         "solar_w": int(state["mppt_generating_power"]),
         "grid_w": int(grid),
+        "grid_measured": grid_measured,
         "soc": state["soc"],
         "grid_valid": bool(state.get("on_grid")),
         "bsensor_valid": bool(state.get("bsensor_plugged_in")),
