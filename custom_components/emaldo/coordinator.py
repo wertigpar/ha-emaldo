@@ -1,8 +1,8 @@
 """DataUpdateCoordinators for Emaldo.
 
 Two coordinators:
-* :class:`EmaldoCoordinator` — slow REST + battery details (60s interval)
-* :class:`EmaldoRealtimeCoordinator` — fast E2E power flow via a persistent
+* :class:`EmaldoCoordinator` â€” slow REST + battery details (60s interval)
+* :class:`EmaldoRealtimeCoordinator` â€” fast E2E power flow via a persistent
   UDP session (10s interval).
 """
 
@@ -135,7 +135,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._emergency_cache_loaded: bool = False
         self._ev_poll_counter: int = 0
-        # Facility ID (GSRN) numbers from the balance-contract info — fetched
+        # Facility ID (GSRN) numbers from the balance-contract info â€” fetched
         # exactly once at integration start (values are static once registered;
         # no per-poll API load). On a failed fetch (e.g. internet outage at
         # startup) fall back to the last-known values persisted via a Store.
@@ -355,11 +355,26 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 client = await self.hass.async_add_executor_job(self._ensure_client)
                 await self._async_persist_device_binding()
+                # Master unit of a multi-unit home: read home-aggregated
+                # daily stats (/bmt/master/stats/...), as the official app does.
+                agg = self.is_multi_unit and self.is_master_device
                 battery = await self.hass.async_add_executor_job(
-                    client.get_battery, self.home_id, self._device_id, self._model
+                    functools.partial(
+                        client.get_battery,
+                        self.home_id,
+                        self._device_id,
+                        self._model,
+                        master=agg,
+                    )
                 )
                 power = await self.hass.async_add_executor_job(
-                    client.get_power, self.home_id, self._device_id, self._model
+                    functools.partial(
+                        client.get_power,
+                        self.home_id,
+                        self._device_id,
+                        self._model,
+                        master=agg,
+                    )
                 )
                 break
             except EmaldoAuthError:
@@ -417,7 +432,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             self._home_dual_power_open = None
 
-        # Solar MPPT stats — best-effort, not all devices have solar
+        # Solar MPPT stats â€” best-effort, not all devices have solar
         solar = None
         try:
             solar = await self.hass.async_add_executor_job(
@@ -426,7 +441,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.debug("Solar stats fetch failed: %s", err)
 
-        # EV charging mode + schedule — best-effort, only Power Core
+        # EV charging mode + schedule â€” best-effort, only Power Core
         # hardware (with EV charger) exposes these commands. Errors are
         # swallowed so a device without EV support doesn't break the
         # whole coordinator refresh.
@@ -444,7 +459,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("EV state fetch failed: %s", err)
 
         import time as _time
-        # Facility ID (GSRN) — one-shot fetch, only on the first update
+        # Facility ID (GSRN) â€” one-shot fetch, only on the first update
         # (integration start). CRITICAL deviation from upstream beta27: NO
         # per-poll counter, no 5th-poll throttle; exactly one attempt per HA
         # run. On failure serve the last-known value if available.
@@ -468,7 +483,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await self._save_contract_cache()
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Balance contract fetch failed: %s", err)
-        # Emergency charge window — one-shot restore at integration start so
+        # Emergency charge window â€” one-shot restore at integration start so
         # a restart in the middle of a session keeps the switch on (#79).
         if not self._emergency_cache_loaded:
             self._emergency_cache_loaded = True
@@ -601,7 +616,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         client = self._ensure_client()
         creds = client.get_e2e_credentials(self.home_id, self._device_id, self._model)
 
-        # 1) Current mode + fixed values (0x20 → 6 bytes)
+        # 1) Current mode + fixed values (0x20 â†’ 6 bytes)
         session_nonce = generate_nonce()
         mode_pkt = build_subscription_packet(
             creds, _EV_TYPE_GET_STATE, session_nonce, payload=b"",
@@ -621,7 +636,7 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if mode_info is None:
             return None
 
-        # 2) Schedule bitmaps (0x21 → 7 bytes)
+        # 2) Schedule bitmaps (0x21 â†’ 7 bytes)
         sched_nonce = generate_nonce()
         sched_pkt = build_subscription_packet(
             creds, 0x21, sched_nonce, payload=b"",
@@ -907,10 +922,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Args:
             hass: Home Assistant instance.
             entry: Config entry.
-            parent: The slow :class:`EmaldoCoordinator` — used to share the
+            parent: The slow :class:`EmaldoCoordinator` â€” used to share the
                 authenticated REST client and device discovery.
             is_primary: ``True`` (default) means this coordinator owns the
-                session (sends keepalive, reconnects on expiry). ``False`` —
+                session (sends keepalive, reconnects on expiry). ``False`` â€”
                 secondary device shares the primary's session via
                 :meth:`PersistentE2ESession.read_power_flow_for_creds` and
                 never sends ``Alive(home)`` (#47 multi-device collision fix).
@@ -966,7 +981,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._stall_onset_monotonic: float = 0.0
         # Consecutive stream-mode full-reset escalations without a successful
         # read in between. Repeated resets indicate the device-push frames
-        # aren't reaching Home Assistant — either a device→relay failure
+        # aren't reaching Home Assistant â€” either a deviceâ†’relay failure
         # (drain_packets>0, frames=0) or a network limitation (no traffic at
         # all). Used to emit a one-time "switch to poll mode" recommendation
         # with the correct classification (#41, #47, #61).
@@ -1020,7 +1035,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._accessories_scan_task: asyncio.Task | None = None
         # Full-cabinet discovery flag: after the first successful scan,
         # subsequent scans re-probe only known slots (fast re-scan).
-        # Hardware add/remove requires integration restart — no periodic
+        # Hardware add/remove requires integration restart â€” no periodic
         # full rescan is performed.
         self._battery_startup_full_done: bool = False
         self._battery_store: Store = Store(
@@ -1097,18 +1112,18 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # Cumulative reconnect-reason breakdown, mirroring stats_stream_reconnects_total
         # so the diagnostic sensor compares like-for-like (the per-session reasons dict
         # in stream_diagnostics() resets on every session recreation, while the
-        # reconnect *count* is accumulated across sessions — #47 beta16h-C4).
+        # reconnect *count* is accumulated across sessions â€” #47 beta16h-C4).
         self.stats_stream_reconnect_reasons: dict[str, int] = {}
         self.stats_stream_last_reconnect_reason: str | None = None
         # Cumulative drained-datagram breakdown (beta16k), split into three
         # scopes and accumulated cross-session (same delta pattern as the
         # reconnect reasons above) so the sensor shows lifetime totals, not just
         # the current session's (which resets on every rebuild):
-        #   * stats_stream_keepalive_acks  — benign relay presence/keepalive
+        #   * stats_stream_keepalive_acks  â€” benign relay presence/keepalive
         #     chatter (alive/notice/srv/SERVER). Expected, ignore.
-        #   * stats_stream_relay_status    — decrypted benign relay status/ACK
+        #   * stats_stream_relay_status    â€” decrypted benign relay status/ACK
         #     pushes ({status_json, control_text}). Expected, ignore.
-        #   * stats_stream_drain_unparsed(+_categories) — frames we genuinely
+        #   * stats_stream_drain_unparsed(+_categories) â€” frames we genuinely
         #     could not parse ({binary, undecryptable}). undecryptable > 0 is the
         #     only value that indicates a real decrypt problem.
         self.stats_stream_keepalive_acks: int = 0
@@ -1181,7 +1196,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         # Session telemetry persisted for the next boot (reboot-resolution
         # correlation: did shutdown state get fixed by a restart, or was the
-        # outage external?). Written here — NOT in __init__.py unload — because
+        # outage external?). Written here â€” NOT in __init__.py unload â€” because
         # HA core stop does not call async_unload_entry, so unload-only writes
         # silently miss every restart. <__init__.py> unload additionally
         # re-writes the same summary (idempotent overwrite).
@@ -1216,13 +1231,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     _json.dump(payload, _fh, indent=2)
 
             # The write is blocking, so it runs in the executor, not on the
-            # loop — same pattern as __init__.py's _write_session. Exceptions
+            # loop â€” same pattern as __init__.py's _write_session. Exceptions
             # raised here are still covered by the guard below, which now
             # covers a failure raised *inside the executor thread* instead of
             # one raised inline.
             #
             # Deliberately NOT widened: asyncio.CancelledError (a BaseException,
-            # so this guard never covered it) keeps propagating — swallowing it
+            # so this guard never covered it) keeps propagating â€” swallowing it
             # would suppress the caller's cancellation and let a cancelled
             # shutdown keep running past its await. A closed-loop RuntimeError
             # is not special-cased either: the session close further below is
@@ -1322,10 +1337,10 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Return this device's E2E session.
 
         Each device creates its own persistent UDP socket (established as
-        itself via ``Alive(home)`` + ``Alive(device)`` + …).  The primary
+        itself via ``Alive(home)`` + ``Alive(device)`` + â€¦).  The primary
         device also publishes the current ``home_end_secret`` to a shared
         home-level dict so secondary devices use the same (non-rotated)
-        home secret — preventing the 21204 ping-pong (#47 Option C).
+        home secret â€” preventing the 21204 ping-pong (#47 Option C).
         """
         dev_session = self._get_device_session()
         if dev_session is not None and not dev_session.closed:
@@ -1355,7 +1370,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         if self._needs_fresh_creds:
             _LOGGER.info(
-                "E2E session rebuild after failure — forced fresh credentials"
+                "E2E session rebuild after failure â€” forced fresh credentials"
             )
         self._needs_fresh_creds = False
 
@@ -1442,7 +1457,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._set_device_session(_session)
         self._session_binding = binding
 
-        # Home secret rotation callback — primary publishes after rotation
+        # Home secret rotation callback â€” primary publishes after rotation
         _s = self._session
         self._unregister_home_secret = client.register_home_secret_callback(
             self._parent.home_id,
@@ -1518,13 +1533,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # Fix B (beta16k): close the cross-thread TOCTOU. Between
             # _ensure_session()'s `closed` check and the send below, the
             # session's socket can be torn down concurrently by another thread
-            # — the stream reconnect thread (primary) or the home-secret
+            # â€” the stream reconnect thread (primary) or the home-secret
             # rekey_home callback fired after a primary rotation (any device in
             # a multi-unit home). Sending on that dead fd raises
             # OSError(EBADF). Re-check `closed` immediately before the send; if
             # the session was invalidated under us, treat it as a transient
             # "session rebuilding" condition and let the caller (services.py)
-            # retry rather than sending on a dead socket. No re-acquire loop —
+            # retry rather than sending on a dead socket. No re-acquire loop â€”
             # a single deterministic bail-out keeps this safe during a mass
             # rekey across many units.
             if session.closed:
@@ -1580,7 +1595,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return True
         except OSError as exc:
             # Fix A (beta16k): a bare socket error here is almost always the
-            # benign cross-thread teardown race — the session's fd was closed by
+            # benign cross-thread teardown race â€” the session's fd was closed by
             # the stream reconnect thread or a rekey_home callback between our
             # `closed` re-check and recvfrom, surfacing as EBADF (Errno 9). This
             # is transient and retryable, not a bug: log it quietly (no
@@ -1628,13 +1643,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # Secondary cannot use legacy fallback (would send
                 # Alive(home) and collide with primary session).
                 return None
-            # Persistent/stream session gave up on this network — use the
+            # Persistent/stream session gave up on this network â€” use the
             # beta9-style one-shot read model (see _read_power_flow_legacy).
             return self._read_power_flow_legacy()
         session = self._ensure_session()
         # _ensure_session returns None when the session was invalidated
         # (rotate/reset) during its own first-frame wait (coordinator.py:1060).
-        # Treat that as "not ready yet" — let the normal re-create path on the
+        # Treat that as "not ready yet" â€” let the normal re-create path on the
         # next poll handle it instead of dereferencing None below and surfacing
         # a spurious AttributeError read_error reconnect.
         if session is None:
@@ -1652,7 +1667,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 PersistentE2ESession.register_device_key(
                     self.home_id, self.device_id, _creds["chat_secret"],
                 )
-            except Exception:  # noqa: BLE001 — best-effort; stream works without alt keys
+            except Exception:  # noqa: BLE001 â€” best-effort; stream works without alt keys
                 _LOGGER.debug("Failed to register device key for cross-device decryption")
         if self._is_primary and self._stream_mode:
             # Stream mode: the background receiver keeps the freshest frame
@@ -1685,7 +1700,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._invalidate_session_ref()
                 return data
             return self._merge_clustering_io_state(session, data)
-        # Collect diagnostic info — will be logged from main thread in _async_update_data
+        # Collect diagnostic info â€” will be logged from main thread in _async_update_data
         self._e2e_diag = f"host={session._creds.get('host','?')} has_log={session._log is not None} closed={session.closed}"
         data = session.read_power_flow()
         self._e2e_diag += f" result={'data' if data else 'None'}"
@@ -1975,7 +1990,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         The session's ``_stream_*`` counters reset to 0 whenever the session is
         rebuilt (reconnect / rebind). Tracking the last-seen value and adding
-        deltas — or the full value after a reset — keeps the diagnostic totals
+        deltas â€” or the full value after a reset â€” keeps the diagnostic totals
         monotonic across the whole integration lifetime.
         """
         for cur, last_attr, total_attr in (
@@ -1987,7 +2002,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             if cur >= last:
                 setattr(self, total_attr, getattr(self, total_attr) + (cur - last))
             else:
-                # Counter reset (new session object) — add the new value whole.
+                # Counter reset (new session object) â€” add the new value whole.
                 setattr(self, total_attr, getattr(self, total_attr) + cur)
             setattr(self, last_attr, cur)
         # Carry the per-session reconnect-reason breakdown into the cumulative
@@ -2051,7 +2066,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         The session measures RTT on every ``_send_raw`` exchange (handshake,
         keepalive, command). In stream mode the periodic poll reads a cached
         frame and returns before the legacy RTT-sampling block, so sample it
-        here too. No packets are sent and no protocol behavior changes — this
+        here too. No packets are sent and no protocol behavior changes â€” this
         only copies an already-computed side effect (#47 beta16h-C4 RTT gap).
         """
         rtt_ms = session.last_rtt_ms
@@ -2099,7 +2114,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._stall_onset_monotonic = _time.monotonic()
             _LOGGER.warning(
                 "E2E realtime stall detected (no successful poll in the last %d "
-                "polls) — snapshot captured for diagnostics: %s",
+                "polls) â€” snapshot captured for diagnostics: %s",
                 len(window),
                 self._stall_snapshot,
             )
@@ -2135,7 +2150,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Fresh receiver diagnostics; falls back to the cached snapshot.
 
         Session methods are executor-bound (receiver thread), so the live
-        read must hop threads. Any failure degrades to the cached dict —
+        read must hop threads. Any failure degrades to the cached dict â€”
         the stall gate must never raise.
         """
         session = getattr(self, "_session", None)
@@ -2146,7 +2161,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
                 if live:
                     self._stream_diag = dict(live)
-            except Exception:  # noqa: BLE001 — gate must never break recovery
+            except Exception:  # noqa: BLE001 â€” gate must never break recovery
                 pass
         return dict(self._stream_diag or {})
 
@@ -2175,7 +2190,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     #: After a write, poll the device's reported state until a frame received
     #: AFTER the command (the ``newer_than`` gate in ``_write_verified``) shows
     #: the requested value. A single 1s wait read a pre-command streamed
-    #: power-flow frame — the relay/device applies mode changes with internal
+    #: power-flow frame â€” the relay/device applies mode changes with internal
     #: latency (observed: the official app also lags) and the cached frame can
     #: be up to STREAM_STALE_AFTER seconds old, so confirmation falsely failed
     #: and the caller (e.g. Battery Optimizer) re-fired the command in a loop
@@ -2196,7 +2211,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Write a command and confirm the device actually applied it (#51, #61).
 
         Several switch commands were previously fire-and-forget: once the write
-        returned without raising, the caller assumed success — even though a
+        returned without raising, the caller assumed success â€” even though a
         command can be transmitted successfully and still never take effect on
         the device. This retries the write+read-back cycle and logs a warning
         instead of silently reporting success when it never converges.
@@ -2219,7 +2234,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         confirmed_value = None
         # Retry the full write+read-back cycle. beta26 removed this retry and
         # only polled reads behind a fresh-frame gate (calling
-        # read_fn(newer_than=...), which only _read_power_flow accepts — the
+        # read_fn(newer_than=...), which only _read_power_flow accepts â€” the
         # other three verified switches would have raised). The first 0x41 send
         # is sometimes dropped by the relay, so without the retry the device
         # never re-received the command and confirmation never converged.
@@ -2267,13 +2282,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 session.send_command_for_creds(0x41, payload, own_creds)
                 return
             except EmaldoAuthError:
-                # REST token expired — force full re-login on next _ensure_session
+                # REST token expired â€” force full re-login on next _ensure_session
                 self._parent._reset_client()  # noqa: SLF001
                 self._invalidate_session_ref()
                 if attempt == 1:
                     raise
             except EmaldoE2EError:
-                # UDP session closed/expired — drop it so _ensure_session reconnects
+                # UDP session closed/expired â€” drop it so _ensure_session reconnects
                 self._invalidate_session_ref()
                 if attempt == 1:
                     raise
@@ -2538,7 +2553,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Read-modify-write one peak-shaving reserve field under the pair-write lock.
 
         Both fields share a single 0x58 payload, so a number-entity write of one
-        field must merge with the device's CURRENT other field before sending —
+        field must merge with the device's CURRENT other field before sending â€”
         otherwise a concurrent or stale write would clobber it. The fresh read
         happens inside ``_peak_shaving_lock`` (RLock), then the nested
         ``_write_peak_shaving_points_verified`` re-enters the same lock. Returns
@@ -2617,7 +2632,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     continue
                 raise
             except EmaldoConnectionError:
-                # Short cloud/API disconnect — rebuild client once and retry.
+                # Short cloud/API disconnect â€” rebuild client once and retry.
                 self._parent._reset_client_auth()  # noqa: SLF001
                 if attempt == 0:
                     _time.sleep(1)
@@ -2637,7 +2652,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     )
     #: After this many consecutive stream full-reset escalations with no
     #: successful read in between, the device-push frames are almost certainly
-    #: being dropped by the network — recommend poll mode once (#41, #47).
+    #: being dropped by the network â€” recommend poll mode once (#41, #47).
     _STREAM_STALL_POLL_HINT_RESETS = 3
     #: Auxiliary-state (balancing / VPP / sell-limit / manual-selling) poll
     #: cadence, counted in successful power-flow reads. In STREAM mode these
@@ -2707,7 +2722,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Return last-known data, or raise UpdateFailed if none ever arrived.
 
         Keeping the previous values visible is correct once the session has
-        produced at least one good read — a transient gap must not blank the
+        produced at least one good read â€” a transient gap must not blank the
         sensors. But when NO successful read has ever happened and the failures
         have passed the tolerance threshold, returning ``None`` silently marks
         the coordinator update as successful, so HA reports the integration as
@@ -2722,7 +2737,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             >= self._MAX_EMPTY_READS
         ):
             raise UpdateFailed(
-                "No realtime E2E data received yet — the device's power-flow "
+                "No realtime E2E data received yet â€” the device's power-flow "
                 "frames are not reaching Home Assistant"
             )
         return self.data
@@ -2746,7 +2761,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._legacy_fallback_active = True
             _LOGGER.warning(
                 "E2E persistent session failed to recover after %d full resets "
-                "with no successful read — switching to legacy compatibility "
+                "with no successful read â€” switching to legacy compatibility "
                 "reads (beta9 model: fresh handshake + single read per poll). "
                 "This traverses networks where the persistent/stream session "
                 "cannot; it stays active until the integration is reloaded "
@@ -2806,7 +2821,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             _cycle_s = _now_poll - self._poll_cycle_prev_ts
             if _cycle_s > 30.0:
                 _LOGGER.warning(
-                    "E2E realtime poll cycle took %.1fs (expected <= ~%.0fs) — "
+                    "E2E realtime poll cycle took %.1fs (expected <= ~%.0fs) â€” "
                     "checking for executor hang / blocked socket",
                     _cycle_s,
                     self.update_interval.total_seconds(),
@@ -2842,7 +2857,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if _frame_age is not None and _frame_age < STREAM_STALE_AFTER:
                     self.stats_last_success = _time.time()
         except EmaldoAuthError as err:
-            # Token expired — force REST re-login and E2E reconnect.
+            # Token expired â€” force REST re-login and E2E reconnect.
             # This is self-healing (next poll re-logins automatically), so log at INFO.
             self._parent._reset_client()  # noqa: SLF001
             await self._close_session()
@@ -2932,7 +2947,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     # 21204 storm gate (2.5): read the receiver's LIVE drain
                     # diagnostics before rebuilding. A frameless stall with a
                     # decrypt-failure signature / relay logout means the chat
-                    # secret is being rejected — force fresh credentials on the
+                    # secret is being rejected â€” force fresh credentials on the
                     # next handshake instead of resetting into the same dead
                     # binding. Plain empty-stall resets keep the cached creds
                     # (the 2.2 client cooldown still throttles any rotation).
@@ -2943,7 +2958,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         self._storm_state.note_frameless_reset()
                     _LOGGER.warning(
                         "E2E stream wedged: no fresh frame for %d consecutive "
-                        "polls (~%ds) — in-place reconnect not recovering; "
+                        "polls (~%ds) â€” in-place reconnect not recovering; "
                         "resetting REST client and rebuilding session "
                         "(stream_diag=%s, fresh_creds=%s)",
                         self._empty_reads,
@@ -2977,7 +2992,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                                 "E2E realtime stream has stalled and been "
                                 "force-reset %d times without recovering. The "
                                 "relay IS delivering packets (%d seen, %d "
-                                "undecryptable) but none can be decrypted — this "
+                                "undecryptable) but none can be decrypted â€” this "
                                 "is a credential/decryption failure, not a "
                                 "network drop, so switching to poll mode may not "
                                 "help. Please report this log on the issue "
@@ -2989,13 +3004,13 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         elif _pkts > 0 and _frames == 0:
                             _LOGGER.warning(
                                 "E2E realtime stream has stalled and been "
-                                "force-reset %d times without recovering — the "
+                                "force-reset %d times without recovering â€” the "
                                 "relay is delivering packets (%d seen) but the "
                                 "device's push frames (%d) are not arriving. "
-                                "This is a device→relay issue, not a network "
+                                "This is a deviceâ†’relay issue, not a network "
                                 "drop on the HA side. Turning OFF 'Realtime "
-                                "stream mode' under Settings → Devices & "
-                                "services → Emaldo Battery → Configure is "
+                                "stream mode' under Settings â†’ Devices & "
+                                "services â†’ Emaldo Battery â†’ Configure is "
                                 "recommended (#41, #47, #61).",
                                 self._consecutive_stream_stall_resets,
                                 _pkts,
@@ -3004,18 +3019,18 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         else:
                             _LOGGER.warning(
                                 "E2E realtime stream has stalled and been "
-                                "force-reset %d times without recovering — no "
+                                "force-reset %d times without recovering â€” no "
                                 "relay traffic reaching Home Assistant (likely "
                                 "NAT/firewall/CGNAT). Turn OFF 'Realtime stream "
-                                "mode' under Settings → Devices & services → "
-                                "Emaldo Battery → Configure to use the poll "
+                                "mode' under Settings â†’ Devices & services â†’ "
+                                "Emaldo Battery â†’ Configure to use the poll "
                                 "model, which traverses NAT reliably "
                                 "(#41, #47).",
                                 self._consecutive_stream_stall_resets,
                             )
                     return self._keep_last_or_fail()
                 _LOGGER.debug(
-                    "E2E stream: no fresh frame (empty #%d) — keeping last "
+                    "E2E stream: no fresh frame (empty #%d) â€” keeping last "
                     "values, stream thread self-heals",
                     self._empty_reads,
                 )
@@ -3042,7 +3057,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 if self._undecryptable_streak == self._UNDECRYPTABLE_RESET_STREAK:
                     _LOGGER.warning(
                         "E2E power flow: relay responded but no frame was "
-                        "decryptable for %d consecutive polls — credentials "
+                        "decryptable for %d consecutive polls â€” credentials "
                         "likely stale; will force a fresh re-login "
                         "(powerflow_diag=%s)",
                         self._undecryptable_streak,
@@ -3066,7 +3081,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     self.stats_empty_reconnect_deferrals_healthy_keepalive += 1
                     _LOGGER.info(
                         "E2E empty reads reached reconnect threshold, but keepalive is healthy "
-                        "(%d/%d deferrals) — deferring reconnect",
+                        "(%d/%d deferrals) â€” deferring reconnect",
                         self._empty_reconnect_deferral_streak,
                         self._MAX_EMPTY_RECONNECT_DEFERRALS,
                     )
@@ -3101,7 +3116,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     )
                     if full_reset:
                         # 21204 storm gate (2.5), poll-mode counterpart: rotate
-                        # credentials only on real decrypt evidence — an
+                        # credentials only on real decrypt evidence â€” an
                         # undecryptable response streak (existing threshold) or
                         # the stream drain signature. Reconnect-only stalls keep
                         # cached creds; the session rebuild alone recovers them.
@@ -3115,7 +3130,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                             self._storm_state.note_frameless_reset()
                         _LOGGER.warning(
                             "E2E poll stall: %d reconnect cycles without recovery "
-                            "(undecryptable_streak=%d) — resetting REST client and "
+                            "(undecryptable_streak=%d) â€” resetting REST client and "
                             "rebuilding session with fresh credentials "
                             "(powerflow_diag=%s)",
                             self._consecutive_reconnects,
@@ -3131,7 +3146,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         return self._keep_last_or_fail()  # keep last known values visible
                     self._record_reconnect("empty_reads", _time.time())
                     if self._consecutive_reconnects <= self._WARN_RECONNECT_THRESHOLD:
-                        # Session expiry is normal relay behaviour — always INFO unless persistent
+                        # Session expiry is normal relay behaviour â€” always INFO unless persistent
                         _LOGGER.info(
                             "E2E power flow: %d consecutive empty reads, reconnecting "
                             "(episode drops: %d, reconnects: %d since start)",
@@ -3142,7 +3157,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     elif self._consecutive_reconnects == self._WARN_RECONNECT_THRESHOLD + 1:
                         _LOGGER.warning(
                             "E2E power flow: persistent connection failure after %d reconnect "
-                            "cycles — suppressing further reconnect warnings (episode drops: %d). "
+                            "cycles â€” suppressing further reconnect warnings (episode drops: %d). "
                             "Check device/relay connectivity.",
                             self._consecutive_reconnects - 1,
                             self._episode_drops,
@@ -3171,7 +3186,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.stats_last_failure = _time.time()
             _LOGGER.warning(
                 "E2E power flow rejected by sanity filter (channels=%s, abs_max_w=%d) "
-                "— keeping previous values",
+                "â€” keeping previous values",
                 ",".join(invalid_channels),
                 REALTIME_POWER_ABS_MAX_W,
             )
@@ -3222,7 +3237,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._consecutive_stream_stall_resets = 0
         # A successful read means the current transport is working, so clear the
         # legacy-fallback escalation counter (Fix E). Note: once
-        # ``_legacy_fallback_active`` latches it stays until reload — a working
+        # ``_legacy_fallback_active`` latches it stays until reload â€” a working
         # legacy read must not silently flip back to the persistent model.
         self._stall_resets_without_success = 0
         self.stats_successful_polls += 1
@@ -3232,7 +3247,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if was_first:
             _LOGGER.info(
                 "EMALDO_DEBUG[first_successful_refresh] realtime coordinator got its "
-                "first valid E2E read — entities will now start writing state"
+                "first valid E2E read â€” entities will now start writing state"
             )
             _boot_ts = getattr(self, "_boot_ts", None)
             if _boot_ts is not None:
@@ -3487,7 +3502,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             cached_count = len(self._battery_modules)
             # Full discovery on first successful scan; fast re-scan of known
             # slots thereafter.  Hardware add/remove requires integration
-            # restart — no periodic full rescan is performed.
+            # restart â€” no periodic full rescan is performed.
             slots = (
                 None
                 if not self._battery_startup_full_done
@@ -3549,7 +3564,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             )
             # Re-arm so the next successful poll retries the scan.  The
             # cadence stays safe: still gated by 60-poll (~10 min) intervals
-            # on recovered polls — this only avoids the extra-long wait when
+            # on recovered polls â€” this only avoids the extra-long wait when
             # the cold-start scan fails during a rejection storm.
             self._battery_modules_poll_counter = 59
         except Exception as err:  # noqa: BLE001
@@ -3560,14 +3575,14 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Read accessory state (fans + water sensor) over the persistent session.
 
         Option A (2026): runs on the realtime session socket under per-probe
-        lock instead of a throwaway one-shot UDP session — the one-shot Alive
+        lock instead of a throwaway one-shot UDP session â€” the one-shot Alive
         superseded the realtime session and caused 21204 expiry storms on the
         stream.
         """
         session = self._session
         if session is None or session.closed:
             return None
-        # Every Emaldo device is three-phase — always 3 inverters (fans).
+        # Every Emaldo device is three-phase â€” always 3 inverters (fans).
         inverters = 3
         return session.read_accessories_state(inverters=inverters)
 
@@ -3597,7 +3612,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 # created at sensor setup; this adds cabinet 1+ on discovery.
                 # ``water_async_add``/``water_cabinets_created`` live on the
                 # per-device item (set in sensor.async_setup_entry), so find the
-                # item whose realtime coordinator *is* this one — looking up the
+                # item whose realtime coordinator *is* this one â€” looking up the
                 # entry-level dict by entry_id returns None, which silently
                 # skipped registration (fixed here).
                 #
@@ -3691,8 +3706,8 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         Populates ``_battery_modules`` / ``_battery_module_slots`` (and the
         coordinator data dict when present) so per-slot battery sensors can be
         created at startup instead of waiting for the first live 0x06 scan.  A
-        loaded cache also marks full-cabinet discovery as done — the first scan
-        after restart is a fast re-scan of known slots.  Empty/corrupt cache →
+        loaded cache also marks full-cabinet discovery as done â€” the first scan
+        after restart is a fast re-scan of known slots.  Empty/corrupt cache â†’
         empty state, never crashes.
         """
         if self._battery_cache_loaded:
@@ -3723,7 +3738,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             if isinstance(self.data, dict):
                 self.data["battery_modules"] = self._battery_modules
                 self.data["battery_module_slots"] = self._battery_module_slots
-        # Persisted cache is fallback only — startup always does full
+        # Persisted cache is fallback only â€” startup always does full
         # discovery (_battery_startup_full_done stays False).
         _LOGGER.debug(
             "Battery cache loaded: %d modules, %d known slots",
@@ -3736,7 +3751,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         Both run inside the startup path (background first refresh from the
         entry setup), so the cache is available before sensor platform setup
-        reads the coordinator's data — battery module entities appear at
+        reads the coordinator's data â€” battery module entities appear at
         startup and a cold-start scan failure falls back to the cached list.
         """
         await self._load_battery_cache()
@@ -3750,7 +3765,7 @@ class EmaldoRealtimeCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     async def _close_session(self) -> None:
         """Close the current session (if any).
 
-        For non-primary coordinators this is a no-op — they share the
+        For non-primary coordinators this is a no-op â€” they share the
         primary's session and must not close it.
         """
         if self._session is not None:

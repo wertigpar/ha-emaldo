@@ -113,6 +113,26 @@ def _is_no_master_error(err: Exception) -> bool:
     return "masterbmtid" in msg and "null" in msg
 
 
+# Per-unit daily-stats paths -> home-aggregated master equivalents. The app
+# (r60.a / BmtDevice.g) switches to ``/bmt/master/stats/...`` for the master
+# unit of a multi-unit home; the request body (home_id/id/model) is unchanged.
+_MASTER_STATS_PATHS: dict[str, str] = {
+    "/bmt/stats/load/usage-v2/day/": "/bmt/master/stats/usage/day/",
+    "/bmt/stats/battery-v2/day/": "/bmt/master/stats/battery/day/",
+    "/bmt/stats/mppt-v2/day/": "/bmt/master/stats/mppt/day/",
+    "/bmt/stats/grid/day/": "/bmt/master/stats/grid/day/",
+    "/bmt/stats/battery/power-level/day/": (
+        "/bmt/master/stats/battery/power-level/day/"
+    ),
+    "/bmt/stats/revenue-v2/day/": "/bmt/master/stats/revenue/day/",
+}
+
+
+def _stats_path(path: str, master: bool) -> str:
+    """Return *path*, or its home-aggregated master variant when *master*."""
+    return _MASTER_STATS_PATHS.get(path, path) if master else path
+
+
 class EmaldoClient:
     """Client for the Emaldo battery system API.
 
@@ -625,7 +645,9 @@ class EmaldoClient:
     # Battery data
     # ------------------------------------------------------------------
 
-    def get_battery(self, home_id: str, device_id: str, model: str) -> dict:
+    def get_battery(
+        self, home_id: str, device_id: str, model: str, *, master: bool = False
+    ) -> dict:
         """Get battery overview (SoC, capacity, sensor, dual power).
 
         Returns a dict with keys: ``sensor``, ``power_level``, ``battery``, ``dual_power``.
@@ -634,11 +656,11 @@ class EmaldoClient:
 
         r_sensor = self.api_request("/bmt/stats/b-sensor/", json_data=dict(base))
         r_level = self.api_request(
-            "/bmt/stats/battery/power-level/day/",
+            _stats_path("/bmt/stats/battery/power-level/day/", master),
             json_data={**base, "offset": 0},
         )
         r_bat = self.api_request(
-            "/bmt/stats/battery-v2/day/",
+            _stats_path("/bmt/stats/battery-v2/day/", master),
             json_data={**base, "offset": 0},
         )
         try:
@@ -658,7 +680,13 @@ class EmaldoClient:
         }
 
     def get_usage(
-        self, home_id: str, device_id: str, model: str, offset: int = 0
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        offset: int = 0,
+        *,
+        master: bool = False,
     ) -> dict:
         """Get comprehensive daily usage data.
 
@@ -670,15 +698,25 @@ class EmaldoClient:
         """
         base = {"home_id": home_id, "id": device_id, "model": model, "offset": offset}
 
-        r_usage = self.api_request("/bmt/stats/load/usage-v2/day/", json_data=dict(base))
-        r_bat = self.api_request("/bmt/stats/battery-v2/day/", json_data=dict(base))
-        r_solar = self.api_request("/bmt/stats/mppt-v2/day/", json_data=dict(base))
+        r_usage = self.api_request(
+            _stats_path("/bmt/stats/load/usage-v2/day/", master),
+            json_data=dict(base),
+        )
+        r_bat = self.api_request(
+            _stats_path("/bmt/stats/battery-v2/day/", master),
+            json_data=dict(base),
+        )
+        r_solar = self.api_request(
+            _stats_path("/bmt/stats/mppt-v2/day/", master),
+            json_data=dict(base),
+        )
         r_grid = self.api_request(
-            "/bmt/stats/grid/day/",
+            _stats_path("/bmt/stats/grid/day/", master),
             json_data={**base, "get_real": True, "query_interval": 5},
         )
         r_level = self.api_request(
-            "/bmt/stats/battery/power-level/day/", json_data=dict(base)
+            _stats_path("/bmt/stats/battery/power-level/day/", master),
+            json_data=dict(base),
         )
 
         return {
@@ -690,7 +728,13 @@ class EmaldoClient:
         }
 
     def get_revenue(
-        self, home_id: str, device_id: str, model: str, offset: int = 0
+        self,
+        home_id: str,
+        device_id: str,
+        model: str,
+        offset: int = 0,
+        *,
+        master: bool = False,
     ) -> dict:
         """Get daily revenue data.
 
@@ -704,7 +748,9 @@ class EmaldoClient:
             "model": model,
             "offset": offset,
         }
-        result = self.api_request("/bmt/stats/revenue-v2/day/", json_data=json_data)
+        result = self.api_request(
+            _stats_path("/bmt/stats/revenue-v2/day/", master), json_data=json_data
+        )
         return result.get("Result") or {}
 
     def get_fcr(self, home_id: str) -> dict:
@@ -737,17 +783,25 @@ class EmaldoClient:
         )
         return result.get("Result") or {}
 
-    def get_power(self, home_id: str, device_id: str, model: str) -> dict:
+    def get_power(
+        self, home_id: str, device_id: str, model: str, *, master: bool = False
+    ) -> dict:
         """Get current realtime power readings.
 
         Returns a dict with keys: ``usage``, ``battery``, ``grid``, ``dual_power``.
         """
         base = {"home_id": home_id, "id": device_id, "model": model, "offset": 0}
 
-        r_usage = self.api_request("/bmt/stats/load/usage-v2/day/", json_data=dict(base))
-        r_bat = self.api_request("/bmt/stats/battery-v2/day/", json_data=dict(base))
+        r_usage = self.api_request(
+            _stats_path("/bmt/stats/load/usage-v2/day/", master),
+            json_data=dict(base),
+        )
+        r_bat = self.api_request(
+            _stats_path("/bmt/stats/battery-v2/day/", master),
+            json_data=dict(base),
+        )
         r_grid = self.api_request(
-            "/bmt/stats/grid/day/",
+            _stats_path("/bmt/stats/grid/day/", master),
             json_data={**base, "get_real": True, "query_interval": 5},
         )
         try:

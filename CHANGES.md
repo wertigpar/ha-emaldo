@@ -1,5 +1,19 @@
 # Changes
 
+## v1.0.0-beta53
+
+### Fixed
+
+- **Daily energy counters undercounted on a multi-unit installation**
+  ([#77](https://github.com/wertigpar/ha-emaldo/issues/77)). The REST daily
+  stats were always read from the per-unit endpoints (\/bmt/stats/...\), so a
+  config entry only saw its own unit's grid import, battery charge/discharge
+  and usage (reporter: import 13.63 kWh vs 48.3 kWh in the app). The official
+  app reads home-aggregated stats from \/bmt/master/stats/...\ when the device
+  is the home's master unit. The integration now does the same for the master
+  unit of a multi-unit home (usage, battery, grid, power-level and revenue
+  series). Single-unit homes and slave-unit entries are unchanged.
+
 ## v1.0.0-beta52
 
 ### Fixed
