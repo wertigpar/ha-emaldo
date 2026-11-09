@@ -9,7 +9,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 
 from .emaldo_lib.const import (
@@ -17,6 +17,7 @@ from .emaldo_lib.const import (
     DEFAULT_MARKER_HIGH,
     DEFAULT_MARKER_LOW,
     encode_override_action,
+    valid_marker_pair,
 )
 from .emaldo_lib.e2e import (
     EV_MODE_SCHEDULED,
@@ -307,24 +308,85 @@ def _get_coordinator_and_client(
     return schedule_coord, client
 
 
+def _marker_key(overrides: dict) -> tuple[int, int, bool]:
+    """Comparable (high, low, enable) header of an overrides dict."""
+    return (
+        int(overrides["high_marker"]),
+        int(overrides["low_marker"]),
+        bool(overrides.get("battery_range_override", False)),
+    )
+
+
+def _confirmed_fresh_markers(
+    current: dict | None,
+    cached: dict | None,
+    reread,
+) -> dict | None:
+    """Return the fresh read when it may replace the cached markers.
+
+    The cached snapshot is up to one poll interval old, so a Battery Range
+    change made in the Emaldo app in that window would be reverted by the
+    next override write. A fresh read that differs from the snapshot is
+    accepted only when a second read returns the same header: a single
+    garbage (but parse-valid) frame still never reaches a write (#72).
+    """
+    if not current or current is cached:
+        return None  # no fresh read (the caller fell back to the snapshot)
+    if not cached or cached.get("high_marker") is None \
+            or cached.get("low_marker") is None:
+        return None  # nothing to compare against; normal fallback applies
+    try:
+        key = _marker_key(current)
+        if not valid_marker_pair(key[1], key[0]) or key == _marker_key(cached):
+            return None
+        second = reread()
+        if second and _marker_key(second) == key:
+            _LOGGER.info(
+                "Battery Range changed on the device (high=%d%%, low=%d%%); "
+                "using it instead of the cached markers",
+                key[0], key[1],
+            )
+            return current
+    except (EmaldoE2EError, EmaldoConnectionError, KeyError, TypeError,
+            ValueError):
+        return None
+    _LOGGER.debug(
+        "Fresh override markers %s not confirmed by a second read; "
+        "keeping the cached markers", key,
+    )
+    return None
+
+
 def _resolve_markers(
     coord,
     current: dict | None,
     high: int | None,
     low: int | None,
     bro: bool | None,
+    *,
+    reread=None,
 ) -> tuple[int, int, bool]:
     """Resolve omitted override markers for a write (#72).
 
-    Priority: caller-supplied values → the coordinator's last validated
-    snapshot → the fresh read → hard-coded defaults. The fresh read is only
+    Priority: caller-supplied values → a fresh read confirmed by a second
+    read (``reread``) → the coordinator's last validated snapshot → the
+    fresh read → hard-coded defaults. An unconfirmed fresh read is only
     consulted when the snapshot has no markers, because echoing a read's
     markers straight back into a write lets a garbage (but parse-valid)
     frame silently rewrite the battery reserve range on the next override.
+
+    When the caller supplies only one marker and it conflicts with the
+    resolved other one, the resolved one is moved to keep ``low <= high``;
+    otherwise the payload would be refused and the write lost.
     """
     cached = None
     if coord is not None and coord.data:
         cached = coord.data.get("overrides")
+    high_supplied, low_supplied = high is not None, low is not None
+    if reread is not None and (high is None or low is None or bro is None):
+        confirmed = _confirmed_fresh_markers(current, cached, reread)
+        if confirmed is not None:
+            cached = confirmed
     if high is None:
         if cached and cached.get("high_marker") is not None:
             high = int(cached["high_marker"])
@@ -346,6 +408,19 @@ def _resolve_markers(
             bro = bool(current.get("battery_range_override", False))
         else:
             bro = False
+    if high < low and high_supplied != low_supplied:
+        if low_supplied:
+            _LOGGER.warning(
+                "Requested low marker %d%% is above the device's high marker "
+                "%d%%; raising the high marker to match", low, high,
+            )
+            high = low
+        else:
+            _LOGGER.warning(
+                "Requested high marker %d%% is below the device's low marker "
+                "%d%%; lowering the low marker to match", high, low,
+            )
+            low = high
     return high, low, bro
 
 
@@ -365,6 +440,7 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
         last_err = None
         last_reason = None
         slots = None
+        coord = None
         for attempt in range(3):
             try:
                 coord, client = _get_coordinator_and_client(
@@ -379,7 +455,10 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                 # Resolve omitted header fields — cache wins over the fresh
                 # read so a garbage frame never gets echoed back as a write
                 # (#72).
-                high, low, bro = _resolve_markers(coord, current, high, low, bro)
+                high, low, bro = _resolve_markers(
+                    coord, current, high, low, bro,
+                    reread=lambda: client.get_overrides(hid, did, model),
+                )
 
                 slot_value = encode_override_action(action, low, high)
 
@@ -418,14 +497,16 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
                     "Session expired setting override (attempt %d/3), "
                     "re-authenticating", attempt + 1
                 )
-                coord._reset_client()
+                if coord is not None:
+                    coord._reset_client()
             except (EmaldoE2EError, EmaldoConnectionError) as err:
                 last_err = err
                 _LOGGER.debug(
                     "Transient E2E error setting override (attempt %d/3): %s",
                     attempt + 1, err
                 )
-                coord._reset_client()
+                if coord is not None:
+                    coord._reset_client()
             if attempt < 2:
                 time.sleep(1)
         _LOGGER.error(
@@ -469,13 +550,19 @@ async def async_handle_set_slot_range(hass: HomeAssistant, call: ServiceCall) ->
 
 async def async_handle_apply_bulk_schedule(
     hass: HomeAssistant, call: ServiceCall
-) -> None:
-    """Handle the apply_bulk_schedule service call."""
+) -> dict[str, Any] | None:
+    """Handle the apply_bulk_schedule service call.
+
+    When the caller asks for a response, returns ``{"success",
+    "failure_reason", "high_marker", "low_marker"}`` so it can tell an
+    accepted schedule from a lost one and see the markers that were sent.
+    """
     device_id = call.data.get("device_id")
     slot_values = call.data["slots"]
     high = call.data.get("high_marker")
     low = call.data.get("low_marker")
     bro = call.data.get("battery_range_override")
+    outcome: dict[str, Any] = {"failure_reason": None}
     _LOGGER.debug(
         "apply_bulk_schedule called: device_id=%s, data_keys=%s",
         device_id, list(call.data.keys()),
@@ -499,7 +586,10 @@ async def async_handle_apply_bulk_schedule(
                 current = client.get_overrides(hid, did, model)
                 if current is None and coord.data:
                     current = coord.data.get("overrides")
-                high, low, bro = _resolve_markers(coord, current, high, low, bro)
+                high, low, bro = _resolve_markers(
+                    coord, current, high, low, bro,
+                    reread=lambda: client.get_overrides(hid, did, model),
+                )
 
                 rt = _get_target_set(
                     hass, coordinator_key="schedule", device_id=device_id,
@@ -563,9 +653,14 @@ async def async_handle_apply_bulk_schedule(
             last_err,
             f" (reason={last_reason})" if last_err is None else "",
         )
+        outcome["failure_reason"] = (
+            f"{type(last_err).__name__}: {last_err}"
+            if last_err is not None
+            else (last_reason or "unknown")
+        )
         return False
 
-    await hass.async_add_executor_job(_do_bulk)
+    ok = bool(await hass.async_add_executor_job(_do_bulk))
 
     # Refresh schedule data after applying overrides
     if device_id:
@@ -586,6 +681,15 @@ async def async_handle_apply_bulk_schedule(
                         "item_keys=%s entry_keys=%s",
                         list(item.keys()), list(entry_data.keys()),
                     )
+
+    if not call.return_response:
+        return None
+    return {
+        "success": ok,
+        "failure_reason": None if ok else outcome["failure_reason"],
+        "high_marker": high,
+        "low_marker": low,
+    }
 
 
 def _reset_one_device(
@@ -630,7 +734,10 @@ def _reset_one_device(
                 current = client.get_overrides(hid, did, model)
                 if current is None and coord.data:
                     current = coord.data.get("overrides")
-                high, low, bro = _resolve_markers(coord, current, high, low, bro)
+                high, low, bro = _resolve_markers(
+                    coord, current, high, low, bro,
+                    reread=lambda: client.get_overrides(hid, did, model),
+                )
 
                 slot_bytes = bytes([SLOT_NO_OVERRIDE] * 96)
                 rt = _get_target_set(
@@ -679,7 +786,10 @@ def _reset_one_device(
                 # Resolve omitted header fields — cache wins over the fresh
                 # read so a garbage frame never gets echoed back as a write
                 # (#72).
-                high, low, bro = _resolve_markers(coord, current, high, low, bro)
+                high, low, bro = _resolve_markers(
+                    coord, current, high, low, bro,
+                    reread=lambda: client.get_overrides(hid, did, model),
+                )
 
                 for i in range(start_slot, min(end_slot, 96)):
                     slots[i] = SLOT_NO_OVERRIDE
@@ -1355,8 +1465,10 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def handle_set_slot_range(call: ServiceCall) -> None:
         await async_handle_set_slot_range(hass, call)
 
-    async def handle_apply_bulk_schedule(call: ServiceCall) -> None:
-        await async_handle_apply_bulk_schedule(hass, call)
+    async def handle_apply_bulk_schedule(
+        call: ServiceCall,
+    ) -> dict[str, Any] | None:
+        return await async_handle_apply_bulk_schedule(hass, call)
 
     async def handle_reset_to_internal(call: ServiceCall) -> None:
         await async_handle_reset_to_internal(hass, call)
@@ -1387,6 +1499,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         SERVICE_APPLY_BULK_SCHEDULE,
         handle_apply_bulk_schedule,
         schema=SCHEMA_APPLY_BULK_SCHEDULE,
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN,
