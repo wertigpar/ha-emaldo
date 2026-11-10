@@ -1,5 +1,31 @@
 # Changes
 
+## v1.0.0-beta54
+
+### Fixed
+
+- **A Battery Range change made in the Emaldo app was reverted by the next
+  override write.** Writes that omit the markers (`apply_bulk_schedule`,
+  `set_slot_range`, `reset_to_internal`) re-sent the markers cached at the
+  last poll, up to 10 minutes old. A fresh read that differs from the cache
+  is now used when a second read returns the same markers, so a single
+  garbage frame still never reaches a write (#72).
+- **A single caller-supplied marker that conflicts with the device's other
+  marker no longer loses the write.** If only `low_marker` is passed and it
+  is above the device's high marker (or the reverse), the other marker is
+  moved to match instead of the payload being refused.
+- `set_slot_range` no longer raises `UnboundLocalError` when the first
+  attempt fails before the coordinator is resolved.
+
+### Added
+
+- **`emaldo.apply_bulk_schedule` returns its outcome** when called with
+  `return_response`: `{"success", "failure_reason", "high_marker",
+  "low_marker"}`. Battery Optimizer 0.3.28+ already asks for it and treats
+  `success: false` as a failed push
+  ([ha-battery-optimizer#36](https://github.com/wertigpar/ha-battery-optimizer/issues/36)).
+  Calls without `return_response` behave as before.
+
 ## v1.0.0-beta53
 
 ### Fixed
